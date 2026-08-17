@@ -1,0 +1,24 @@
+.page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: var(--noryx-color-light-grey);
+  padding: var(--noryx-space-4);
+}
+
+.card {
+  width: 100%;
+  max-width: 400px;
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--noryx-space-4);
+}
+
+.submit {
+  width: 100%;
+  margin-top: var(--noryx-space-2);
+}

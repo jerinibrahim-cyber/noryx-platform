@@ -1,0 +1,24 @@
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      minor-and-patch:
+        update-types: ["minor", "patch"]
+    open-pull-requests-limit: 10
+    # Critical/High findings from `pnpm audit` in CI (ci.yml `sca` job) block
+    # merge on the SLA already; Dependabot's job is staying current on
+    # everything else so that job stays boring.
+
+  - package-ecosystem: "docker"
+    directories:
+      - "/services/*"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

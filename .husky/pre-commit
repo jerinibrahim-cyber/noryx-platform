@@ -1,0 +1,10 @@
+npx lint-staged
+
+# Lightweight local guard so an obvious secret never leaves a developer's
+# machine at all — the real gate is CI's gitleaks job (.github/workflows/ci.yml),
+# which has the full rule set; this is a fast, dependency-free pre-filter.
+if git diff --cached -U0 | grep -EnI '(AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|xox[baprs]-[0-9A-Za-z-]{10,})' > /dev/null; then
+  echo "error: a commit appears to contain a credential pattern (AWS key, private key, or Slack token)." >&2
+  echo "If this is a false positive, use 'git commit --no-verify' after double-checking." >&2
+  exit 1
+fi

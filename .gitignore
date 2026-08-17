@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+build/
+.next/
+out/
+coverage/
+.turbo/
+
+# Env & secrets — never commit real values
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+!packages/**/fixtures/**/*.key
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# OS/editor
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# Local Postgres artifacts
+packages/db-core/*.db
+
+# Test artifacts
+junit.xml
+*.tsbuildinfo
+
+# Mobile
+apps/mobile/ios/Pods/
+apps/mobile/android/.gradle/
+apps/mobile/android/app/build/

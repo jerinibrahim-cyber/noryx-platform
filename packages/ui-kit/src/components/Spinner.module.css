@@ -1,0 +1,33 @@
+.spinner {
+  display: inline-block;
+  border-radius: var(--noryx-radius-full);
+  border: 3px solid var(--noryx-color-light-grey);
+  border-top-color: var(--noryx-color-secondary);
+  animation: noryx-spinner-rotate 0.7s linear infinite;
+}
+
+.sm {
+  width: 16px;
+  height: 16px;
+  border-width: 2px;
+}
+
+.md {
+  width: 24px;
+  height: 24px;
+}
+
+.lg {
+  width: 40px;
+  height: 40px;
+  border-width: 4px;
+}
+
+@keyframes noryx-spinner-rotate {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}

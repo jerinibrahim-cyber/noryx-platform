@@ -1,0 +1,92 @@
+/**
+ * Noryx design tokens — CSS custom property mirror of tokens.ts.
+ *
+ * This file is the web export of the same token values defined in
+ * tokens.ts. Keep the two in sync by hand: any color/type/spacing/radius/
+ * shadow value added or changed in tokens.ts must be mirrored here (and
+ * vice versa). tokens.ts is the export a future React Native app will
+ * consume directly (plain JS object, no CSS); this file is what web apps
+ * import once, globally, so every component's CSS Module can reference
+ * `var(--noryx-color-primary)` etc. instead of hardcoding hex values.
+ *
+ * Runtime tenant theming (see theme-provider.tsx) works by re-declaring
+ * a subset of these same custom property names on a scoped subtree via
+ * inline `style`, which cascades over these `:root` defaults.
+ */
+
+:root {
+  /* Sphere brand */
+  --noryx-color-primary: #1b2a63; /* indigo */
+  --noryx-color-secondary: #534fa2; /* violet */
+  --noryx-color-accent: #a8845c; /* gold */
+  --noryx-color-accent-light: #d9be94; /* gold-light */
+  --noryx-color-lavender: #c7c7dc;
+
+  /* Orbis brand */
+  --noryx-color-orbis-navy: #00224c;
+  --noryx-color-orbis-teal: #24709a;
+
+  /* Neutrals */
+  --noryx-color-ink: #1b2340;
+  --noryx-color-grey: #595959;
+  --noryx-color-light-grey: #efeef7;
+  --noryx-color-near-white: #f7f7fa;
+  --noryx-color-white: #ffffff;
+
+  /* Status */
+  --noryx-color-success: #3f7f5c;
+  --noryx-color-warning: #9c6b1f;
+  --noryx-color-danger: #9c3b3b;
+
+  /* Tenant branding hook — defaults to nothing (no custom logo) */
+  --noryx-logo-url: none;
+
+  /* Type scale */
+  --noryx-font-family-base: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --noryx-font-family-mono: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+  --noryx-font-size-xs: 0.75rem;
+  --noryx-font-size-sm: 0.875rem;
+  --noryx-font-size-base: 1rem;
+  --noryx-font-size-lg: 1.125rem;
+  --noryx-font-size-xl: 1.25rem;
+  --noryx-font-size-2xl: 1.5rem;
+  --noryx-font-size-3xl: 1.875rem;
+  --noryx-font-size-4xl: 2.25rem;
+  --noryx-font-weight-regular: 400;
+  --noryx-font-weight-medium: 500;
+  --noryx-font-weight-semibold: 600;
+  --noryx-font-weight-bold: 700;
+  --noryx-line-height-tight: 1.2;
+  --noryx-line-height-normal: 1.5;
+  --noryx-line-height-relaxed: 1.7;
+
+  /* Spacing scale — 4px base unit */
+  --noryx-space-0: 0px;
+  --noryx-space-1: 4px;
+  --noryx-space-2: 8px;
+  --noryx-space-3: 12px;
+  --noryx-space-4: 16px;
+  --noryx-space-5: 20px;
+  --noryx-space-6: 24px;
+  --noryx-space-8: 32px;
+  --noryx-space-10: 40px;
+  --noryx-space-12: 48px;
+  --noryx-space-16: 64px;
+  --noryx-space-20: 80px;
+  --noryx-space-24: 96px;
+
+  /* Radii */
+  --noryx-radius-none: 0px;
+  --noryx-radius-sm: 4px;
+  --noryx-radius-md: 8px;
+  --noryx-radius-lg: 12px;
+  --noryx-radius-xl: 16px;
+  --noryx-radius-full: 9999px;
+
+  /* Shadows */
+  --noryx-shadow-none: none;
+  --noryx-shadow-sm: 0 1px 2px rgba(27, 35, 64, 0.08);
+  --noryx-shadow-md: 0 2px 8px rgba(27, 35, 64, 0.12);
+  --noryx-shadow-lg: 0 8px 24px rgba(27, 35, 64, 0.16);
+  --noryx-shadow-focus: 0 0 0 3px rgba(83, 79, 162, 0.4);
+}

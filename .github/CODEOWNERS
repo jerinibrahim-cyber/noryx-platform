@@ -1,0 +1,15 @@
+# Pre-Development Readiness Review §7.1: minimum two approvals for any
+# change touching Finance, Payroll, Identity, or the Rules/DOA Engine; one
+# approval elsewhere. This file only names the *gate* — configure the
+# matching branch-protection rule ("Require review from Code Owners",
+# 2 approvals) on `main` in repo settings; CODEOWNERS alone does not
+# enforce the approval *count*, GitHub's branch protection setting does.
+
+# Default: one approval from any maintainer.
+*                           @jerinibrahim-cyber
+
+# Two-approval surfaces.
+/services/identity/         @jerinibrahim-cyber
+/packages/db-core/drizzle/rls/ @jerinibrahim-cyber
+/services/sphere-finance/   @jerinibrahim-cyber
+/services/sphere-hrms/      @jerinibrahim-cyber

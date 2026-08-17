@@ -1,0 +1,13 @@
+{
+  "key": "platform-identity",
+  "displayName": "Identity & Access",
+  "product": "platform",
+  "version": "0.1.0",
+  "basePath": "/v1/auth",
+  "serviceUrl": "http://identity:3001",
+  "publishesEvents": [],
+  "subscribesToEvents": [],
+  "requiredRoles": [],
+  "healthCheckPath": "/health/ready",
+  "public": true
+}

@@ -1,0 +1,80 @@
+name: noryx-platform
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: noryx
+      POSTGRES_PASSWORD: noryx
+      POSTGRES_DB: noryx
+    ports:
+      - "5432:5432"
+    volumes:
+      - noryx-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U noryx"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  identity:
+    build:
+      context: .
+      dockerfile: services/identity/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      PORT: 3001
+      DATABASE_URL: postgresql://noryx:noryx@postgres:5432/noryx
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-local-dev-only-secret-do-not-use-in-production}
+      MFA_ENCRYPTION_KEY: ${MFA_ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+    ports:
+      - "3001:3001"
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: services/api-gateway/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - identity
+    environment:
+      PORT: 3000
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-local-dev-only-secret-do-not-use-in-production}
+      NORYX_MODULES_MANIFEST_DIR: /app/modules
+    volumes:
+      # Plug-and-play in action for local dev: every service's noryx.module.json
+      # is bind-mounted straight into the gateway's manifest directory. Add a
+      # new service, add one more mount line here (or in CI's manifest-sync
+      # step for staging/production), and it's routable — no gateway code change.
+      - ./services/identity/noryx.module.json:/app/modules/identity.json:ro
+    ports:
+      - "3000:3000"
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - api-gateway
+    environment:
+      VITE_API_BASE_URL: http://localhost:3000
+    ports:
+      - "5173:80"
+
+volumes:
+  noryx-postgres-data:

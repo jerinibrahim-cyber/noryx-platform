@@ -1,0 +1,21 @@
+.card {
+  background-color: var(--noryx-color-white);
+  border: 1px solid var(--noryx-color-light-grey);
+  border-radius: var(--noryx-radius-lg);
+  box-shadow: var(--noryx-shadow-sm);
+  padding: var(--noryx-space-6);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--noryx-space-4);
+}
+
+.title {
+  font-size: var(--noryx-font-size-lg);
+  font-weight: var(--noryx-font-weight-semibold);
+  color: var(--noryx-color-ink);
+  margin: 0;
+}

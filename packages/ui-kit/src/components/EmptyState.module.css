@@ -1,0 +1,28 @@
+.container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: var(--noryx-space-12) var(--noryx-space-6);
+  color: var(--noryx-color-grey);
+  font-family: var(--noryx-font-family-base);
+}
+
+.icon {
+  margin-bottom: var(--noryx-space-4);
+  color: var(--noryx-color-lavender);
+}
+
+.title {
+  font-size: var(--noryx-font-size-lg);
+  font-weight: var(--noryx-font-weight-semibold);
+  color: var(--noryx-color-ink);
+  margin: 0 0 var(--noryx-space-2) 0;
+}
+
+.description {
+  font-size: var(--noryx-font-size-sm);
+  max-width: 40ch;
+  margin: 0 0 var(--noryx-space-4) 0;
+}
