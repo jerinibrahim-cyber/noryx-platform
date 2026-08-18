@@ -9,7 +9,7 @@
     "declarationMap": true,
     "sourceMap": true,
     "composite": false,
-    "incremental": true,
+    "incremental": false,
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true,
