@@ -1,32 +1,21 @@
-import postgres from "postgres";
-import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
+import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import * as schema from "./schema";
+import { createTenantScopedDbClient } from "./generic-client";
 
-let queryClient: postgres.Sql | undefined;
-let dbInstance: PostgresJsDatabase<typeof schema> | undefined;
+// db-core's own schema-bound client, built on the schema-agnostic
+// infrastructure in generic-client.ts. Behavior is unchanged from before
+// that file existed: DATABASE_URL env var, pool size 10 in production / 5
+// otherwise, one singleton pool per process.
+const client = createTenantScopedDbClient(schema);
 
 /** Singleton Drizzle client — one connection pool per process. */
 export function getDb(): PostgresJsDatabase<typeof schema> {
-  if (!dbInstance) {
-    const url = process.env.DATABASE_URL;
-    if (!url) {
-      throw new Error(
-        "DATABASE_URL must be set — see .env.example. Never defaults in code.",
-      );
-    }
-    queryClient = postgres(url, {
-      max: process.env.NODE_ENV === "production" ? 10 : 5,
-    });
-    dbInstance = drizzle(queryClient, { schema });
-  }
-  return dbInstance;
+  return client.getDb();
 }
 
 /** For graceful shutdown hooks / tests — closes the underlying connection pool. */
 export async function closeDb(): Promise<void> {
-  await queryClient?.end();
-  queryClient = undefined;
-  dbInstance = undefined;
+  return client.closeDb();
 }
 
 export type Db = PostgresJsDatabase<typeof schema>;

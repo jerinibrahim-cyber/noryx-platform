@@ -1,10 +1,8 @@
-import { sql } from "drizzle-orm";
-import type { PgTransaction } from "drizzle-orm/pg-core";
 import { getDb, type Db } from "./db";
-import type * as schema from "./schema";
+import * as schema from "./schema";
+import { withTenantScoped, type GenericTxClient } from "./generic-client";
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export type TxClient = PgTransaction<any, typeof schema, any>;
+export type TxClient = GenericTxClient<typeof schema>;
 
 /**
  * Runs `fn` inside a Postgres transaction with the tenant isolation session
@@ -16,19 +14,17 @@ export type TxClient = PgTransaction<any, typeof schema, any>;
  * policies (drizzle/rls/001_enable_rls.sql) treat a null/unset session
  * variable as "no tenant filter", so this must never be used for a
  * TENANT_INTERNAL or TENANT_EXTERNAL request.
+ *
+ * Same signature and behavior as before — this now delegates to the
+ * schema-agnostic withTenantScoped() in generic-client.ts, which is also
+ * what other modules (e.g. services/sphere-finance) call directly for
+ * their own schemas, so there is exactly one implementation of the SET
+ * LOCAL logic in the codebase, not one per module.
  */
 export async function withTenant<T>(
   tenantId: string | null,
   fn: (tx: TxClient) => Promise<T>,
   db: Db = getDb(),
 ): Promise<T> {
-  return db.transaction(async (tx) => {
-    if (tenantId) {
-      // set_config(..., true) === SET LOCAL: scoped to this transaction only.
-      await tx.execute(
-        sql`SELECT set_config('app.current_tenant_id', ${tenantId}, true)`,
-      );
-    }
-    return fn(tx);
-  });
+  return withTenantScoped<typeof schema, T>(tenantId, fn, db);
 }
