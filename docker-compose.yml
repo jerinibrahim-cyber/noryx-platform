@@ -44,6 +44,20 @@ services:
     ports:
       - "3001:3001"
 
+  sphere-finance:
+    build:
+      context: .
+      dockerfile: services/sphere-finance/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      PORT: 3010
+      DATABASE_URL: postgresql://noryx:noryx@postgres:5432/noryx
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-local-dev-only-secret-do-not-use-in-production}
+    ports:
+      - "3010:3010"
+
   api-gateway:
     build:
       context: .
@@ -51,6 +65,7 @@ services:
     restart: unless-stopped
     depends_on:
       - identity
+      - sphere-finance
     environment:
       PORT: 3000
       JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-local-dev-only-secret-do-not-use-in-production}
@@ -61,6 +76,7 @@ services:
       # new service, add one more mount line here (or in CI's manifest-sync
       # step for staging/production), and it's routable — no gateway code change.
       - ./services/identity/noryx.module.json:/app/modules/identity.json:ro
+      - ./services/sphere-finance/noryx.module.json:/app/modules/sphere-finance.json:ro
     ports:
       - "3000:3000"
 

@@ -122,7 +122,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        service: [identity, api-gateway]
+        service: [identity, api-gateway, sphere-finance]
     steps:
       - uses: actions/checkout@v4
       - name: Build image

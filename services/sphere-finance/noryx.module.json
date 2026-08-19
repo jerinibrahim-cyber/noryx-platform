@@ -1,0 +1,13 @@
+{
+  "key": "sphere-finance",
+  "displayName": "Finance",
+  "product": "sphere",
+  "version": "0.1.0",
+  "basePath": "/v1/finance",
+  "serviceUrl": "http://sphere-finance:3010",
+  "publishesEvents": [],
+  "subscribesToEvents": [],
+  "requiredRoles": ["finance.viewer", "finance.admin"],
+  "healthCheckPath": "/health/ready",
+  "public": false
+}
