@@ -5,6 +5,7 @@ import {
   Delete,
   ForbiddenException,
   Get,
+  HttpCode,
   Param,
   Patch,
   Post,
@@ -19,16 +20,22 @@ import type { AuthenticatedRequestUser } from "@noryx/shared-types";
 import { JournalEntriesService } from "./journal-entries.service";
 import { CreateJournalEntryDto } from "./dto/create-journal-entry.dto";
 import { UpdateJournalEntryDto } from "./dto/update-journal-entry.dto";
+import { ReverseJournalEntryDto } from "./dto/reverse-journal-entry.dto";
 
 /**
- * 2c-1 scope only: draft CRUD. No /post or /reverse routes exist yet —
- * those are 2c-2, a separate, not-yet-approved increment
- * (docs/finance-2c-journal-entry-service-proposal.md §0.1/§12/§8).
+ * 2c-1 (draft CRUD) + 2c-2 (posting, reversal) —
+ * docs/finance-2c-journal-entry-service-proposal.md §0.3/§5/§6/§8.
  *
  * finance.viewer/poster/admin can read; only finance.poster can write
- * (create/edit/delete a draft) — §9 of the 2c proposal. tenantId and
- * legalEntityId always come from the verified JWT, never from a request
- * param/body, same convention as AccountsController.
+ * (create/edit/delete a draft, post, reverse) — §9 of the 2c proposal.
+ * tenantId and legalEntityId always come from the verified JWT, never
+ * from a request param/body, same convention as AccountsController.
+ *
+ * `/post` returns `200` (not Nest's `@Post()` default of `201`) since it
+ * transitions an existing resource rather than creating one — matches
+ * the concurrent-posting test's expected "winner 200 / loser 409" shape
+ * (§11). `/reverse` keeps the `201` default since it does create a new
+ * journal entry.
  */
 @Controller("journal-entries")
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -110,6 +117,34 @@ export class JournalEntriesController {
       this.requireLegalEntityId(user),
       user.userId,
       id,
+    );
+  }
+
+  @Post(":id/post")
+  @HttpCode(200)
+  @Roles("finance.poster")
+  post(@CurrentUser() user: AuthenticatedRequestUser, @Param("id") id: string) {
+    return this.journalEntries.post(
+      this.requireTenantId(user),
+      this.requireLegalEntityId(user),
+      user.userId,
+      id,
+    );
+  }
+
+  @Post(":id/reverse")
+  @Roles("finance.poster")
+  reverse(
+    @CurrentUser() user: AuthenticatedRequestUser,
+    @Param("id") id: string,
+    @Body() dto: ReverseJournalEntryDto,
+  ) {
+    return this.journalEntries.reverse(
+      this.requireTenantId(user),
+      this.requireLegalEntityId(user),
+      user.userId,
+      id,
+      dto,
     );
   }
 

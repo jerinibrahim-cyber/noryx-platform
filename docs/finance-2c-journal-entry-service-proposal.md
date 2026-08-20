@@ -1,14 +1,27 @@
 # Finance Core — 2c: Journal Entry Service, Posting, and Reversal
 
-**Status: 2c-1 implemented (commit `383004d`) and under its second
-review round.** The pre-implementation checkpoint required two
-corrections (§0.1), both incorporated before 2c-1 was built. The
-post-implementation review of `383004d` found two further corrections
-required before final 2c-1 approval — both now incorporated: the
-accounting-period `close()` concurrency race (§3, §0.2) and the
-periods-RBAC documentation/implementation mismatch (§3, §9, §0.2).
-**2c-2 (posting, reversal, numbering) remains explicitly not approved
-and must not be started** until 2c-1 passes this final review.
+**Status: 2c-1 approved and closed (`db83d69`, on top of `383004d`).
+2c-2 (posting, numbering, reversal) is authorized and in implementation
+— §0.3.** 2c-1's pre-implementation checkpoint required two corrections
+(§0.1); its post-implementation review found two more (§0.2), both
+incorporated. 2c-2's authorization added two further mandatory
+concurrency acceptance criteria beyond §5.1/§6's original design — §0.3.
+
+## 0.3 Additional 2c-2 acceptance criteria, added at authorization
+
+2c-2 authorization approved the design already recorded in §5/§6/§7 as
+written (posting/reversal row-locking via `SELECT ... FOR UPDATE`,
+detailed there since the 2c-1 review round) and added two more races,
+not previously documented, as mandatory 2c-2 acceptance criteria —
+neither is a reason to reopen 2c-1:
+
+| item                               | requirement                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| B. Posting vs. draft-mutation race | 2c-1's `update()`/`remove()` did not lock the journal-entry row. Once posting acquires `SELECT ... FOR UPDATE` (§5.1), a concurrent `PATCH`/`DELETE` against the same row — not itself lock-guarded — could still interleave with a posting transaction mid-flight and surface the posted-immutability trigger's raw exception instead of a clean 4xx. Fixed by making `update()` and `remove()` also acquire `SELECT ... FOR UPDATE` on the journal-entry row as their first statement, exactly like `post()`/`reverse()` — every mutating operation on `journal_entries` now serializes through the same lock, so a `PATCH`/`DELETE` racing a `POST`/`reverse` either completes cleanly before the other starts or blocks until it finishes and then re-reads the row's current status, never observing or causing a torn write. New adversarial tests: concurrent `PATCH` vs `POST`, concurrent `DELETE` vs `POST` — both assert every response is a clean 2xx/4xx (never 5xx, never a raw trigger error), and that whichever ordering won is internally consistent (exactly one successful post, no orphaned state).                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| C. Posting vs. period-close race   | §5 step 7 originally resolved the covering period with a plain `SELECT` — nothing stopped a concurrent `PATCH /accounting-periods/:id/close` from closing that exact period between resolution and the posting `UPDATE`'s commit. Fixed by resolving the covering period with `SELECT ... FOR UPDATE` (whichever period covers the transaction date, regardless of its current status, so the "no period" vs. "period is closed" distinction is still reported precisely) as part of the same posting transaction, before allocating a journal number. This locks the period row for the duration of posting; a concurrent `close()` (itself an atomic `UPDATE ... WHERE status = 'OPEN'`, §0.2) either commits first (posting's lock wait ends, it re-reads `CLOSED`, and rejects with `422`) or blocks until posting commits (and then closes normally, since posting never modifies the period row). Same lock-and-reread principle as §0.2's period-close fix and §5.1/§6's row-locking, applied to the period side of a posting transaction instead of the entry side. Reused identically by `reverse()`'s own period resolution (§6 step 5), so the same protection applies to a reversal racing a period close. New adversarial test: concurrent `POST /journal-entries/:id/post` vs `PATCH /accounting-periods/:id/close` on the period covering that entry's transaction date — asserts the posting either succeeds against the still-open period or is cleanly rejected `422`, never partially applied, and that a closed period never ends up with a journal posted into it after the fact. |
+
+Both are implemented as part of 2c-2, not deferred further; §11's test plan
+below is updated accordingly.
 
 ## 0.2 Corrections from the post-implementation (2c-1) review
 
@@ -74,9 +87,10 @@ Journal entry service and API."
 ## 1. Scope for this increment
 
 **This increment is split into 2c-1 and 2c-2, each with its own review
-checkpoint (§0.1). Only 2c-1 is approved to implement right now.**
+checkpoint (§0.1). 2c-1 is approved and closed (`db83d69`); 2c-2 is
+authorized and in implementation (§0.3).**
 
-**2c-1 — approved, implement now:**
+**2c-1 — approved and closed:**
 
 - Accounting periods: create, list, close (`finance.admin`), with the
   period-overlap race mapped to a clean `409` (§3, §0.1).
@@ -90,8 +104,7 @@ checkpoint (§0.1). Only 2c-1 is approved to implement right now.**
 - Tenant/legal-entity isolation on every 2c-1 route, with adversarial
   tests.
 
-**2c-2 — documented here for the design record, NOT approved, NOT to be
-implemented as part of this work:**
+**2c-2 — authorized, in implementation (§0.3):**
 
 - Posting: `POST /journal-entries/:id/post`, full validation chain from
   proposal §3, atomic race-free numbering, and the row-locking
@@ -99,7 +112,9 @@ implemented as part of this work:**
 - Reversal: `POST /journal-entries/:id/reverse`, full business-rule set
   from proposal §2.
 - The posting-time re-validation of account ownership (§7 below).
-- The concurrent-POST adversarial test (§11).
+- Posting-vs-draft-mutation and posting-vs-period-close serialization
+  (§0.3 items B and C).
+- The full concurrency adversarial test list (§11).
 
 Out (unchanged from the proposal, not being reconsidered here):
 
@@ -398,8 +413,9 @@ checked (§6.3).
 
 ## 5. Posting — `POST /journal-entries/:id/post`
 
-**Not part of 2c-1. Documented here as the approved design for 2c-2,
-which is not being implemented now (§0.1).**
+**Not part of 2c-1; 2c-2, authorized and implemented per §0.3, including
+the additional period-locking correction (§0.3 item C) applied to step 7
+below.**
 
 ### 5.1 Concurrency correction (required for 2c-2, per §0.1)
 
@@ -452,14 +468,18 @@ One `withTenant()` transaction, validating in exactly the order proposal
    below with its own adversarial test list. Failure → `422`, with an
    error message that names the offending line but does **not** reveal
    whether the account exists in a different tenant/entity (see §6.4).
-7. **Period resolution** — `SELECT * FROM accounting_periods WHERE
-tenant_id = $1 AND legal_entity_id = $2 AND start_date <=
-$transactionDate AND end_date >= $transactionDate`. No covering
-   period → `422` ("no accounting period covers this transaction date").
-   Covering period `CLOSED` → `422` ("accounting period {code} is
-   closed"). `periodId` is never client-supplied — always resolved here,
-   matching the schema doc comment ("Resolved from transactionDate at
-   posting time — never client-supplied").
+7. **Period resolution, locked** — `SELECT * FROM accounting_periods
+WHERE tenant_id = $1 AND legal_entity_id = $2 AND start_date <=
+$transactionDate AND end_date >= $transactionDate FOR UPDATE` (§0.3 item
+   C correction — the original design used a plain `SELECT` here, which
+   raced against a concurrent period close). No covering period → `422`
+   ("no accounting period covers this transaction date"). Covering
+   period `CLOSED` → `422` ("accounting period {code} is closed").
+   `periodId` is never client-supplied — always resolved here, matching
+   the schema doc comment ("Resolved from transactionDate at posting
+   time — never client-supplied"). The `FOR UPDATE` lock is held for the
+   rest of this transaction, so a concurrent `close()` on this exact
+   period blocks until posting commits or rolls back.
 8. **Atomic journal number allocation** — the exact
    `INSERT ... ON CONFLICT ... DO UPDATE ... RETURNING` statement from
    2b's counter table, in the same transaction, formatted
@@ -485,8 +505,7 @@ note).
 
 ## 6. Reversal — `POST /journal-entries/:id/reverse`
 
-**Not part of 2c-1. Documented here as the approved design for 2c-2,
-which is not being implemented now (§0.1).**
+**Not part of 2c-1; 2c-2, authorized and implemented per §0.3.**
 
 `ReverseJournalEntryDto` (all optional): `transactionDate?` (defaults to
 "now"), `memo?` (defaults to `"Reversal of {originalJournalNumber}"`).
@@ -518,10 +537,11 @@ One `withTenant()` transaction:
    ("cannot reverse a reversal; reversal-of-reversal requires a
    dedicated correction workflow, not yet built" — matches proposal §2
    rule 3 exactly, including the stated rationale).
-5. **Resolve the reversal's own period** — same logic as posting step 7,
-   applied to the reversal's own `transactionDate` (default "now"),
-   independent of the original's period or its open/closed state. No
-   covering open period → `422`.
+5. **Resolve + lock the reversal's own period** — same logic as posting
+   step 7 including the `FOR UPDATE` lock (§0.3 item C), applied to the
+   reversal's own `transactionDate` (default "now"), independent of the
+   original's period or its open/closed state. No covering open period
+   → `422`.
 6. **Build reversal lines** — same `accountId`s and amounts as the
    original, `debitMinor`/`creditMinor` swapped, same relative order
    (fresh `1..N` numbering, independent of the original's numbering).
@@ -642,7 +662,7 @@ cross-tenant lookup is a plain 404, not "exists elsewhere").
 - Mirrors `accounts.e2e-spec.ts`'s existing "cross-legal-entity
   isolation" describe block, extended to every 2c-1 route.
 
-**2c-2 (deferred, not implemented now):**
+**2c-2 (authorized and implemented per §0.3):**
 
 - Post a journal in Tenant A / Entity A referencing an account that
   exists only in Tenant A / Entity B (added to the draft after it passed
@@ -661,10 +681,7 @@ cross-tenant lookup is a plain 404, not "exists elsewhere").
 ## 8. API surface
 
 Exactly as proposal §6 already specifies — reproduced here for
-completeness, nothing new added or removed. Routes marked `2c-2` are not
-implemented in this increment; calling them will 404 at the routing
-level (the routes don't exist yet) until 2c-2 is separately approved and
-built.
+completeness, nothing new added or removed.
 
 ```
 POST   /accounting-periods               create                    finance.admin    2c-1
@@ -676,8 +693,8 @@ GET    /journal-entries                  list                       any finance.
 GET    /journal-entries/:id              detail incl. lines         any finance.* role  2c-1
 PATCH  /journal-entries/:id              edit — DRAFT only          finance.poster   2c-1
 DELETE /journal-entries/:id              delete — DRAFT only        finance.poster   2c-1
-POST   /journal-entries/:id/post         DRAFT → POSTED             finance.poster   2c-2 (not built yet)
-POST   /journal-entries/:id/reverse      POSTED → new posted entry  finance.poster   2c-2 (not built yet)
+POST   /journal-entries/:id/post         DRAFT → POSTED             finance.poster   2c-2
+POST   /journal-entries/:id/reverse      POSTED → new posted entry  finance.poster   2c-2
 ```
 
 HTTP status conventions used throughout (consistent with `AccountsService`'s
@@ -718,10 +735,10 @@ Exactly proposal §9:
   line set embedded in `beforeState`/`afterState`. **2c-1.**
 - `CLOSE` on `entityType: "accounting_period"`. **2c-1.**
 - `POST` on `entityType: "journal_entry"` — `afterState` includes the
-  assigned `journal_number`. **2c-2, not implemented now.**
+  assigned `journal_number`. **2c-2.**
 - `REVERSE` on `entityType: "journal_entry"` — one row against the
   original (the linkage), plus the reversal's own `CREATE`+`POST` rows.
-  **2c-2, not implemented now.**
+  **2c-2.**
 
 All same-transaction writes, same shared `db-core` `auditLogs` table,
 same pattern `AccountsService` already established.
@@ -771,8 +788,7 @@ Extends `journal-engine-db-constraints.e2e-spec.ts`'s and
   `CreateAccountingPeriodDto` (`endDate` after `startDate`) — mirrors
   `create-account.dto.spec.ts`.
 
-**2c-2 (documented now, implemented and tested only once 2c-2 is
-separately approved):**
+**2c-2 (authorized and implemented per §0.3):**
 
 - Posting validation chain, one test per §5 step: <2 lines rejected,
   unbalanced rejected, inactive/wrong-entity/wrong-tenant account
@@ -801,28 +817,36 @@ separately approved):**
   committed — same pattern as the 2b balance-invariant transaction test).
 - §7.5's 2c-2 adversarial test list (posting-time cross-entity/tenant
   account checks, reversal cross-tenant/entity checks).
+- **Posting vs. draft-mutation race** (§0.3 item B): concurrent `PATCH`
+  vs `POST`, and concurrent `DELETE` vs `POST`, against the same `DRAFT`
+  entry — every response is a clean 2xx/4xx (never 5xx/a raw trigger
+  error), and whichever ordering won leaves the system in exactly one
+  internally-consistent state (one successful post, no orphaned state).
+- **Posting vs. period-close race** (§0.3 item C): concurrent
+  `POST /journal-entries/:id/post` vs
+  `PATCH /accounting-periods/:id/close` on the period covering that
+  entry's transaction date — posting either succeeds against the
+  still-open period or is cleanly rejected `422`, never partially
+  applied.
 
 ---
 
 ## 12. Sequencing — approved
 
-- **2c-1 (this commit, implement now)**: `FinanceAuthModule` for the two
-  new modules only (`AccountsModule` untouched), accounting periods CRUD
-  with the period-overlap race mapped to `409`, journal entry draft CRUD
-  (create/list/get/edit/delete) with account validation at create/edit
-  time, RBAC, audit logging, full e2e for all of the above. No posting or
-  reversal yet — an entry can be drafted but never posted; the `/post`
-  and `/reverse` routes do not exist yet.
-- **2c-2 (separate, future, requires its own review before starting)**:
-  posting (§5, with the `SELECT ... FOR UPDATE` concurrency fix from
-  §5.1) and reversal (§6, same fix applied to its own row lock), the
-  posting-time cross-entity re-validation (§7.1/§7.5's 2c-2 list), and
-  the concurrent-posting/concurrent-reversal adversarial tests (§11).
+- **2c-1 (`db83d69`, approved and closed)**: `FinanceAuthModule` for the
+  two new modules only (`AccountsModule` untouched), accounting periods
+  CRUD with the period-overlap race mapped to `409`, journal entry draft
+  CRUD (create/list/get/edit/delete) with account validation at
+  create/edit time, RBAC, audit logging, full e2e for all of the above.
+- **2c-2 (authorized, in implementation)**: posting (§5, with the
+  `SELECT ... FOR UPDATE` concurrency fix from §5.1 and the period-lock
+  correction from §0.3 item C), reversal (§6, same fixes applied to its
+  own row/period locks), the posting-time cross-entity re-validation
+  (§7.1/§7.5's 2c-2 list), draft-mutation-vs-posting serialization
+  (§0.3 item B), and the full adversarial test list in §11.
 
 This mirrors the 1a/1b and 2a/2b pattern of separating lower-risk
-scaffolding from the higher-risk invariant-critical logic. 2c-2 will get
-its own proposal-review cycle before any of it is written, exactly like
-this one.
+scaffolding from the higher-risk invariant-critical logic.
 
 ---
 
