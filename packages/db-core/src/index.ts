@@ -27,5 +27,19 @@ export * from "./schema";
 // Re-export the query builder helpers services need for WHERE clauses etc.,
 // so downstream services depend only on @noryx/db-core, not on drizzle-orm
 // directly, keeping the ORM choice swappable in one place if it ever needs
-// to change again.
-export { eq, and, or, sql, desc, asc } from "drizzle-orm";
+// to change again. gte/lte/isNull/ne added for Finance's 2c-1 (accounting
+// period date-range queries, optional-filter checks) — purely additive,
+// no change to any existing export.
+export {
+  eq,
+  and,
+  or,
+  sql,
+  desc,
+  asc,
+  gte,
+  lte,
+  isNull,
+  ne,
+  inArray,
+} from "drizzle-orm";

@@ -2,21 +2,28 @@ import {
   createTenantScopedDbClient,
   withTenantScoped,
   auditLogs,
+  legalEntities,
   type GenericTxClient,
 } from "@noryx/db-core";
 import * as financeSchema from "./schema";
 
 /**
  * Runtime query-building schema = Finance's own tables + db-core's
- * `auditLogs` table. `auditLogs` is platform-shared infrastructure (every
- * module writes to the same append-only audit trail — see db-core's
- * schema.ts and drizzle/rls/002_immutable_audit_log.sql) — it is NOT
- * migrated by Finance (drizzle.config.ts's schema is chart_of_accounts
- * only, see that file's comment), it's just included here so Finance's own
- * Drizzle client can type-safely INSERT into it in the same transaction as
- * a chart_of_accounts write, using this service's own connection pool.
+ * `auditLogs` and `legalEntities` tables. Both are platform-shared
+ * infrastructure Finance does not migrate or write beyond what's noted
+ * below (drizzle.config.ts's schema is Finance's own tables only, see
+ * that file's comment) — they're included here only so Finance's own
+ * Drizzle client can type-safely query/insert into them using this
+ * service's own connection pool:
+ *  - `auditLogs`: every module writes to the same append-only audit
+ *    trail (see db-core's schema.ts and
+ *    drizzle/rls/002_immutable_audit_log.sql).
+ *  - `legalEntities`: read-only from Finance's side (2c-1) — used solely
+ *    to resolve a journal entry's functional currency
+ *    (`legalEntities.currencyCode`) at draft-creation time from the
+ *    caller's own legal entity. Finance never writes this table.
  */
-const schema = { ...financeSchema, auditLogs };
+const schema = { ...financeSchema, auditLogs, legalEntities };
 
 const client = createTenantScopedDbClient(schema);
 

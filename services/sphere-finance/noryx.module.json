@@ -7,7 +7,7 @@
   "serviceUrl": "http://sphere-finance:3010",
   "publishesEvents": [],
   "subscribesToEvents": [],
-  "requiredRoles": ["finance.viewer", "finance.admin"],
+  "requiredRoles": ["finance.viewer", "finance.poster", "finance.admin"],
   "healthCheckPath": "/health/ready",
   "public": false
 }
