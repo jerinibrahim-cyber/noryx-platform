@@ -8,6 +8,7 @@ import {
   getDb as getPlatformDb,
   closeDb as closePlatformDb,
   tenants,
+  legalEntities,
   auditLogs,
   eq,
   sql,
@@ -18,26 +19,39 @@ import { ResponseInterceptor } from "../src/common/interceptors/response.interce
 import { AllExceptionsFilter } from "../src/common/filters/all-exceptions.filter";
 
 /**
- * This is the constraint-driven test for Milestone 1b: it must prove tenant
- * A cannot read/write tenant B's Chart of Accounts data, that RBAC is
+ * This is the constraint-driven test for Milestones 1b and 2a: it must
+ * prove tenant A cannot read/write tenant B's Chart of Accounts data,
+ * that two legal entities under the SAME tenant cannot read/write each
+ * other's Chart of Accounts either (2a retrofit —
+ * docs/finance-journal-engine-proposal.md §1.1/§1.2), that RBAC is
  * enforced server-side (not just declared in the manifest), and that the
- * audit trail is genuinely append-only at the database level — not merely
- * that CRUD endpoints return 200. Runs against a real Postgres instance,
- * the same non-superuser role/database used for Identity's own e2e/RLS
- * verification (Milestone 1a's checkpoint report explains why the role
- * must be non-superuser for any of this to mean anything).
+ * audit trail is genuinely append-only at the database level — not
+ * merely that CRUD endpoints return 200. Runs against a real Postgres
+ * instance, the same non-superuser role/database used for Identity's own
+ * e2e/RLS verification (Milestone 1a's checkpoint report explains why
+ * the role must be non-superuser for any of this to mean anything).
  */
-describe("Accounts (e2e) — RBAC, cross-tenant isolation, audit immutability", () => {
+describe("Accounts (e2e) — RBAC, tenant + legal-entity isolation, audit immutability", () => {
   let app: INestApplication;
   let jwt: JwtService;
   let tenantAId: string;
   let tenantBId: string;
+  // Two legal entities under tenant A, one under tenant B — proves both
+  // isolation dimensions independently rather than conflating them.
+  let legalEntityA1Id: string;
+  let legalEntityA2Id: string;
+  let legalEntityBId: string;
 
-  function tokenFor(tenantId: string, roles: string[], userId?: string) {
+  function tokenFor(
+    tenantId: string,
+    legalEntityId: string,
+    roles: string[],
+    userId?: string,
+  ) {
     return jwt.sign({
       sub: userId ?? randomUUID(),
       tenantId,
-      legalEntityId: null,
+      legalEntityId,
       tier: "TENANT_INTERNAL",
       roles,
       modules: ["sphere-finance"],
@@ -66,7 +80,9 @@ describe("Accounts (e2e) — RBAC, cross-tenant isolation, audit immutability", 
     // audit_logs.tenant_id has a real FK to tenants.id (db-core's schema),
     // so the audit-trail assertions below need genuine tenant rows, not
     // just random UUIDs — matching how a tenant would actually exist by
-    // the time Finance ever writes data for it.
+    // the time Finance ever writes data for it. chart_of_accounts now
+    // requires a real legal_entity_id too (2a retrofit) — no FK, but
+    // still resolved from a genuine JWT context in every request below.
     const db = getPlatformDb();
     const suffix = Date.now();
     const [tenantA] = await db
@@ -79,6 +95,43 @@ describe("Accounts (e2e) — RBAC, cross-tenant isolation, audit immutability", 
       .returning();
     tenantAId = tenantA!.id;
     tenantBId = tenantB!.id;
+
+    const [entityA1] = await db
+      .insert(legalEntities)
+      .values({
+        tenantId: tenantAId,
+        name: "Tenant A — Entity 1",
+        code: "A1",
+        countryCode: "AE",
+        currencyCode: "AED",
+        isDefault: true,
+      })
+      .returning();
+    const [entityA2] = await db
+      .insert(legalEntities)
+      .values({
+        tenantId: tenantAId,
+        name: "Tenant A — Entity 2",
+        code: "A2",
+        countryCode: "AE",
+        currencyCode: "AED",
+        isDefault: false,
+      })
+      .returning();
+    const [entityB] = await db
+      .insert(legalEntities)
+      .values({
+        tenantId: tenantBId,
+        name: "Tenant B — Entity 1",
+        code: "B1",
+        countryCode: "AE",
+        currencyCode: "AED",
+        isDefault: true,
+      })
+      .returning();
+    legalEntityA1Id = entityA1!.id;
+    legalEntityA2Id = entityA2!.id;
+    legalEntityBId = entityB!.id;
   });
 
   afterAll(async () => {
@@ -95,7 +148,7 @@ describe("Accounts (e2e) — RBAC, cross-tenant isolation, audit immutability", 
     });
 
     it("rejects a validly-signed token that has neither finance role (403)", async () => {
-      const token = tokenFor(tenantAId, ["some.other.role"]);
+      const token = tokenFor(tenantAId, legalEntityA1Id, ["some.other.role"]);
       await request(app.getHttpServer())
         .get("/v1/finance/accounts")
         .set("Authorization", `Bearer ${token}`)
@@ -103,7 +156,7 @@ describe("Accounts (e2e) — RBAC, cross-tenant isolation, audit immutability", 
     });
 
     it("allows finance.viewer to list (200)", async () => {
-      const token = tokenFor(tenantAId, ["finance.viewer"]);
+      const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.viewer"]);
       await request(app.getHttpServer())
         .get("/v1/finance/accounts")
         .set("Authorization", `Bearer ${token}`)
@@ -111,7 +164,7 @@ describe("Accounts (e2e) — RBAC, cross-tenant isolation, audit immutability", 
     });
 
     it("rejects finance.viewer attempting to create (403) — read role cannot write", async () => {
-      const token = tokenFor(tenantAId, ["finance.viewer"]);
+      const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.viewer"]);
       await request(app.getHttpServer())
         .post("/v1/finance/accounts")
         .set("Authorization", `Bearer ${token}`)
@@ -124,7 +177,7 @@ describe("Accounts (e2e) — RBAC, cross-tenant isolation, audit immutability", 
     });
 
     it("allows finance.admin to create (201)", async () => {
-      const token = tokenFor(tenantAId, ["finance.admin"]);
+      const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.admin"]);
       const res = await request(app.getHttpServer())
         .post("/v1/finance/accounts")
         .set("Authorization", `Bearer ${token}`)
@@ -135,6 +188,21 @@ describe("Accounts (e2e) — RBAC, cross-tenant isolation, audit immutability", 
         })
         .expect(201);
       expect(res.body.data.code).toMatch(/^RBAC-ADMIN-/);
+    });
+
+    it("rejects a token with no legal-entity context (403)", async () => {
+      const token = jwt.sign({
+        sub: randomUUID(),
+        tenantId: tenantAId,
+        legalEntityId: null,
+        tier: "TENANT_INTERNAL",
+        roles: ["finance.viewer"],
+        modules: ["sphere-finance"],
+      });
+      await request(app.getHttpServer())
+        .get("/v1/finance/accounts")
+        .set("Authorization", `Bearer ${token}`)
+        .expect(403);
     });
   });
 
@@ -148,7 +216,7 @@ describe("Accounts (e2e) — RBAC, cross-tenant isolation, audit immutability", 
         .post("/v1/finance/accounts")
         .set(
           "Authorization",
-          `Bearer ${tokenFor(tenantAId, ["finance.admin"])}`,
+          `Bearer ${tokenFor(tenantAId, legalEntityA1Id, ["finance.admin"])}`,
         )
         .send({
           code: `ISO-A-${suffix}`,
@@ -162,7 +230,7 @@ describe("Accounts (e2e) — RBAC, cross-tenant isolation, audit immutability", 
         .post("/v1/finance/accounts")
         .set(
           "Authorization",
-          `Bearer ${tokenFor(tenantBId, ["finance.admin"])}`,
+          `Bearer ${tokenFor(tenantBId, legalEntityBId, ["finance.admin"])}`,
         )
         .send({
           code: `ISO-B-${suffix}`,
@@ -178,7 +246,7 @@ describe("Accounts (e2e) — RBAC, cross-tenant isolation, audit immutability", 
         .get("/v1/finance/accounts")
         .set(
           "Authorization",
-          `Bearer ${tokenFor(tenantAId, ["finance.viewer"])}`,
+          `Bearer ${tokenFor(tenantAId, legalEntityA1Id, ["finance.viewer"])}`,
         )
         .expect(200);
       const ids = res.body.data.map((a: { id: string }) => a.id);
@@ -191,7 +259,7 @@ describe("Accounts (e2e) — RBAC, cross-tenant isolation, audit immutability", 
         .get("/v1/finance/accounts")
         .set(
           "Authorization",
-          `Bearer ${tokenFor(tenantBId, ["finance.viewer"])}`,
+          `Bearer ${tokenFor(tenantBId, legalEntityBId, ["finance.viewer"])}`,
         )
         .expect(200);
       const ids = res.body.data.map((a: { id: string }) => a.id);
@@ -204,7 +272,7 @@ describe("Accounts (e2e) — RBAC, cross-tenant isolation, audit immutability", 
         .get(`/v1/finance/accounts/${accountBId}`)
         .set(
           "Authorization",
-          `Bearer ${tokenFor(tenantAId, ["finance.viewer"])}`,
+          `Bearer ${tokenFor(tenantAId, legalEntityA1Id, ["finance.viewer"])}`,
         )
         .expect(404);
     });
@@ -214,7 +282,7 @@ describe("Accounts (e2e) — RBAC, cross-tenant isolation, audit immutability", 
         .get(`/v1/finance/accounts/${accountAId}`)
         .set(
           "Authorization",
-          `Bearer ${tokenFor(tenantBId, ["finance.viewer"])}`,
+          `Bearer ${tokenFor(tenantBId, legalEntityBId, ["finance.viewer"])}`,
         )
         .expect(404);
     });
@@ -224,7 +292,7 @@ describe("Accounts (e2e) — RBAC, cross-tenant isolation, audit immutability", 
         .patch(`/v1/finance/accounts/${accountBId}/archive`)
         .set(
           "Authorization",
-          `Bearer ${tokenFor(tenantAId, ["finance.admin"])}`,
+          `Bearer ${tokenFor(tenantAId, legalEntityA1Id, ["finance.admin"])}`,
         )
         .expect(404);
 
@@ -234,7 +302,7 @@ describe("Accounts (e2e) — RBAC, cross-tenant isolation, audit immutability", 
         .get(`/v1/finance/accounts/${accountBId}`)
         .set(
           "Authorization",
-          `Bearer ${tokenFor(tenantBId, ["finance.viewer"])}`,
+          `Bearer ${tokenFor(tenantBId, legalEntityBId, ["finance.viewer"])}`,
         )
         .expect(200);
       expect(res.body.data.isActive).toBe(true);
@@ -245,16 +313,130 @@ describe("Accounts (e2e) — RBAC, cross-tenant isolation, audit immutability", 
         .patch(`/v1/finance/accounts/${accountBId}/archive`)
         .set(
           "Authorization",
-          `Bearer ${tokenFor(tenantBId, ["finance.admin"])}`,
+          `Bearer ${tokenFor(tenantBId, legalEntityBId, ["finance.admin"])}`,
         )
         .expect(200);
       expect(res.body.data.isActive).toBe(false);
     });
   });
 
+  describe("cross-legal-entity isolation within the same tenant — the 2a retrofit's negative-case proof", () => {
+    let accountA1Id: string;
+    let accountA2Id: string;
+
+    beforeAll(async () => {
+      const suffix = Date.now();
+      // Same account code on purpose — the whole point of the 2a
+      // uniqueness change is that this succeeds under two different
+      // legal entities of the SAME tenant.
+      const resA1 = await request(app.getHttpServer())
+        .post("/v1/finance/accounts")
+        .set(
+          "Authorization",
+          `Bearer ${tokenFor(tenantAId, legalEntityA1Id, ["finance.admin"])}`,
+        )
+        .send({
+          code: `SHARED-${suffix}`,
+          name: "Entity 1 Account",
+          type: "ASSET",
+        })
+        .expect(201);
+      accountA1Id = resA1.body.data.id;
+
+      const resA2 = await request(app.getHttpServer())
+        .post("/v1/finance/accounts")
+        .set(
+          "Authorization",
+          `Bearer ${tokenFor(tenantAId, legalEntityA2Id, ["finance.admin"])}`,
+        )
+        .send({
+          code: `SHARED-${suffix}`,
+          name: "Entity 2 Account",
+          type: "ASSET",
+        })
+        .expect(201);
+      accountA2Id = resA2.body.data.id;
+    });
+
+    it("the same account code succeeds under two legal entities of the same tenant", () => {
+      expect(accountA1Id).not.toBe(accountA2Id);
+    });
+
+    it("entity 1 lists: sees its own account, does NOT see entity 2's — same tenant, same RLS session var", async () => {
+      const res = await request(app.getHttpServer())
+        .get("/v1/finance/accounts")
+        .set(
+          "Authorization",
+          `Bearer ${tokenFor(tenantAId, legalEntityA1Id, ["finance.viewer"])}`,
+        )
+        .expect(200);
+      const ids = res.body.data.map((a: { id: string }) => a.id);
+      expect(ids).toContain(accountA1Id);
+      expect(ids).not.toContain(accountA2Id);
+    });
+
+    it("entity 2 lists: sees its own account, does NOT see entity 1's", async () => {
+      const res = await request(app.getHttpServer())
+        .get("/v1/finance/accounts")
+        .set(
+          "Authorization",
+          `Bearer ${tokenFor(tenantAId, legalEntityA2Id, ["finance.viewer"])}`,
+        )
+        .expect(200);
+      const ids = res.body.data.map((a: { id: string }) => a.id);
+      expect(ids).toContain(accountA2Id);
+      expect(ids).not.toContain(accountA1Id);
+    });
+
+    it("entity 1 cannot directly read entity 2's account by id (404), even within the same tenant", async () => {
+      await request(app.getHttpServer())
+        .get(`/v1/finance/accounts/${accountA2Id}`)
+        .set(
+          "Authorization",
+          `Bearer ${tokenFor(tenantAId, legalEntityA1Id, ["finance.viewer"])}`,
+        )
+        .expect(404);
+    });
+
+    it("entity 1 cannot archive entity 2's account, and the attempt has no effect", async () => {
+      await request(app.getHttpServer())
+        .patch(`/v1/finance/accounts/${accountA2Id}/archive`)
+        .set(
+          "Authorization",
+          `Bearer ${tokenFor(tenantAId, legalEntityA1Id, ["finance.admin"])}`,
+        )
+        .expect(404);
+
+      const res = await request(app.getHttpServer())
+        .get(`/v1/finance/accounts/${accountA2Id}`)
+        .set(
+          "Authorization",
+          `Bearer ${tokenFor(tenantAId, legalEntityA2Id, ["finance.viewer"])}`,
+        )
+        .expect(200);
+      expect(res.body.data.isActive).toBe(true);
+    });
+
+    it("a child account's parentId must belong to the same legal entity — cross-entity parent is rejected (400)", async () => {
+      await request(app.getHttpServer())
+        .post("/v1/finance/accounts")
+        .set(
+          "Authorization",
+          `Bearer ${tokenFor(tenantAId, legalEntityA2Id, ["finance.admin"])}`,
+        )
+        .send({
+          code: `CHILD-${Date.now()}`,
+          name: "Should be rejected",
+          type: "ASSET",
+          parentId: accountA1Id, // belongs to entity 1, caller is entity 2
+        })
+        .expect(400);
+    });
+  });
+
   describe("audit trail — written per-action and genuinely append-only", () => {
-    it("records a CREATE entry scoped to the acting tenant, and Postgres itself rejects tampering with it", async () => {
-      const token = tokenFor(tenantAId, ["finance.admin"]);
+    it("records a CREATE entry scoped to the acting tenant and legal entity, and Postgres itself rejects tampering with it", async () => {
+      const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.admin"]);
       const code = `AUDIT-${Date.now()}`;
       const res = await request(app.getHttpServer())
         .post("/v1/finance/accounts")
@@ -273,6 +455,7 @@ describe("Accounts (e2e) — RBAC, cross-tenant isolation, audit immutability", 
       expect(rows[0]!.action).toBe("CREATE");
       expect(rows[0]!.entityType).toBe("chart_of_accounts");
       expect(rows[0]!.tenantId).toBe(tenantAId);
+      expect(rows[0]!.legalEntityId).toBe(legalEntityA1Id);
 
       // Immutability: the same append-only trigger proven in Phase 0
       // (packages/db-core/drizzle/rls/002_immutable_audit_log.sql) must
@@ -290,7 +473,7 @@ describe("Accounts (e2e) — RBAC, cross-tenant isolation, audit immutability", 
     });
 
     it("records an ARCHIVE entry with before/after state", async () => {
-      const token = tokenFor(tenantAId, ["finance.admin"]);
+      const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.admin"]);
       const code = `AUDIT-ARCHIVE-${Date.now()}`;
       const created = await request(app.getHttpServer())
         .post("/v1/finance/accounts")
