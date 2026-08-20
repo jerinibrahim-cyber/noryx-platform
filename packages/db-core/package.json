@@ -16,12 +16,12 @@
     "test": "jest --passWithNoTests"
   },
   "dependencies": {
-    "drizzle-orm": "^0.36.4",
+    "drizzle-orm": "^0.45.2",
     "postgres": "^3.4.5"
   },
   "devDependencies": {
     "@noryx/eslint-config": "workspace:*",
-    "drizzle-kit": "^0.28.1",
+    "drizzle-kit": "^0.31.10",
     "typescript": "^5.6.0",
     "ts-node": "^10.9.0",
     "jest": "^29.7.0",

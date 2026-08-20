@@ -27,13 +27,13 @@
     "@nestjs/config": "^3.3.0",
     "passport": "^0.7.0",
     "passport-jwt": "^4.0.1",
-    "class-validator": "^0.14.1",
+    "class-validator": "^0.15.1",
     "class-transformer": "^0.5.1",
     "dotenv": "^16.4.5",
     "helmet": "^7.1.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
-    "drizzle-orm": "^0.36.4",
+    "drizzle-orm": "^0.45.2",
     "postgres": "^3.4.5"
   },
   "devDependencies": {
@@ -51,6 +51,6 @@
     "ts-node-dev": "^2.0.0",
     "supertest": "^7.0.0",
     "typescript": "^5.6.0",
-    "drizzle-kit": "^0.28.1"
+    "drizzle-kit": "^0.31.10"
   }
 }
