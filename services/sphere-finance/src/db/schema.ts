@@ -211,9 +211,31 @@ export const journalEntries = pgTable(
     memo: text("memo"),
     /// Reversal linkage — both self-referential FKs, both nullable.
     /// reversedByJournalEntryId can only transition NULL -> a value, and
-    /// only in isolation from every other posted-entry field, enforced by
-    /// the immutability trigger (drizzle/constraints/, §3, §9), not just
-    /// application code.
+    /// only in isolation from every other posted-entry field (including
+    /// updatedAt — the trigger checks it column-by-column, not just that
+    /// reversed_by_journal_entry_id is present), enforced by the
+    /// immutability trigger (drizzle/constraints/003_..., §3, §9), not
+    /// just application code.
+    ///
+    /// 2b/2c boundary (explicit, not to be left ambiguous): what 2b's
+    /// database layer guarantees for these two columns is (a) the target
+    /// id exists in journal_entries (plain FK), (b) reversedByJournalEntryId
+    /// can only move NULL -> a value exactly once, and (c) every other
+    /// column on the row is frozen once POSTED. The database does NOT
+    /// verify, and 2b does not claim, that the linked row is actually a
+    /// legitimate reversal: same tenant, same legal entity, target status
+    /// is POSTED, target is actually the entry this one reverses (or vice
+    /// versa), target is not itself a reversal (no chained reversals), or
+    /// target != this row's own id. All of that is application-layer
+    /// business validation, deferred to 2c (the journal entry service),
+    /// which must have an adversarial test for every one of those cases
+    /// before reversal posting ships. Same boundary applies to
+    /// accountId below: the FK only proves the account row exists, not
+    /// that it belongs to this entry's tenant/legal entity — 2c's posting
+    /// logic must never allow a journal in one legal entity to reference
+    /// an account belonging to a different legal entity of the same
+    /// tenant (tenant RLS alone will not catch that) or a different
+    /// tenant entirely.
     reversalOfJournalEntryId: uuid("reversal_of_journal_entry_id"),
     reversedByJournalEntryId: uuid("reversed_by_journal_entry_id"),
     createdBy: uuid("created_by"),
@@ -284,7 +306,14 @@ export const journalLines = pgTable(
       .defaultNow(),
   },
   (t) => [
-    index("journal_lines_journal_entry_idx").on(t.journalEntryId),
+    // Composite UNIQUE, not a plain index: guarantees at the database
+    // level that no journal entry has two lines sharing a line_number.
+    // The same line_number is still valid across two different journal
+    // entries (the constraint is scoped per journalEntryId).
+    unique("journal_lines_entry_line_number_unique").on(
+      t.journalEntryId,
+      t.lineNumber,
+    ),
     index("journal_lines_account_idx").on(t.accountId),
     check(
       "journal_lines_amounts_non_negative",
@@ -293,6 +322,14 @@ export const journalLines = pgTable(
     check(
       "journal_lines_single_sided",
       sql`NOT (${t.debitMinor} > 0 AND ${t.creditMinor} > 0)`,
+    ),
+    // Reject meaningless zero/zero lines — a line must move value on at
+    // least one side. Combined with the single-sided check above, every
+    // line is either debit-only (credit = 0, debit > 0) or credit-only
+    // (debit = 0, credit > 0).
+    check(
+      "journal_lines_nonzero",
+      sql`${t.debitMinor} > 0 OR ${t.creditMinor} > 0`,
     ),
     // The cross-row balance invariant (SUM(debit) = SUM(credit) per
     // POSTED journal_entries) and posted-row immutability cannot be

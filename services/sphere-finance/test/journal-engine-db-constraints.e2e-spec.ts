@@ -385,5 +385,75 @@ describe("Journal Engine — DB-level accounting invariants (2b, schema layer on
         `,
       ).rejects.toThrow(/immutable once POSTED/);
     });
+
+    it("rejects an updated_at-only mutation on a POSTED entry — no column is exempted from immutability, not even the timestamp", async () => {
+      // A fresh, not-yet-reversed entry: postedEntryId was already reversed
+      // by an earlier test in this block, which would trip the "already
+      // reversed" guard first rather than exercising the column check this
+      // test targets.
+      const freshEntryId = await createDraftEntry();
+      await insertLine(freshEntryId, 1, assetAccountId, 3000, 0);
+      await insertLine(freshEntryId, 2, revenueAccountId, 0, 3000);
+      await sql`
+        UPDATE journal_entries
+        SET status = 'POSTED', posted_at = now(), journal_number = ${"JE-UPDT-" + randomUUID().slice(0, 8)}
+        WHERE id = ${freshEntryId}
+      `;
+
+      await expect(
+        sql`UPDATE journal_entries SET updated_at = now() WHERE id = ${freshEntryId}`,
+      ).rejects.toThrow(/immutable once POSTED/);
+    });
+  });
+
+  describe("journal_lines line-number uniqueness — UNIQUE(journal_entry_id, line_number)", () => {
+    it("rejects a duplicate line_number within the same journal entry", async () => {
+      const entryId = await createDraftEntry();
+      await insertLine(entryId, 1, assetAccountId, 1000, 0);
+      await expect(
+        insertLine(entryId, 1, revenueAccountId, 0, 1000),
+      ).rejects.toThrow(/journal_lines_entry_line_number_unique/);
+    });
+
+    it("allows the same line_number across two different journal entries", async () => {
+      const entryA = await createDraftEntry();
+      const entryB = await createDraftEntry();
+      await insertLine(entryA, 1, assetAccountId, 1000, 0);
+      // no error — the uniqueness is scoped per journal_entry_id, not global
+      await insertLine(entryB, 1, assetAccountId, 2000, 0);
+    });
+  });
+
+  describe("journal_lines nonzero — CHECK(debit_minor > 0 OR credit_minor > 0)", () => {
+    it("rejects a line with both debit and credit at zero", async () => {
+      const entryId = await createDraftEntry();
+      await expect(
+        insertLine(entryId, 1, assetAccountId, 0, 0),
+      ).rejects.toThrow(/journal_lines_nonzero/);
+    });
+
+    it("accepts a debit-only line", async () => {
+      const entryId = await createDraftEntry();
+      await insertLine(entryId, 1, assetAccountId, 500, 0);
+    });
+
+    it("accepts a credit-only line", async () => {
+      const entryId = await createDraftEntry();
+      await insertLine(entryId, 1, revenueAccountId, 0, 500);
+    });
+
+    it("rejects a line with both debit and credit positive (single-sided rule, not the new nonzero rule)", async () => {
+      const entryId = await createDraftEntry();
+      await expect(
+        insertLine(entryId, 1, assetAccountId, 500, 500),
+      ).rejects.toThrow(/journal_lines_single_sided/);
+    });
+
+    it("rejects a line with a negative amount", async () => {
+      const entryId = await createDraftEntry();
+      await expect(
+        insertLine(entryId, 1, assetAccountId, -500, 0),
+      ).rejects.toThrow(/journal_lines_amounts_non_negative/);
+    });
   });
 });

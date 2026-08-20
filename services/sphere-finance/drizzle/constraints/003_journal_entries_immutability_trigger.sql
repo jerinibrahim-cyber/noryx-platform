@@ -1,13 +1,17 @@
 -- Posted-entry immutability, narrowly validated rather than merely
 -- present (per explicit review guidance): the ONLY legitimate mutation of
 -- a POSTED journal_entries row is the one-time reversal linkage
--- transition reversed_by_journal_entry_id NULL -> a value, with every
--- other column unchanged and the row not already reversed. Everything
--- else — any other field change, a second attempt to set the reversal
--- link, or any DELETE — is rejected. docs/finance-journal-engine-proposal.md
--- §3, §9. Same append-only pattern as
--- packages/db-core/drizzle/rls/002_immutable_audit_log.sql, extended with
--- the one narrow, explicitly-checked exception this table needs.
+-- transition reversed_by_journal_entry_id NULL -> a value, with EVERY
+-- other column unchanged (including updated_at — no column is exempted)
+-- and the row not already reversed. Everything else — any other field
+-- change, a second attempt to set the reversal link, or any DELETE — is
+-- rejected. A caller performing the legitimate reversal-link update must
+-- write only reversed_by_journal_entry_id in that statement; it must not
+-- also bump updated_at, since that column is checked like any other.
+-- docs/finance-journal-engine-proposal.md §3, §9. Same append-only
+-- pattern as packages/db-core/drizzle/rls/002_immutable_audit_log.sql,
+-- extended with the one narrow, explicitly-checked exception this table
+-- needs.
 
 CREATE OR REPLACE FUNCTION prevent_posted_journal_entry_mutation()
 RETURNS TRIGGER AS $$
@@ -42,10 +46,10 @@ BEGIN
        OR NEW.posted_by IS DISTINCT FROM OLD.posted_by
        OR NEW.posted_at IS DISTINCT FROM OLD.posted_at
        OR NEW.created_at IS DISTINCT FROM OLD.created_at
+       OR NEW.updated_at IS DISTINCT FROM OLD.updated_at
     THEN
-      RAISE EXCEPTION 'journal_entries is immutable once POSTED: only reversed_by_journal_entry_id may be set, no other column may change (id=%)', OLD.id;
+      RAISE EXCEPTION 'journal_entries is immutable once POSTED: only reversed_by_journal_entry_id may be set, no other column (including updated_at) may change (id=%)', OLD.id;
     END IF;
-    -- updated_at is allowed to change alongside the one legitimate transition.
   END IF;
 
   RETURN NEW;
