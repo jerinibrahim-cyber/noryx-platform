@@ -1,11 +1,24 @@
 # Finance Core — 2c: Journal Entry Service, Posting, and Reversal
 
-**Status: reviewed and approved as the 2c-1/2c-2 implementation
-checkpoint.** Two corrections were required before implementation and are
-incorporated below (§0.1). 2c-1 (accounting periods + journal draft CRUD)
-is approved to begin. **2c-2 (posting, reversal, numbering) is explicitly
-not approved and must not be started** until 2c-1 is implemented,
-verified, and reviewed on its own.
+**Status: 2c-1 implemented (commit `383004d`) and under its second
+review round.** The pre-implementation checkpoint required two
+corrections (§0.1), both incorporated before 2c-1 was built. The
+post-implementation review of `383004d` found two further corrections
+required before final 2c-1 approval — both now incorporated: the
+accounting-period `close()` concurrency race (§3, §0.2) and the
+periods-RBAC documentation/implementation mismatch (§3, §9, §0.2).
+**2c-2 (posting, reversal, numbering) remains explicitly not approved
+and must not be started** until 2c-1 passes this final review.
+
+## 0.2 Corrections from the post-implementation (2c-1) review
+
+Found reviewing the actual `383004d` commit, not just the development
+report:
+
+| item                                          | correction                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Accounting-period `close()` concurrency       | The implemented `close()` raced: a read-then-write shape (SELECT, check `status === 'OPEN'` in application code, then UPDATE with no status predicate) let two concurrent close calls both pass the read-time check and both succeed. Corrected to a single atomic `UPDATE ... WHERE status = 'OPEN' RETURNING *`; zero rows returned triggers a follow-up read (taken after the UPDATE, not before) to distinguish 404 from 409. Same class of fix as §5.1's posting-concurrency correction. See §3. New adversarial test: two concurrent closes on the same OPEN period → exactly one 200, one 409, one CLOSE audit event. |
+| Periods RBAC documentation vs. implementation | This document's §3 said "finance.admin only" for periods generally, while the controller's own doc comment claimed the same thing and then immediately granted `GET` to all three finance roles — an internal contradiction, and a mismatch with what was actually built (list open to any finance.* role, matching the journal-entries read model; create/close admin-only). Decision: the implementation is correct and is not changing — this document and the controller's doc comment are corrected to state the real RBAC explicitly (§3, §9, controller doc comment in the code itself).                              |
 
 It implements the application/API layer described in
 `docs/finance-journal-engine-proposal.md` §2, §3, §6, §7, §9 (Revision 2,
@@ -154,7 +167,23 @@ arises, that's a separate, explicitly-scoped refactor, not part of 2c.
 
 ## 3. Accounting periods
 
-Straightforward CRUD, `finance.admin` only, same shape as `AccountsService`:
+Straightforward CRUD, same shape as `AccountsService`. **RBAC, corrected
+per the 2c-1 review to match the implementation and to be explicit
+rather than ambiguous:**
+
+```text
+GET    /accounting-periods               finance.viewer | finance.poster | finance.admin (any)
+POST   /accounting-periods               finance.admin only
+PATCH  /accounting-periods/:id/close     finance.admin only
+```
+
+List/read access is open to any `finance.*` role — matching the read
+model already used for journal entries (any finance role can read;
+writes are gated per-action) — rather than restricted to
+`finance.admin` alone. §9's RBAC table is updated to match; this is the
+authoritative statement, superseding this document's earlier "§3
+periods are `finance.admin` only" phrasing, which was ambiguous about
+list access and did not match what was actually built and reviewed.
 
 ```ts
 create(tenantId, legalEntityId, actorUserId, dto: CreateAccountingPeriodDto)
@@ -215,9 +244,36 @@ overlapping ranges for the same legal entity — exactly one succeeds
 in the response body (`AllExceptionsFilter`'s generic 500 shape would be
 the tell if this weren't handled).
 
-`close()`: loads the period scoped to `(tenantId, legalEntityId)`, 404 if
-not found, `409` if already `CLOSED`, else `UPDATE ... SET status =
-'CLOSED', closed_at = now(), closed_by = actorUserId`. Audit `CLOSE`.
+`close()` — **corrected per the 2c-1 review: the transition must be a
+single atomic conditional `UPDATE`, not a read-then-write.** The
+originally-implemented shape (`SELECT` the period, check
+`status === 'OPEN'` in application code, then `UPDATE` with no status
+predicate) races: two concurrent `close()` calls can both read `OPEN`
+before either `UPDATE` commits, and since the `UPDATE`'s `WHERE` clause
+didn't repeat the status check, both would succeed — silently violating
+"already `CLOSED` → `409`" under concurrency. Same class of problem as
+the posting race in §5.1, fixed the same way in spirit (make the actual
+state transition atomic, don't trust an earlier read to still be true):
+
+```sql
+UPDATE accounting_periods
+SET status = 'CLOSED', closed_at = now(), closed_by = $actorUserId, updated_at = now()
+WHERE id = $id AND tenant_id = $tenantId AND legal_entity_id = $legalEntityId AND status = 'OPEN'
+RETURNING *;
+```
+
+- A row is returned → success. The audit `beforeState` is reconstructed
+  from the returned row with `status`/`closed_at`/`closed_by` reverted
+  (accurate for every business-relevant field this action changes) —
+  not re-read, to avoid a second query on the success path.
+- No row is returned → a follow-up read, taken **after** the `UPDATE`
+  attempt (never trusting a pre-`UPDATE` read), distinguishes "doesn't
+  exist in this scope at all" (`404`) from "exists but wasn't `OPEN`"
+  (`409`).
+
+New adversarial test: two concurrent `PATCH .../close` requests against
+the same `OPEN` period — exactly one `200`, one `409`, and exactly one
+`CLOSE` audit event (not two).
 
 No `reopen`. Not in scope, per the approved proposal.
 
@@ -695,7 +751,14 @@ Extends `journal-engine-db-constraints.e2e-spec.ts`'s and
   wrong-entity, wrong-tenant account all rejected with a clean 400 and
   zero effect (§7.5's 2c-1 list).
 - Accounting periods: create, list, close; `finance.admin`-only
-  enforcement; `close()` rejects an already-`CLOSED` period with `409`.
+  enforcement on create/close, list open to any `finance.*` role;
+  `close()` rejects an already-`CLOSED` period with `409`.
+- **Concurrent period close** (§0.2 correction): two simultaneous
+  `PATCH /accounting-periods/:id/close` requests against the same
+  `OPEN` period — assert exactly one `200` and one `409`, and exactly
+  one `CLOSE` audit log row for that period (proves the atomic
+  `UPDATE ... WHERE status = 'OPEN'` closes the race, not just that one
+  request happened to win).
 - **Concurrent period creation** (§0.1/§3 correction): two simultaneous
   `POST /accounting-periods` requests with overlapping date ranges for
   the same legal entity — assert exactly one `201` and one `409`, and

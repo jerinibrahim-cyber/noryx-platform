@@ -11,11 +11,13 @@ import type { CreateAccountingPeriodDto } from "./dto/create-accounting-period.d
 
 /**
  * Accounting periods — 2c-1 (create, list, close only; no reopen, per
- * the approved proposal). `finance.admin` only, same
- * withTenant()/explicit-legalEntityId-predicate shape as
- * AccountsService — see that file's doc comment for why the
- * legalEntityId predicate is never dropped even though RLS alone would
- * still stop cross-tenant leakage.
+ * the approved proposal). Create/close are `finance.admin` only; list
+ * is open to any finance.* role (§3/§9 of the proposal — the RBAC table
+ * in the controller's own doc comment is the source of truth for the
+ * exact per-route breakdown). Same withTenant()/explicit-legalEntityId-
+ * predicate shape as AccountsService — see that file's doc comment for
+ * why the legalEntityId predicate is never dropped even though RLS
+ * alone would still stop cross-tenant leakage.
  *
  * docs/finance-2c-journal-entry-service-proposal.md §3.
  */
@@ -121,18 +123,22 @@ export class AccountingPeriodsService {
     id: string,
   ): Promise<AccountingPeriod> {
     return withTenant(tenantId, async (tx: TxClient) => {
-      const before = await this.findByIdInTx(tx, legalEntityId, id);
-      if (!before) {
-        throw new NotFoundException(
-          `No accounting period found with id ${id}.`,
-        );
-      }
-      if (before.status === "CLOSED") {
-        throw new ConflictException(
-          `Accounting period "${before.code}" is already closed.`,
-        );
-      }
-
+      // Atomic conditional transition — corrected per review: the
+      // previous read-then-write shape (SELECT, check status === OPEN,
+      // then UPDATE with no status predicate) raced. Two concurrent
+      // close() calls could both read OPEN before either UPDATE
+      // committed, and since the UPDATE's WHERE clause didn't repeat the
+      // status check, both would succeed — silently violating "already
+      // CLOSED -> 409" under concurrency. status = 'OPEN' is now part of
+      // the UPDATE's own WHERE clause, so only the first of two
+      // concurrent requests for the same row can ever match; the loser
+      // matches zero rows and is handled below via a follow-up read —
+      // never a second silent "success." Same class of fix as the
+      // SELECT ... FOR UPDATE correction documented for 2c-2 posting
+      // (docs/finance-2c-journal-entry-service-proposal.md §5.1) — here
+      // the single atomic UPDATE...WHERE is sufficient on its own since
+      // there's no multi-statement validation chain to protect, unlike
+      // posting.
       const [updated] = await tx
         .update(accountingPeriods)
         .set({
@@ -144,10 +150,43 @@ export class AccountingPeriodsService {
         .where(
           and(
             eq(accountingPeriods.id, id),
+            eq(accountingPeriods.tenantId, tenantId),
             eq(accountingPeriods.legalEntityId, legalEntityId),
+            eq(accountingPeriods.status, "OPEN"),
           ),
         )
         .returning();
+
+      if (!updated) {
+        // Zero rows matched: either the period doesn't exist in this
+        // scope at all (404), or it exists but wasn't OPEN (409) —
+        // distinguished by a follow-up read taken AFTER the UPDATE
+        // attempt, never by trusting a read that happened before it
+        // (that read-before-write gap is exactly the race being fixed).
+        const existing = await this.findByIdInTx(tx, legalEntityId, id);
+        if (!existing) {
+          throw new NotFoundException(
+            `No accounting period found with id ${id}.`,
+          );
+        }
+        throw new ConflictException(
+          `Accounting period "${existing.code}" is already closed.`,
+        );
+      }
+
+      // Reconstructed rather than re-read, to avoid a second query on
+      // the success path — accurate for every field this action
+      // actually changes (status, closedAt, closedBy), which is what
+      // the audit trail is for. updatedAt is reused from the
+      // post-close row rather than the true pre-close value: a
+      // deliberate, harmless imprecision on a non-business timestamp,
+      // not a gap in the business-relevant before/after snapshot.
+      const before: AccountingPeriod = {
+        ...updated,
+        status: "OPEN",
+        closedAt: null,
+        closedBy: null,
+      };
 
       await tx.insert(auditLogs).values({
         tenantId,
@@ -160,7 +199,7 @@ export class AccountingPeriodsService {
         afterState: updated as unknown as Record<string, unknown>,
       });
 
-      return updated!;
+      return updated;
     });
   }
 

@@ -17,9 +17,10 @@ import { AccountingPeriodsService } from "./accounting-periods.service";
 import { CreateAccountingPeriodDto } from "./dto/create-accounting-period.dto";
 
 /**
- * finance.admin only for every route here (§9 of the 2c proposal — no
- * finance.poster/finance.viewer read access to periods listed in this
- * increment's scope beyond list, which every finance.* role can reach).
+ * finance.admin only for create/close (write). GET (list) is open to
+ * any finance.* role — finance.viewer, finance.poster, and
+ * finance.admin can all read periods, matching the read model already
+ * used for journal entries. §3/§9 of the 2c proposal.
  * tenantId/legalEntityId always come from the verified JWT, never from
  * a request param/body — same convention as AccountsController.
  */

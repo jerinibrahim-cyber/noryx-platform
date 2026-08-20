@@ -413,6 +413,39 @@ describe("Accounting periods (e2e) — 2c-1", () => {
         .expect(409);
     });
 
+    it("two concurrent CLOSE requests against the same OPEN period: exactly one success, one 409, one CLOSE audit event — the atomic UPDATE...WHERE status='OPEN' correction", async () => {
+      const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.admin"]);
+      const suffix = Date.now();
+      const created = await request(app.getHttpServer())
+        .post("/v1/finance/accounting-periods")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          code: `RACE-CLOSE-${suffix}`,
+          startDate: "2027-04-01",
+          endDate: "2027-04-30",
+        })
+        .expect(201);
+      const id = created.body.data.id;
+
+      const [resX, resY] = await Promise.all([
+        request(app.getHttpServer())
+          .patch(`/v1/finance/accounting-periods/${id}/close`)
+          .set("Authorization", `Bearer ${token}`),
+        request(app.getHttpServer())
+          .patch(`/v1/finance/accounting-periods/${id}/close`)
+          .set("Authorization", `Bearer ${token}`),
+      ]);
+      const statuses = [resX.status, resY.status].sort();
+      expect(statuses).toEqual([200, 409]);
+
+      const db = getPlatformDb();
+      const closeRows = await db
+        .select()
+        .from(auditLogs)
+        .where(eq(auditLogs.entityId, id));
+      expect(closeRows.filter((r) => r.action === "CLOSE")).toHaveLength(1);
+    });
+
     it("closing a nonexistent period returns 404", async () => {
       const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.admin"]);
       await request(app.getHttpServer())
