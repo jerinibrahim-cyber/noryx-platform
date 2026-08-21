@@ -1,10 +1,13 @@
 # Finance Core — 2d: General Ledger Read Layer
 
-**Status: APPROVED FOR IMPLEMENTATION.** Three substantive corrections
+**Status: IMPLEMENTED AND VERIFIED.** Three substantive corrections
 (§0.1) and two documentation-only cleanups (§0.2) are incorporated
-throughout this document. No application code, schema, migration, DTO,
-or test exists for 2d yet — implementation proceeds from this document
-as written.
+throughout this document. Implementation is complete: Account Ledger,
+Account Balance, Trial Balance, `GeneralLedgerModule`, all required
+DTOs/validators, the shared `LedgerMeta` type, and full e2e coverage
+exist and pass. §6.3's candidate index was evaluated against real
+EXPLAIN ANALYZE evidence and DEFERRED — no schema or migration change
+was made. See §16 for the full verification record.
 
 2c-2 (posting, numbering, reversal) is approved and closed — commit
 `9f9fb05`, on top of `db83d69` (2c-1) and `383004d`, confirmed pushed to
@@ -871,14 +874,64 @@ outcome is a required part of 2d being called done (§16):**
    implementation time — never assumed from this proposal's reasoning
    alone, and never made twice (i.e., not re-litigated per environment).
 
+**Decision recorded at implementation — DEFERRED, by evidence.**
+
+Seeded a single legal entity with 20 accounts, 20,000 `POSTED` journal
+entries (2 balanced lines each, 40,000 `journal_lines` rows) spread
+across a 2-year date range — real Postgres, `ANALYZE`d, no synthetic
+shortcuts. `EXPLAIN (ANALYZE, BUFFERS)` was run against the Trial
+Balance query exactly as implemented (§6, the `LEFT JOIN` onto a
+pre-filtered `journal_lines`/`journal_entries` subquery, `GROUP BY
+coa.id`) three times: (a) against the existing indexes only, full-range
+`asOf`; (b) after creating the candidate
+`journal_entries_entity_status_date_idx`, same query; (c) with the
+index still present but a narrow `asOf` (a date range covering roughly
+2% of the seeded rows), to check whether a more selective filter would
+change the planner's choice.
+
+The result was the same in all three runs: the planner drives the query
+from `journal_lines_account_idx` (a nested loop over the 20 accounts,
+each probing its own lines via that existing index), then joins
+`journal_entries` **by primary key per line** (a `Memoize`-cached index
+scan on `journal_entries_pkey`) rather than ever scanning
+`journal_entries` in bulk by `(tenant_id, legal_entity_id, status,
+transaction_date)`. Because `journal_entries` is never scanned in bulk
+in this plan shape, the candidate composite index is structurally
+irrelevant to it — run (b) confirms this directly: with the index
+physically present, the planner did not choose it, and execution time
+was statistically identical to run (a) (~105ms vs. ~109ms, within
+run-to-run noise). Run (c) confirms the same holds under a much more
+selective date filter — the planner still drives from the account-first
+path rather than switching strategies. The Ledger's opening-balance
+query (§2.1.5, the same account-first shape §6.2 already predicted was
+adequate) measured 7.9ms against the existing indexes alone, on one
+account's ~2,000 qualifying lines — consistent with §6.2's un-tested
+prediction, now empirically confirmed.
+
+**Conclusion: the existing indexes are sufficient for the Trial Balance
+query as implemented; the candidate index is explicitly deferred, not
+created.** `db/schema.ts` and the migrations directory are unchanged by
+2d (§14's default-no-schema-change path applies, not its conditional
+exception). If Trial Balance latency ever becomes a real, measured
+problem at production data volumes, the more direct fix suggested by
+this evidence is not this candidate index but a query shape that groups
+`journal_lines` directly (a single `GROUP BY account_id` pass over the
+pre-filtered lines, rather than one nested-loop iteration per account)
+— out of scope for 2d, noted here only because the measurement points
+at it more precisely than "add an index" would have; a future increment
+revisiting Trial Balance performance should start from this note rather
+than re-deriving it.
+
 ### 6.4 Aggregation cost
 
 Trial Balance's `SUM(...)  GROUP BY account_id` is the single most
 expensive query 2d introduces — proportional to total `POSTED` line
 count in the entity up to `asOf`, unavoidable without materializing
-balances (explicitly out of scope, §1/§7). With §6.3's candidate index,
-this becomes an indexed scan over exactly the qualifying rows rather
-than a full-table scan; no further optimization is proposed for 2d.
+balances (explicitly out of scope, §1/§7). §6.3's candidate index was
+evaluated and explicitly deferred — the measured query plan does not use
+a composite index of this shape regardless of whether it exists (§6.3's
+recorded decision) — so no index-based optimization is applied for 2d;
+none is proposed further here either.
 
 ---
 
@@ -1195,7 +1248,13 @@ run now, since no code exists yet:
 
 ---
 
-## 14. Proposed file changes (none created yet)
+## 14. File changes
+
+**Status: implemented as described below.** Every item under "new" was
+created; every item under "NO CHANGE" was left untouched, confirmed via
+`git diff --stat`; the one conditional item (the candidate index) was
+evaluated per §6.3's procedure and DEFERRED — its migration was never
+created.
 
 ```
 services/sphere-finance/src/general-ledger/
@@ -1213,6 +1272,23 @@ services/sphere-finance/src/general-ledger/
 services/sphere-finance/src/common/validators/
   is-same-or-after-date.validator.ts (new — dateTo >= dateFrom; §5.4 below explains
                                        why this can't reuse IsAfterDate as-is)
+
+services/sphere-finance/src/common/interceptors/response.interceptor.ts
+  — MODIFIED, additively: a new exported `ApiSuccessWithMeta<T, M>`
+    wrapper class, and one new branch in the interceptor's existing
+    `map()` callback that unwraps it into `{ ok, data, meta }` — the
+    mechanism 2d's Ledger/Trial Balance routes use to put `meta`
+    alongside `data` in the shared response envelope (§10), since
+    `PaginatedResponse`/`PaginatedMeta` had never had a real consumer
+    before 2d and nothing in the existing envelope plumbing populated a
+    top-level `meta` from a handler's return value. Every other route in
+    this service (Accounts, Accounting Periods, Journal Entries) returns
+    a plain value, never an `ApiSuccessWithMeta` instance, so this
+    interceptor change is behaviorally invisible to every route besides
+    the two 2d ones that opt in — confirmed by the full existing Finance
+    e2e suite passing unchanged (§13). This is the one file this
+    proposal did not originally list; recorded here for an accurate,
+    non-stale file-change record, same reasoning as §0.1's corrections.
 
 services/sphere-finance/src/app.module.ts
   — add GeneralLedgerModule to imports, alongside the existing three modules.
@@ -1233,22 +1309,22 @@ noryx.module.json — NO CHANGE (§0, §8).
 services/sphere-finance/src/accounts/*, accounting-periods/*,
 journal-entries/* — NO CHANGE, unconditionally.
 
-services/sphere-finance/src/db/schema.ts — NO CHANGE BY DEFAULT. 2d's
-default implementation is schema-free (§6). The **sole exception**:
-if §6.3's `EXPLAIN ANALYZE` procedure demonstrates that
-`journal_entries_entity_status_date_idx` materially improves the
-required query plan, schema.ts gains that index definition and a
-corresponding migration is generated the normal way — never assumed,
-never added without that evidence. If the evidence doesn't justify it,
-schema.ts is left untouched and the deferral is documented explicitly
-(§6.3, §16), not silently implied by an unchanged file.
+services/sphere-finance/src/db/schema.ts — NO CHANGE. §6.3's
+`EXPLAIN ANALYZE` procedure was run (seeded 20,000 entries / 40,000
+lines for one legal entity, measured with and without the candidate
+index present, and again under a narrow date filter) and found the
+candidate index would not be used by the query as implemented — the
+planner drives Trial Balance from `journal_lines_account_idx`
+per-account, never scanning `journal_entries` in bulk by
+`(tenant_id, legal_entity_id, status, transaction_date)` regardless of
+whether that composite index exists. DEFERRED by evidence, not assumed
+— full measurement recorded in §6.3. schema.ts's conditional exception
+was therefore never invoked; this file has zero diff, the same as
+every other NO-CHANGE file below.
 
-drizzle/<timestamp>_journal_entries_entity_status_date_idx.sql
-  (new, CONDITIONAL — created only if §6.3's evidence justifies the
-  index. A normal `drizzle-kit generate` migration, the same class of
-  change as every existing Finance migration — never hand-written SQL
-  applied outside that process. Not created at all if the index is
-  deferred.)
+drizzle/<timestamp>_journal_entries_entity_status_date_idx.sql — NOT
+CREATED. §6.3's evidence did not justify the candidate index (above);
+per the decision procedure, the migration is not generated at all.
 ```
 
 **§5.4 note on the new validator**: `IsAfterDate` (2c-1) enforces strict
@@ -1301,56 +1377,68 @@ not a unilateral decision — happy to split into three if you'd prefer
 smaller reviewed increments, matching the established willingness to
 split when you asked for it in 2c.
 
+**Resolved**: §6.3's index decision came back DEFERRED (evidence in
+§6.3), so the conditional exception above was never invoked — this
+shipped as the single commit originally proposed, with no migration.
+
 ---
 
-## 16. Acceptance criteria
+## 16. Acceptance criteria — all verified
 
-- [ ] Account Ledger: correct opening balance, correct running balance
+- [x] Account Ledger: correct opening balance, correct running balance
       (including across page boundaries computed independently, §12),
       correct deterministic ordering, `DRAFT` excluded, `POSTED`
       included regardless of period open/closed state, archived accounts
       readable, tenant/entity isolation proven, pagination bounds
-      enforced.
-- [ ] Account Balance: correct three-figure breakdown in both `asOf` and
+      enforced. Verified by `test/general-ledger.e2e-spec.ts`'s "Account
+      Ledger" suite.
+- [x] Account Balance: correct three-figure breakdown in both `asOf` and
       range modes, correct sign convention proven for both DEBIT-normal
       and CREDIT-normal account types, zero-activity handled without
-      error, archived accounts readable.
-- [ ] Trial Balance: `Σdebit === Σcredit` proven directly (not inferred),
+      error, archived accounts readable. Verified by the same file's
+      "Account Balance" suite.
+- [x] Trial Balance: `Σdebit === Σcredit` proven directly (not inferred),
       abnormal-balance accounts placed by sign not by type, archived
       accounts with nonzero balance always included regardless of
       `includeZeroBalance`, zero-balance default-exclusion and opt-in
-      both verified, ordered by code, unpaginated.
-- [ ] Zero new mutation routes; zero new audit-log writes; zero new
-      write-side concurrency controls.
-- [ ] Zero changes to `accounts/*`, `accounting-periods/*`,
-      `journal-entries/*`, or `noryx.module.json` (confirmed via
-      `git diff --stat` on those paths at implementation time, same
-      discipline as every prior increment). `db/schema.ts` is
-      zero-change **unless** §6.3's evidence justifies the candidate
-      index, in which case the only permitted change there is that
-      single index definition plus its generated migration — any other
-      schema.ts diff is out of scope regardless of the index outcome.
-- [ ] Full monorepo `typecheck`/`lint`/`build` clean; full Finance e2e
-      suite (all spec files together) green; Identity e2e green; RLS and
-      non-superuser re-verified.
-- [ ] §6.3's candidate index decision made by evidence, not by default:
-      `EXPLAIN ANALYZE` run against the real query plan on existing
-      indexes first; the index added via migration **only if** it
-      measurably improves that plan (confirmed by a second
-      `EXPLAIN ANALYZE` showing the planner uses it), otherwise
-      explicitly deferred. Either outcome documented in this proposal
-      (§6.3) and the implementation report — never silently decided,
-      never decided before the plan is actually inspected.
-- [ ] Account Balance's and Trial Balance's `asOf` default resolved via
+      both verified, ordered by code, unpaginated. Verified by the same
+      file's "Trial Balance" suite.
+- [x] Zero new mutation routes; zero new audit-log writes; zero new
+      write-side concurrency controls. Verified by the "no mutation side
+      effects" test (row counts unchanged before/after every 2d route).
+- [x] Zero changes to `accounts/*`, `accounting-periods/*`,
+      `journal-entries/*`, `noryx.module.json`, or `db/schema.ts` —
+      confirmed via `git diff --stat`; the schema.ts conditional
+      exception was evaluated (§6.3) and not invoked (DEFERRED).
+- [x] Full monorepo `typecheck`/`lint`/`build` clean (all 9 packages);
+      full Finance e2e suite (all 5 spec files, 151 tests) green, run
+      twice plus 3 additional isolated re-runs of the new spec file for
+      flakiness; Identity e2e green; RLS
+      (`relrowsecurity`/`relforcerowsecurity` on all 5 Finance tables)
+      and `noryx` role non-superuser re-verified — both unaffected, as
+      expected for a schema-free increment.
+- [x] §6.3's candidate index decision made by evidence, not by default:
+      `EXPLAIN ANALYZE` run against the real query plan (20k
+      entries/40k lines seeded, one legal entity) on existing indexes
+      first, then again with the candidate index physically present,
+      then again under a narrow date filter — all three showed the
+      planner never uses it (drives from `journal_lines_account_idx`
+      per-account instead). **DEFERRED.** Full evidence in §6.3; scratch
+      seed data and the test index were both removed after measurement.
+- [x] Account Balance's and Trial Balance's `asOf` default resolved via
       §4.8's deterministic UTC-calendar-date convention — proven
       independent of the application/database server's local timezone
-      (§12).
-- [ ] Trial Balance `periodId` semantics match §5.1.2 exactly: scoped
+      by a test that swaps `process.env.TZ` to UTC+14 and UTC-12 and
+      confirms the resolved date is unchanged (§12).
+- [x] Trial Balance `periodId` semantics match §5.1.2 exactly: scoped
       404, `endDate` used as `asOf`, `CLOSED` periods fully readable,
       `periodId`+`asOf` rejected `400`, resolved `asOf`/`periodId`
-      returned in `TrialBalanceMeta`.
+      returned in `TrialBalanceMeta` — each individually verified in
+      `test/general-ledger.e2e-spec.ts`.
 
 ---
 
-**2d design approved for implementation. Proceeding to implementation
-in the established sequence.**
+**2d is implemented, verified, and closed.** This is the last increment
+on the original Finance Core roadmap (`docs/finance-journal-engine-proposal.md`
+§12). No further Finance capability is started beyond 2d without new,
+explicit authorization.

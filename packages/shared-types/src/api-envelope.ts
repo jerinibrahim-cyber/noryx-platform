@@ -24,3 +24,19 @@ export interface PaginatedMeta {
 }
 
 export type PaginatedResponse<T> = ApiSuccess<T[]> & { meta: PaginatedMeta };
+
+/** Ledger-specific pagination metadata (sphere-finance's General Ledger
+ * read layer, "2d" — docs/finance-2d-general-ledger-read-layer-proposal.md
+ * §2.1.9). Extends, never modifies, `PaginatedMeta` — every existing
+ * consumer of `PaginatedMeta`/`PaginatedResponse` is unaffected; this is
+ * the first real consumer of either type. */
+export interface LedgerMeta extends PaginatedMeta {
+  accountId: string;
+  accountCode: string;
+  accountName: string;
+  accountType: "ASSET" | "LIABILITY" | "EQUITY" | "REVENUE" | "EXPENSE";
+  normalBalance: "DEBIT" | "CREDIT";
+  openingBalanceMinor: number;
+  effectiveDateFrom: string | null;
+  effectiveDateTo: string;
+}
