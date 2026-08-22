@@ -16,19 +16,22 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  # pnpm's own version is intentionally NOT set here — pnpm/action-setup@v6
+  # reads it from package.json's "packageManager" field (pnpm@9.15.9)
+  # instead. Passing both a `version:` input here AND a packageManager
+  # field is a hard conflict error in pnpm/action-setup v4+.
   NODE_VERSION: "20"
-  PNPM_VERSION: "9"
 
 jobs:
   secrets-scan:
     name: Secrets scan (gitleaks)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - name: gitleaks
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -36,10 +39,9 @@ jobs:
     name: Lint & typecheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with: { version: "${{ env.PNPM_VERSION }}" }
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
         with: { node-version: "${{ env.NODE_VERSION }}", cache: "pnpm" }
       - run: pnpm install --frozen-lockfile
       - run: pnpm run lint
@@ -49,14 +51,13 @@ jobs:
     name: Unit tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with: { version: "${{ env.PNPM_VERSION }}" }
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
         with: { node-version: "${{ env.NODE_VERSION }}", cache: "pnpm" }
       - run: pnpm install --frozen-lockfile
       - run: pnpm run test -- --coverage
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: coverage-reports
           path: "**/coverage"
@@ -66,7 +67,7 @@ jobs:
     name: SAST (Semgrep)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: returntocorp/semgrep-action@v1
         with:
           config: p/typescript p/owasp-top-ten p/nodejsscan
@@ -75,27 +76,40 @@ jobs:
     name: Dependency audit (SCA)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with: { version: "${{ env.PNPM_VERSION }}" }
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
         with: { node-version: "${{ env.NODE_VERSION }}", cache: "pnpm" }
       - run: pnpm install --frozen-lockfile
       # Patching SLA per Readiness Review §7.2: Critical 48h, High 7d, Medium 30d.
       # --audit-level=high fails the build on anything at or above High now;
       # Medium-severity findings are tracked, not build-blocking, per that SLA.
       - run: pnpm audit --audit-level=high
-      - name: OSV dependency scan (defense in depth beyond npm's advisory DB)
-        uses: google/osv-scanner-action@v1
-        with:
-          scan-args: |-
-            --lockfile=./pnpm-lock.yaml
+
+  # google/osv-scanner-action dropped its standalone step-level action —
+  # OSV-Scanner is now only distributed as a reusable workflow, which
+  # GitHub Actions requires to be called at the job level (a `uses:`
+  # reusable-workflow call can't be one step among others in an existing
+  # job). Split out of `sca` for that reason, not to change what it does:
+  # same lockfile, same "fail the build on findings" behavior
+  # (fail-on-vuln defaults to true), same defense-in-depth-beyond-`pnpm
+  # audit` role. upload-sarif is explicitly disabled to keep behavior
+  # identical to before (no new GitHub Code Scanning integration, which
+  # would need extra `security-events: write` permission this workflow
+  # doesn't currently grant).
+  osv-scan:
+    name: OSV dependency scan (defense in depth beyond npm's advisory DB)
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@v2.5.1
+    with:
+      scan-args: |-
+        --lockfile=./pnpm-lock.yaml
+      upload-sarif: false
 
   iac-scan:
     name: IaC scan (Checkov)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: bridgecrewio/checkov-action@v12
         with:
           directory: infra/
@@ -104,13 +118,12 @@ jobs:
 
   build:
     name: Build all packages/services
-    needs: [lint-typecheck, test, sast, sca]
+    needs: [lint-typecheck, test, sast, sca, osv-scan]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with: { version: "${{ env.PNPM_VERSION }}" }
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
         with: { node-version: "${{ env.NODE_VERSION }}", cache: "pnpm" }
       - run: pnpm install --frozen-lockfile
       - run: pnpm run build
@@ -124,7 +137,7 @@ jobs:
       matrix:
         service: [identity, api-gateway, sphere-finance]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Build image
         run: docker build -f services/${{ matrix.service }}/Dockerfile -t noryx/${{ matrix.service }}:${{ github.sha }} .
       - name: Trivy scan
@@ -143,7 +156,7 @@ jobs:
           image: noryx/${{ matrix.service }}:${{ github.sha }}
           format: spdx-json
           output-file: sbom-${{ matrix.service }}.spdx.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         if: github.event_name == 'push'
         with:
           name: sbom-${{ matrix.service }}
