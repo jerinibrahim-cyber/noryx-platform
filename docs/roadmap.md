@@ -39,26 +39,52 @@ Rules/DOA Engine, Orbis Helpdesk/WO, Asset & Location, PPM, and the field
 technician mobile app. Of that scope, only **Finance Core** has been
 built so far, inside `services/sphere-finance`.
 
-**Finance Core — complete (Milestone 1b, 2a–2d)**
+**FINANCE CORE — FUNCTIONAL BUILD COMPLETE (Milestone 1b, 2a–2d)**
 
-- [x] Chart of Accounts service (`09dc04d`)
-- [x] 2a — legal-entity retrofit of the Chart of Accounts (`bcf5b03`)
+- [x] 1b — Chart of Accounts service (`09dc04d`)
+- [x] 2a — Chart of Accounts legal-entity retrofit (`bcf5b03`)
 - [x] 2b — Journal Engine schema + DB layer: `journal_entries`/`journal_lines`,
       the deferred double-entry balance-invariant trigger, tenant-scoped DB
       client (`c8e165e`, review fixes in `15f044b`)
-- [x] 2c-1 — Accounting Periods service + journal entry draft CRUD (`383004d`,
+- [x] 2c-1 — Accounting periods + journal entry draft CRUD (`383004d`,
       concurrency-safe period close fix in `db83d69`)
-- [x] 2c-2 — journal entry posting, entry numbering, and reversal (`9f9fb05`)
+- [x] 2c-2 — Posting, numbering + reversal (`9f9fb05`)
 - [x] 2d — General Ledger read layer: ledger, account balance, and trial
       balance reports (`89ab0b4` proposal, `7fe3d56` implementation)
-- [x] 2d follow-up — fixed a read-consistency issue where GL reports could
-      return a torn snapshot under concurrent posting; GL reports now run in
-      a `REPEATABLE READ`/read-only transaction, with adversarial concurrency
-      tests proving the fix (`8ad9ea0`)
+- [x] 2d follow-up — Read-consistency hardening: fixed a read-consistency
+      issue where GL reports could return a torn snapshot under concurrent
+      posting; GL reports now run in a `REPEATABLE READ`/read-only
+      transaction, with adversarial concurrency tests proving the fix
+      (`8ad9ea0`)
 
 All of the above is covered by unit and e2e tests (including the
 concurrency regression suite), typecheck, lint, and build, and has been
 verified against the actual `main` branch on GitHub, not just local state.
+This is a functional-completeness statement, not a production-readiness
+one — see the hardening milestone below.
+
+**FINANCE CORE — HARDENING & SECURITY AUDIT — PLANNED (Milestone 3)**
+
+Before any further Finance capability is built on top of it, Finance Core
+goes through a dedicated hardening and security audit milestone. This is
+scoped and tracked separately from the functional build above:
+
+- [ ] 3.1 — Tenant/RLS Hardening
+- [ ] 3.2 — RBAC & Authorization Hardening
+- [ ] 3.3 — Transaction & Concurrency Hardening
+- [ ] 3.4 — Accounting & Audit Integrity
+- [ ] 3.5 — Production-Readiness Audit
+
+**Additional Finance capabilities (e.g. WIP Accrual Engine) are not to
+begin until Milestone 3 passes its review gates.** The intended lifecycle
+for Finance Core is:
+
+Functional build → Verification → Hardening/Security Audit →
+Production-readiness gate → Future expansion
+
+Finance Core is currently at the end of "Verification" and about to enter
+"Hardening/Security Audit." It is functionally complete but not yet
+production-hardened.
 
 **Not started (remaining Phase 1 scope)**
 
