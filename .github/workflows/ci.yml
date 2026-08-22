@@ -27,7 +27,7 @@ jobs:
     name: Secrets scan (gitleaks)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: gitleaks
@@ -39,7 +39,7 @@ jobs:
     name: Lint & typecheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with: { node-version: "${{ env.NODE_VERSION }}", cache: "pnpm" }
@@ -51,7 +51,7 @@ jobs:
     name: Unit tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with: { node-version: "${{ env.NODE_VERSION }}", cache: "pnpm" }
@@ -100,7 +100,7 @@ jobs:
       APP_ROLE_DATABASE_URL: postgresql://noryx_app:noryx_app@localhost:5432/noryx_test
       JWT_ACCESS_SECRET: test-only-secret-do-not-use-in-real-environments
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with: { node-version: "${{ env.NODE_VERSION }}", cache: "pnpm" }
@@ -123,7 +123,7 @@ jobs:
     name: SAST (Semgrep)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: returntocorp/semgrep-action@v1
         with:
           config: p/typescript p/owasp-top-ten p/nodejsscan
@@ -132,7 +132,7 @@ jobs:
     name: Dependency audit (SCA)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with: { node-version: "${{ env.NODE_VERSION }}", cache: "pnpm" }
@@ -165,7 +165,7 @@ jobs:
     name: IaC scan (Checkov)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: bridgecrewio/checkov-action@v12
         with:
           directory: infra/
@@ -177,7 +177,7 @@ jobs:
     needs: [lint-typecheck, test, test-e2e, sast, sca, osv-scan]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with: { node-version: "${{ env.NODE_VERSION }}", cache: "pnpm" }
@@ -193,7 +193,7 @@ jobs:
       matrix:
         service: [identity, api-gateway, sphere-finance]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Build image
         run: docker build -f services/${{ matrix.service }}/Dockerfile -t noryx/${{ matrix.service }}:${{ github.sha }} .
       - name: Trivy scan
