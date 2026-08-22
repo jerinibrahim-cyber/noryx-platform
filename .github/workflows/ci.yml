@@ -63,6 +63,62 @@ jobs:
           path: "**/coverage"
           retention-days: 14
 
+  # Milestone 3.1 (Tenant/RLS Hardening) §1.3/§2.5 — before this job
+  # existed, `pnpm run test:e2e` was never invoked anywhere in CI (no job
+  # provisioned Postgres at all), so every RLS/tenant-isolation/
+  # concurrency proof in this repo — including the entire General Ledger
+  # concurrency suite and the new direct-RLS-proof/drift-guard tests —
+  # had only ever been run manually. This job closes that gap: a real
+  # Postgres 16 service, the same migration -> RLS -> constraints ->
+  # app-role sequence used in dev, a hard gate that the app's own role
+  # cannot bypass RLS, then the complete e2e suite across every package
+  # that has one (db-core, identity, sphere-finance).
+  test-e2e:
+    name: End-to-end tests (Postgres 16)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: noryx
+          POSTGRES_PASSWORD: noryx
+          POSTGRES_DB: noryx_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U noryx"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Matches every service's test/env-setup.ts default exactly, so
+      # this is set here for the migration/setup steps below (which are
+      # plain script invocations, not Jest runs — env-setup.ts's
+      # defaults only apply inside Jest) rather than because the test
+      # run itself would otherwise be missing it.
+      DATABASE_URL: postgresql://noryx:noryx@localhost:5432/noryx_test
+      APP_ROLE_DATABASE_URL: postgresql://noryx_app:noryx_app@localhost:5432/noryx_test
+      JWT_ACCESS_SECRET: test-only-secret-do-not-use-in-real-environments
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with: { node-version: "${{ env.NODE_VERSION }}", cache: "pnpm" }
+      - run: pnpm install --frozen-lockfile
+      - name: Run migrations + RLS policies (db-core)
+        run: pnpm --filter @noryx/db-core run migrate
+      - name: Run migrations + RLS policies (sphere-finance)
+        run: pnpm --filter @noryx/sphere-finance run migrate
+      - name: Apply accounting-invariant DB constraints (sphere-finance)
+        run: pnpm --filter @noryx/sphere-finance exec ts-node src/db/apply-db-constraints.ts
+      - name: Provision the dedicated least-privilege app role (noryx_app)
+        run: pnpm run db:apply-app-role
+      - name: Guard — the app role must not bypass RLS (§1.1/§2.3)
+        env:
+          DATABASE_URL: ${{ env.APP_ROLE_DATABASE_URL }}
+        run: pnpm run db:assert-role-privileges
+      - run: pnpm run test:e2e
+
   sast:
     name: SAST (Semgrep)
     runs-on: ubuntu-latest
@@ -118,7 +174,7 @@ jobs:
 
   build:
     name: Build all packages/services
-    needs: [lint-typecheck, test, sast, sca, osv-scan]
+    needs: [lint-typecheck, test, test-e2e, sast, sca, osv-scan]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
