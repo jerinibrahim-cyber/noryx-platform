@@ -7,7 +7,7 @@ just a status tracker for the repo.
 | Phase                             | Scope                                                                                                                                                                                                                   | Status                      |
 | --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------- |
 | **Phase 0 — Foundation**          | Monorepo, CI/CD security gates, tenant/legal-entity schema + RLS, Identity (auth, MFA, tenant-aware JWTs), API Gateway (module-manifest routing), design system + web shell, Subscription & Entitlement schema          | **In progress** — see below |
-| **Phase 1 — Sphere & Orbis Core** | Finance + WIP Accrual Engine, Procurement & Inventory, core CRM, HRMS + Payroll + WPS, Expense Management, Contract Management, Rules/DOA Engine, Orbis Helpdesk/WO, Asset & Location, PPM, field technician mobile app | Not started                 |
+| **Phase 1 — Sphere & Orbis Core** | Finance + WIP Accrual Engine, Procurement & Inventory, core CRM, HRMS + Payroll + WPS, Expense Management, Contract Management, Rules/DOA Engine, Orbis Helpdesk/WO, Asset & Location, PPM, field technician mobile app | **In progress** — see below |
 | **Phase 2 — Core hardening**      | SLA & Command Centre, Master Data Hub governance UI, Reporting & BI foundation, Notifications, Document/e-Sign registry                                                                                                 | Not started                 |
 | **Phase 3 — Service Business**    | Service Project/job-costing, Customer Portal v1 (read-only)                                                                                                                                                             | Not started                 |
 | **Phase 4 — Intelligence**        | Persona dashboards, Orbis Command Centre recommendations, financial intelligence aggregations                                                                                                                           | Not started                 |
@@ -30,3 +30,46 @@ just a status tracker for the repo.
 - [ ] Subscription & Entitlement Service as a standalone service with an admin API (currently: schema only, checked directly by Identity/Gateway)
 - [ ] Kubernetes manifests / Terraform (`infra/k8s`, `infra/terraform` — scaffolding only so far)
 - [ ] Tenant Provisioning Service
+
+## Phase 1 — what's built so far
+
+Phase 1 covers Finance + WIP Accrual Engine, Procurement & Inventory, core
+CRM, HRMS + Payroll + WPS, Expense Management, Contract Management,
+Rules/DOA Engine, Orbis Helpdesk/WO, Asset & Location, PPM, and the field
+technician mobile app. Of that scope, only **Finance Core** has been
+built so far, inside `services/sphere-finance`.
+
+**Finance Core — complete (Milestone 1b, 2a–2d)**
+
+- [x] Chart of Accounts service (`09dc04d`)
+- [x] 2a — legal-entity retrofit of the Chart of Accounts (`bcf5b03`)
+- [x] 2b — Journal Engine schema + DB layer: `journal_entries`/`journal_lines`,
+      the deferred double-entry balance-invariant trigger, tenant-scoped DB
+      client (`c8e165e`, review fixes in `15f044b`)
+- [x] 2c-1 — Accounting Periods service + journal entry draft CRUD (`383004d`,
+      concurrency-safe period close fix in `db83d69`)
+- [x] 2c-2 — journal entry posting, entry numbering, and reversal (`9f9fb05`)
+- [x] 2d — General Ledger read layer: ledger, account balance, and trial
+      balance reports (`89ab0b4` proposal, `7fe3d56` implementation)
+- [x] 2d follow-up — fixed a read-consistency issue where GL reports could
+      return a torn snapshot under concurrent posting; GL reports now run in
+      a `REPEATABLE READ`/read-only transaction, with adversarial concurrency
+      tests proving the fix (`8ad9ea0`)
+
+All of the above is covered by unit and e2e tests (including the
+concurrency regression suite), typecheck, lint, and build, and has been
+verified against the actual `main` branch on GitHub, not just local state.
+
+**Not started (remaining Phase 1 scope)**
+
+- [ ] WIP Accrual Engine
+- [ ] Procurement & Inventory
+- [ ] Core CRM
+- [ ] HRMS + Payroll + WPS
+- [ ] Expense Management
+- [ ] Contract Management
+- [ ] Rules/DOA Engine
+- [ ] Orbis Helpdesk/WO
+- [ ] Asset & Location
+- [ ] PPM
+- [ ] Field technician mobile app
