@@ -149,12 +149,30 @@ jobs:
   # job). Split out of `sca` for that reason, not to change what it does:
   # same lockfile, same "fail the build on findings" behavior
   # (fail-on-vuln defaults to true), same defense-in-depth-beyond-`pnpm
-  # audit` role. upload-sarif is explicitly disabled to keep behavior
-  # identical to before (no new GitHub Code Scanning integration, which
-  # would need extra `security-events: write` permission this workflow
-  # doesn't currently grant).
+  # audit` role.
+  #
+  # osv-scanner-reusable.yml's own osv-scan job declares
+  # `permissions: { actions: read, contents: read, security-events:
+  # write }` unconditionally at the job level (confirmed against the
+  # workflow file at this exact ref) — GitHub Actions statically checks,
+  # at workflow-parse time, that a caller grants everything a called
+  # reusable workflow's jobs declare, regardless of what any `with:`
+  # input is set to at runtime. Without this job explicitly granting
+  # those three permissions, GitHub rejects the whole file as invalid
+  # before it ever runs ("Invalid workflow file ... Error calling
+  # workflow"), which is what surfaced after this job was first added.
+  # Granting the permission does not itself upload anything — the actual
+  # SARIF-upload step inside the reusable workflow only runs when
+  # upload-sarif is true, which stays false below, so no new GitHub Code
+  # Scanning integration is enabled by this. Scoped to this job only
+  # (not a workflow-level `permissions:` block), so no other job's
+  # default token permissions change.
   osv-scan:
     name: OSV dependency scan (defense in depth beyond npm's advisory DB)
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
     uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@v2.5.1
     with:
       scan-args: |-
