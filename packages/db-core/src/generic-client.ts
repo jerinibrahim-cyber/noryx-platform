@@ -1,6 +1,6 @@
 import postgres from "postgres";
 import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
-import type { PgTransaction } from "drizzle-orm/pg-core";
+import type { PgTransaction, PgTransactionConfig } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
 /**
@@ -100,6 +100,19 @@ export function createTenantScopedDbClient<
  * packages/db-core/drizzle/rls/001_enable_rls.sql for the reference
  * policy shape every module's own RLS SQL should follow.
  *
+ * `txConfig` is an optional passthrough to Drizzle's own
+ * `db.transaction(fn, config)` — e.g. `{ isolationLevel: "repeatable
+ * read", accessMode: "read only" }` for a multi-statement read that needs
+ * one consistent snapshot across all of its statements (Postgres's
+ * default READ COMMITTED gives each statement in a transaction its own
+ * snapshot, which is correct for ordinary single-purpose reads/writes but
+ * wrong for a report that computes an aggregate from several statements
+ * that must all see the same point-in-time data — see
+ * services/sphere-finance/src/general-ledger/general-ledger.service.ts).
+ * Defaults to `undefined`, i.e. no `SET TRANSACTION` is issued and
+ * behavior is byte-for-byte identical to before this parameter existed —
+ * every existing caller that doesn't pass it is unaffected.
+ *
  * Identical runtime behavior to db-core's own `withTenant()` — that
  * function now calls this one internally. Modules with their own schema
  * should call this directly rather than reimplementing the SET LOCAL logic.
@@ -111,6 +124,7 @@ export async function withTenantScoped<
   tenantId: string | null,
   fn: (tx: GenericTxClient<TSchema>) => Promise<T>,
   db: GenericDb<TSchema>,
+  txConfig?: PgTransactionConfig,
 ): Promise<T> {
   return db.transaction(async (tx) => {
     if (tenantId) {
@@ -120,5 +134,5 @@ export async function withTenantScoped<
       );
     }
     return fn(tx);
-  });
+  }, txConfig);
 }

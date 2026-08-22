@@ -4,6 +4,7 @@ import {
   auditLogs,
   legalEntities,
   type GenericTxClient,
+  type PgTransactionConfig,
 } from "@noryx/db-core";
 import * as financeSchema from "./schema";
 
@@ -41,11 +42,20 @@ export type TxClient = GenericTxClient<typeof schema>;
 /** Finance's own withTenant — same SET LOCAL logic as @noryx/db-core's
  * withTenant(), delegated to the one shared implementation
  * (withTenantScoped in generic-client.ts), just bound to Finance's own
- * schema/connection instead of db-core's. See Milestone 1a. */
+ * schema/connection instead of db-core's. See Milestone 1a.
+ *
+ * `txConfig` is an optional passthrough to `withTenantScoped`'s own
+ * `txConfig` param (ultimately Drizzle's `db.transaction(fn, config)`) —
+ * see that function's doc comment. Defaults to `undefined`, so every
+ * existing Finance caller (Accounts, AccountingPeriods, JournalEntries)
+ * that doesn't pass it keeps its exact current behavior; only
+ * GeneralLedgerService's read-only, multi-statement report methods pass
+ * `{ isolationLevel: "repeatable read", accessMode: "read only" }`. */
 export async function withTenant<T>(
   tenantId: string | null,
   fn: (tx: TxClient) => Promise<T>,
   db: Db = getDb(),
+  txConfig?: PgTransactionConfig,
 ): Promise<T> {
-  return withTenantScoped<typeof schema, T>(tenantId, fn, db);
+  return withTenantScoped<typeof schema, T>(tenantId, fn, db, txConfig);
 }

@@ -1,5 +1,6 @@
 import { Injectable, NotFoundException } from "@nestjs/common";
-import { and, eq, sql } from "@noryx/db-core";
+import { and, eq, sql, type PgTransactionConfig } from "@noryx/db-core";
+import type { LedgerMeta } from "@noryx/shared-types";
 import {
   accountingPeriods,
   chartOfAccounts,
@@ -10,6 +11,33 @@ import { withTenant, type TxClient } from "../db/db";
 import type { LedgerQueryDto } from "./dto/ledger-query.dto";
 import type { AccountBalanceQueryDto } from "./dto/account-balance-query.dto";
 import type { TrialBalanceQueryDto } from "./dto/trial-balance-query.dto";
+
+/** Every multi-statement read report in this file (getLedger, getBalance,
+ * getTrialBalance) opts into REPEATABLE READ + READ ONLY instead of the
+ * codebase's default READ COMMITTED — a single financial report is built
+ * from several separate SQL statements (resolve account, opening
+ * balance, page fetch, page-boundary predecessor, movement, ...), and
+ * under READ COMMITTED each statement gets its own MVCC snapshot, so a
+ * journal entry posted concurrently, between two of those statements,
+ * could be reflected in one but not the other — producing a response
+ * whose displayed rows and computed balances don't actually reconcile
+ * (confirmed empirically: a throwaway repro against a live Postgres
+ * instance showed a second statement in the same READ COMMITTED
+ * transaction observing a row committed after the transaction's first
+ * statement had already run; REPEATABLE READ eliminated it). REPEATABLE
+ * READ gives the whole transaction one snapshot taken at its first
+ * statement, which is exactly "every statement in this report sees the
+ * same point-in-time data" — no row locks, no `FOR UPDATE`, no change to
+ * the accounting model. READ ONLY is additionally correct because these
+ * methods never write. See `withTenantScoped`'s doc comment
+ * (packages/db-core/src/generic-client.ts) for the passthrough mechanism
+ * — every other Finance service (Accounts, AccountingPeriods,
+ * JournalEntries) keeps calling `withTenant` with no config and is
+ * unaffected. */
+export const REPORT_TX_CONFIG: PgTransactionConfig = {
+  isolationLevel: "repeatable read",
+  accessMode: "read only",
+};
 
 export interface LedgerLine {
   journalEntryId: string;
@@ -24,24 +52,9 @@ export interface LedgerLine {
   reversedByJournalEntryId: string | null;
 }
 
-export interface LedgerMetaResult {
-  page: number;
-  pageSize: number;
-  totalItems: number;
-  totalPages: number;
-  accountId: string;
-  accountCode: string;
-  accountName: string;
-  accountType: ChartOfAccount["type"];
-  normalBalance: "DEBIT" | "CREDIT";
-  openingBalanceMinor: number;
-  effectiveDateFrom: string | null;
-  effectiveDateTo: string;
-}
-
 export interface LedgerResult {
   rows: LedgerLine[];
-  meta: LedgerMetaResult;
+  meta: LedgerMeta;
 }
 
 export interface AccountBalanceResult {
@@ -135,115 +148,121 @@ export class GeneralLedgerService {
     accountId: string,
     query: LedgerQueryDto,
   ): Promise<LedgerResult> {
-    return withTenant(tenantId, async (tx: TxClient) => {
-      const account = await this.resolveAccount(
-        tx,
-        tenantId,
-        legalEntityId,
-        accountId,
-      );
-      const sign = this.signFor(account.type);
-
-      let effectiveDateFrom: string | null;
-      let effectiveDateTo: string;
-      if (query.periodId) {
-        const period = await this.resolvePeriodInScope(
+    return withTenant(
+      tenantId,
+      async (tx: TxClient) => {
+        const account = await this.resolveAccount(
           tx,
           tenantId,
           legalEntityId,
-          query.periodId,
+          accountId,
         );
-        effectiveDateFrom = period.startDate;
-        effectiveDateTo = period.endDate;
-      } else {
-        effectiveDateFrom = query.dateFrom ?? null;
-        effectiveDateTo = query.dateTo ?? this.todayUtc();
-      }
+        const sign = this.signFor(account.type);
 
-      const openingBalanceMinor = effectiveDateFrom
-        ? sign *
-          (
-            await this.rawTotalsBefore(
-              tx,
-              tenantId,
-              legalEntityId,
-              accountId,
-              effectiveDateFrom,
-            )
-          ).netDelta
-        : 0;
+        let effectiveDateFrom: string | null;
+        let effectiveDateTo: string;
+        if (query.periodId) {
+          const period = await this.resolvePeriodInScope(
+            tx,
+            tenantId,
+            legalEntityId,
+            query.periodId,
+          );
+          effectiveDateFrom = period.startDate;
+          effectiveDateTo = period.endDate;
+        } else {
+          effectiveDateFrom = query.dateFrom ?? null;
+          effectiveDateTo = query.dateTo ?? this.todayUtc();
+        }
 
-      const totalItems = await this.countLedgerLines(
-        tx,
-        tenantId,
-        legalEntityId,
-        accountId,
-        effectiveDateFrom,
-        effectiveDateTo,
-      );
+        const openingBalanceMinor = effectiveDateFrom
+          ? sign *
+            (
+              await this.rawTotalsBefore(
+                tx,
+                tenantId,
+                legalEntityId,
+                accountId,
+                effectiveDateFrom,
+              )
+            ).netDelta
+          : 0;
 
-      const offset = (query.page - 1) * query.pageSize;
-      const rows = await this.fetchLedgerPage(
-        tx,
-        tenantId,
-        legalEntityId,
-        accountId,
-        effectiveDateFrom,
-        effectiveDateTo,
-        query.pageSize,
-        offset,
-      );
-
-      let pageStartingBalance = openingBalanceMinor;
-      if (rows.length > 0 && query.page > 1) {
-        const first = rows[0]!;
-        const predecessor = await this.rawTotalsBeforeTuple(
+        const totalItems = await this.countLedgerLines(
           tx,
           tenantId,
           legalEntityId,
           accountId,
           effectiveDateFrom,
           effectiveDateTo,
-          first,
         );
-        pageStartingBalance = openingBalanceMinor + sign * predecessor.netDelta;
-      }
 
-      let running = pageStartingBalance;
-      const lines: LedgerLine[] = rows.map((r) => {
-        running += sign * (r.debitMinor - r.creditMinor);
-        return {
-          journalEntryId: r.journalEntryId,
-          journalNumber: r.journalNumber,
-          transactionDate: r.transactionDate,
-          memo: r.memo,
-          lineDescription: r.lineDescription,
-          debitMinor: r.debitMinor,
-          creditMinor: r.creditMinor,
-          runningBalanceMinor: running,
-          reversalOfJournalEntryId: r.reversalOfJournalEntryId,
-          reversedByJournalEntryId: r.reversedByJournalEntryId,
-        };
-      });
-
-      return {
-        rows: lines,
-        meta: {
-          page: query.page,
-          pageSize: query.pageSize,
-          totalItems,
-          totalPages: Math.ceil(totalItems / query.pageSize),
-          accountId: account.id,
-          accountCode: account.code,
-          accountName: account.name,
-          accountType: account.type,
-          normalBalance: sign === 1 ? "DEBIT" : "CREDIT",
-          openingBalanceMinor,
+        const offset = (query.page - 1) * query.pageSize;
+        const rows = await this.fetchLedgerPage(
+          tx,
+          tenantId,
+          legalEntityId,
+          accountId,
           effectiveDateFrom,
           effectiveDateTo,
-        },
-      };
-    });
+          query.pageSize,
+          offset,
+        );
+
+        let pageStartingBalance = openingBalanceMinor;
+        if (rows.length > 0 && query.page > 1) {
+          const first = rows[0]!;
+          const predecessor = await this.rawTotalsBeforeTuple(
+            tx,
+            tenantId,
+            legalEntityId,
+            accountId,
+            effectiveDateFrom,
+            effectiveDateTo,
+            first,
+          );
+          pageStartingBalance =
+            openingBalanceMinor + sign * predecessor.netDelta;
+        }
+
+        let running = pageStartingBalance;
+        const lines: LedgerLine[] = rows.map((r) => {
+          running += sign * (r.debitMinor - r.creditMinor);
+          return {
+            journalEntryId: r.journalEntryId,
+            journalNumber: r.journalNumber,
+            transactionDate: r.transactionDate,
+            memo: r.memo,
+            lineDescription: r.lineDescription,
+            debitMinor: r.debitMinor,
+            creditMinor: r.creditMinor,
+            runningBalanceMinor: running,
+            reversalOfJournalEntryId: r.reversalOfJournalEntryId,
+            reversedByJournalEntryId: r.reversedByJournalEntryId,
+          };
+        });
+
+        return {
+          rows: lines,
+          meta: {
+            page: query.page,
+            pageSize: query.pageSize,
+            totalItems,
+            totalPages: Math.ceil(totalItems / query.pageSize),
+            accountId: account.id,
+            accountCode: account.code,
+            accountName: account.name,
+            accountType: account.type,
+            normalBalance: sign === 1 ? "DEBIT" : "CREDIT",
+            openingBalanceMinor,
+            effectiveDateFrom,
+            effectiveDateTo,
+          },
+        };
+      },
+      undefined,
+      REPORT_TX_CONFIG,
+    );
   }
 
   async getBalance(
@@ -252,82 +271,87 @@ export class GeneralLedgerService {
     accountId: string,
     query: AccountBalanceQueryDto,
   ): Promise<AccountBalanceResult> {
-    return withTenant(tenantId, async (tx: TxClient) => {
-      const account = await this.resolveAccount(
-        tx,
-        tenantId,
-        legalEntityId,
-        accountId,
-      );
-      const sign = this.signFor(account.type);
-
-      let effectiveDateFrom: string | null;
-      let effectiveDateTo: string;
-      const isRangeMode =
-        query.periodId !== undefined ||
-        query.dateFrom !== undefined ||
-        query.dateTo !== undefined;
-
-      if (query.periodId) {
-        const period = await this.resolvePeriodInScope(
+    return withTenant(
+      tenantId,
+      async (tx: TxClient) => {
+        const account = await this.resolveAccount(
           tx,
           tenantId,
           legalEntityId,
-          query.periodId,
+          accountId,
         );
-        effectiveDateFrom = period.startDate;
-        effectiveDateTo = period.endDate;
-      } else if (isRangeMode) {
-        effectiveDateFrom = query.dateFrom ?? null;
-        effectiveDateTo = query.dateTo ?? this.todayUtc();
-      } else {
-        // asOf mode (explicit asOf, or the §4.8 today-default when
-        // neither asOf nor any range input is given) — §3.1.1:
-        // openingBalanceMinor is 0, periodMovementMinor is the full
-        // life-to-date balance, closingBalanceMinor equals it.
-        effectiveDateFrom = null;
-        effectiveDateTo = query.asOf ?? this.todayUtc();
-      }
+        const sign = this.signFor(account.type);
 
-      const openingBalanceMinor = effectiveDateFrom
-        ? sign *
-          (
-            await this.rawTotalsBefore(
-              tx,
-              tenantId,
-              legalEntityId,
-              accountId,
-              effectiveDateFrom,
-            )
-          ).netDelta
-        : 0;
+        let effectiveDateFrom: string | null;
+        let effectiveDateTo: string;
+        const isRangeMode =
+          query.periodId !== undefined ||
+          query.dateFrom !== undefined ||
+          query.dateTo !== undefined;
 
-      const movement = await this.rawTotalsWithinRange(
-        tx,
-        tenantId,
-        legalEntityId,
-        accountId,
-        effectiveDateFrom,
-        effectiveDateTo,
-      );
-      const periodMovementMinor = sign * movement.netDelta;
-      const closingBalanceMinor = openingBalanceMinor + periodMovementMinor;
+        if (query.periodId) {
+          const period = await this.resolvePeriodInScope(
+            tx,
+            tenantId,
+            legalEntityId,
+            query.periodId,
+          );
+          effectiveDateFrom = period.startDate;
+          effectiveDateTo = period.endDate;
+        } else if (isRangeMode) {
+          effectiveDateFrom = query.dateFrom ?? null;
+          effectiveDateTo = query.dateTo ?? this.todayUtc();
+        } else {
+          // asOf mode (explicit asOf, or the §4.8 today-default when
+          // neither asOf nor any range input is given) — §3.1.1:
+          // openingBalanceMinor is 0, periodMovementMinor is the full
+          // life-to-date balance, closingBalanceMinor equals it.
+          effectiveDateFrom = null;
+          effectiveDateTo = query.asOf ?? this.todayUtc();
+        }
 
-      return {
-        accountId: account.id,
-        accountCode: account.code,
-        accountName: account.name,
-        accountType: account.type,
-        normalBalance: sign === 1 ? "DEBIT" : "CREDIT",
-        effectiveDateFrom,
-        effectiveDateTo,
-        openingBalanceMinor,
-        periodMovementMinor,
-        closingBalanceMinor,
-        totalDebitMinor: movement.rawDebit,
-        totalCreditMinor: movement.rawCredit,
-      };
-    });
+        const openingBalanceMinor = effectiveDateFrom
+          ? sign *
+            (
+              await this.rawTotalsBefore(
+                tx,
+                tenantId,
+                legalEntityId,
+                accountId,
+                effectiveDateFrom,
+              )
+            ).netDelta
+          : 0;
+
+        const movement = await this.rawTotalsWithinRange(
+          tx,
+          tenantId,
+          legalEntityId,
+          accountId,
+          effectiveDateFrom,
+          effectiveDateTo,
+        );
+        const periodMovementMinor = sign * movement.netDelta;
+        const closingBalanceMinor = openingBalanceMinor + periodMovementMinor;
+
+        return {
+          accountId: account.id,
+          accountCode: account.code,
+          accountName: account.name,
+          accountType: account.type,
+          normalBalance: sign === 1 ? "DEBIT" : "CREDIT",
+          effectiveDateFrom,
+          effectiveDateTo,
+          openingBalanceMinor,
+          periodMovementMinor,
+          closingBalanceMinor,
+          totalDebitMinor: movement.rawDebit,
+          totalCreditMinor: movement.rawCredit,
+        };
+      },
+      undefined,
+      REPORT_TX_CONFIG,
+    );
   }
 
   async getTrialBalance(
@@ -335,27 +359,29 @@ export class GeneralLedgerService {
     legalEntityId: string,
     query: TrialBalanceQueryDto,
   ): Promise<TrialBalanceResult> {
-    return withTenant(tenantId, async (tx: TxClient) => {
-      let asOf: string;
-      let resolvedPeriodId: string | null;
-      if (query.periodId) {
-        const period = await this.resolvePeriodInScope(
-          tx,
-          tenantId,
-          legalEntityId,
-          query.periodId,
-        );
-        asOf = period.endDate;
-        resolvedPeriodId = period.id;
-      } else if (query.asOf) {
-        asOf = query.asOf;
-        resolvedPeriodId = null;
-      } else {
-        asOf = this.todayUtc();
-        resolvedPeriodId = null;
-      }
+    return withTenant(
+      tenantId,
+      async (tx: TxClient) => {
+        let asOf: string;
+        let resolvedPeriodId: string | null;
+        if (query.periodId) {
+          const period = await this.resolvePeriodInScope(
+            tx,
+            tenantId,
+            legalEntityId,
+            query.periodId,
+          );
+          asOf = period.endDate;
+          resolvedPeriodId = period.id;
+        } else if (query.asOf) {
+          asOf = query.asOf;
+          resolvedPeriodId = null;
+        } else {
+          asOf = this.todayUtc();
+          resolvedPeriodId = null;
+        }
 
-      const raw = (await tx.execute(sql`
+        const raw = (await tx.execute(sql`
         SELECT
           coa.id AS account_id,
           coa.code AS account_code,
@@ -380,65 +406,68 @@ export class GeneralLedgerService {
         GROUP BY coa.id, coa.code, coa.name, coa.type, coa.is_active
         ORDER BY coa.code ASC
       `)) as unknown as Array<{
-        account_id: string;
-        account_code: string;
-        account_name: string;
-        account_type: ChartOfAccount["type"];
-        is_active: boolean;
-        raw_debit: unknown;
-        raw_credit: unknown;
-      }>;
+          account_id: string;
+          account_code: string;
+          account_name: string;
+          account_type: ChartOfAccount["type"];
+          is_active: boolean;
+          raw_debit: unknown;
+          raw_credit: unknown;
+        }>;
 
-      const rows: TrialBalanceRow[] = [];
-      let totalDebitMinor = 0;
-      let totalCreditMinor = 0;
-      for (const r of raw) {
-        const rawDebit = this.toNumber(r.raw_debit);
-        const rawCredit = this.toNumber(r.raw_credit);
-        const netMinor = rawDebit - rawCredit;
-        if (netMinor === 0 && !query.includeZeroBalance) continue;
+        const rows: TrialBalanceRow[] = [];
+        let totalDebitMinor = 0;
+        let totalCreditMinor = 0;
+        for (const r of raw) {
+          const rawDebit = this.toNumber(r.raw_debit);
+          const rawCredit = this.toNumber(r.raw_credit);
+          const netMinor = rawDebit - rawCredit;
+          if (netMinor === 0 && !query.includeZeroBalance) continue;
 
-        const sign = this.signFor(r.account_type);
-        const debitMinor = netMinor > 0 ? netMinor : 0;
-        const creditMinor = netMinor < 0 ? -netMinor : 0;
-        totalDebitMinor += debitMinor;
-        totalCreditMinor += creditMinor;
+          const sign = this.signFor(r.account_type);
+          const debitMinor = netMinor > 0 ? netMinor : 0;
+          const creditMinor = netMinor < 0 ? -netMinor : 0;
+          totalDebitMinor += debitMinor;
+          totalCreditMinor += creditMinor;
 
-        rows.push({
-          accountId: r.account_id,
-          accountCode: r.account_code,
-          accountName: r.account_name,
-          accountType: r.account_type,
-          normalBalance: sign === 1 ? "DEBIT" : "CREDIT",
-          isActive: r.is_active,
-          debitMinor,
-          creditMinor,
-        });
-      }
+          rows.push({
+            accountId: r.account_id,
+            accountCode: r.account_code,
+            accountName: r.account_name,
+            accountType: r.account_type,
+            normalBalance: sign === 1 ? "DEBIT" : "CREDIT",
+            isActive: r.is_active,
+            debitMinor,
+            creditMinor,
+          });
+        }
 
-      // §5.1.6's internal defensive assertion — this must always hold by
-      // construction (§4.3's proof, resting on 2b's deferred balance
-      // trigger); a mismatch here is a bug worth surfacing loudly, not
-      // silently shipping a non-reconciling trial balance.
-      if (totalDebitMinor !== totalCreditMinor) {
-        throw new Error(
-          `Trial balance failed to reconcile: total debits (${totalDebitMinor}) != total credits (${totalCreditMinor}). This should be impossible given 2b's balance invariant trigger — surfacing as a hard failure rather than returning a wrong report.`,
-        );
-      }
+        // §5.1.6's internal defensive assertion — this must always hold by
+        // construction (§4.3's proof, resting on 2b's deferred balance
+        // trigger); a mismatch here is a bug worth surfacing loudly, not
+        // silently shipping a non-reconciling trial balance.
+        if (totalDebitMinor !== totalCreditMinor) {
+          throw new Error(
+            `Trial balance failed to reconcile: total debits (${totalDebitMinor}) != total credits (${totalCreditMinor}). This should be impossible given 2b's balance invariant trigger — surfacing as a hard failure rather than returning a wrong report.`,
+          );
+        }
 
-      return {
-        rows,
-        meta: {
-          asOf,
-          periodId: resolvedPeriodId,
-          legalEntityId,
-          totalDebitMinor,
-          totalCreditMinor,
-          accountCount: rows.length,
-          includeZeroBalance: query.includeZeroBalance,
-        },
-      };
-    });
+        return {
+          rows,
+          meta: {
+            asOf,
+            periodId: resolvedPeriodId,
+            legalEntityId,
+            totalDebitMinor,
+            totalCreditMinor,
+            accountCount: rows.length,
+            includeZeroBalance: query.includeZeroBalance,
+          },
+        };
+      },
+      undefined,
+      REPORT_TX_CONFIG,
+    );
   }
 
   // ---------------------------------------------------------------------
