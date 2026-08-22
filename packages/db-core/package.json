@@ -10,6 +10,8 @@
     "generate": "drizzle-kit generate",
     "migrate": "drizzle-kit migrate && ts-node src/apply-rls.ts",
     "migrate:dev": "drizzle-kit push && ts-node src/apply-rls.ts",
+    "apply-app-role": "ts-node src/apply-app-role.ts",
+    "assert-role-privileges": "ts-node src/assert-role-privileges.ts",
     "studio": "drizzle-kit studio",
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",

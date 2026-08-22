@@ -19,6 +19,8 @@
     "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md}\"",
     "db:migrate": "pnpm --filter @noryx/db-core run migrate",
     "db:generate": "pnpm --filter @noryx/db-core run generate",
+    "db:apply-app-role": "pnpm --filter @noryx/db-core run apply-app-role",
+    "db:assert-role-privileges": "pnpm --filter @noryx/db-core run assert-role-privileges",
     "prepare": "husky || true"
   },
   "devDependencies": {

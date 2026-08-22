@@ -1,5 +1,19 @@
 name: noryx-platform
 
+# Milestone 3.1 (Tenant/RLS Hardening) note on DB roles — see
+# docs/finance-milestone-3.1-tenant-rls-hardening-proposal.md §1.1/§2.1/
+# §2.2. POSTGRES_USER (below) becomes the cluster's bootstrap
+# SUPERUSER — the official Postgres image's initdb always grants that,
+# and superusers unconditionally bypass Row-Level Security regardless of
+# FORCE ROW LEVEL SECURITY. `noryx` here is deliberately used ONLY as the
+# migration/schema-owner role (run `pnpm db:migrate`, each service's own
+# `migrate`, then `pnpm db:apply-app-role` against this database before
+# starting the app services — this repo doesn't run migrations
+# automatically on container start, consistent with the existing
+# pattern). The running application services below connect as
+# `noryx_app` instead — a role with no superuser/bypass-RLS privileges,
+# created by `pnpm db:apply-app-role` (packages/db-core/drizzle/app-role/
+# 001_create_app_role.sql).
 services:
   postgres:
     image: postgres:16-alpine
@@ -38,7 +52,7 @@ services:
       postgres: { condition: service_healthy }
     environment:
       PORT: 3001
-      DATABASE_URL: postgresql://noryx:noryx@postgres:5432/noryx
+      DATABASE_URL: postgresql://noryx_app:noryx_app@postgres:5432/noryx
       JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-local-dev-only-secret-do-not-use-in-production}
       MFA_ENCRYPTION_KEY: ${MFA_ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
     ports:
@@ -53,7 +67,7 @@ services:
       postgres: { condition: service_healthy }
     environment:
       PORT: 3010
-      DATABASE_URL: postgresql://noryx:noryx@postgres:5432/noryx
+      DATABASE_URL: postgresql://noryx_app:noryx_app@postgres:5432/noryx
       JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-local-dev-only-secret-do-not-use-in-production}
     ports:
       - "3010:3010"
