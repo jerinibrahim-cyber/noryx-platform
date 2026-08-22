@@ -15,7 +15,8 @@
     "studio": "drizzle-kit studio",
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "jest --passWithNoTests"
+    "test": "jest --passWithNoTests",
+    "test:e2e": "jest --config jest-e2e.config.js"
   },
   "dependencies": {
     "drizzle-orm": "^0.36.4",

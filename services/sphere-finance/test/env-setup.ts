@@ -15,3 +15,8 @@ process.env.JWT_ACCESS_SECRET ??=
   "test-only-secret-do-not-use-in-real-environments";
 process.env.DATABASE_URL ??=
   "postgresql://noryx:noryx@localhost:5432/noryx_test";
+// Milestone 3.1 §2.1/§2.6 — the dedicated least-privilege application
+// role, used by rls-hardening.e2e-spec.ts to connect exactly as the
+// running application does, independent of any service/ORM code.
+process.env.APP_ROLE_DATABASE_URL ??=
+  "postgresql://noryx_app:noryx_app@localhost:5432/noryx_test";
