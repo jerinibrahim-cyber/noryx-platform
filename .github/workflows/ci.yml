@@ -91,11 +91,26 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
-      # Matches every service's test/env-setup.ts default exactly, so
-      # this is set here for the migration/setup steps below (which are
-      # plain script invocations, not Jest runs — env-setup.ts's
-      # defaults only apply inside Jest) rather than because the test
-      # run itself would otherwise be missing it.
+      # This job-level DATABASE_URL is the administrative/bootstrap role
+      # (noryx) — matches every service's test/env-setup.ts default, and
+      # is what the migration/setup steps below need: schema migrations,
+      # RLS policy application, constraint application, and provisioning
+      # noryx_app itself all require the role that owns the schema.
+      #
+      # It is deliberately NOT what the final `test:e2e` step below runs
+      # under — that step overrides DATABASE_URL to APP_ROLE_DATABASE_URL
+      # (noryx_app), the same override pattern the privilege-guard step
+      # already used. Root cause this corrects: on the real postgres:16
+      # service (POSTGRES_USER: noryx), noryx is the cluster's bootstrap
+      # superuser, which unconditionally bypasses RLS. The application
+      # under test, and this suite's own direct-DB verification queries
+      # (e.g. general-ledger.e2e-spec.ts's no-mutation-side-effects
+      # check, which is intentionally unscoped and relies entirely on RLS
+      # to filter it), were running as that superuser — so RLS silently
+      # did nothing for the one thing this whole job exists to prove.
+      # Everything before this step keeps using the admin role above;
+      # only the actual test run moves to the least-privilege role RLS
+      # actually applies to.
       DATABASE_URL: postgresql://noryx:noryx@localhost:5432/noryx_test
       APP_ROLE_DATABASE_URL: postgresql://noryx_app:noryx_app@localhost:5432/noryx_test
       JWT_ACCESS_SECRET: test-only-secret-do-not-use-in-real-environments
@@ -117,7 +132,10 @@ jobs:
         env:
           DATABASE_URL: ${{ env.APP_ROLE_DATABASE_URL }}
         run: pnpm run db:assert-role-privileges
-      - run: pnpm run test:e2e
+      - name: Run the e2e suite as the least-privilege app role (noryx_app), not the admin role
+        env:
+          DATABASE_URL: ${{ env.APP_ROLE_DATABASE_URL }}
+        run: pnpm run test:e2e
 
   sast:
     name: SAST (Semgrep)
