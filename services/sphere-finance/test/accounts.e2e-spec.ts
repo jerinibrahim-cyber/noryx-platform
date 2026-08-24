@@ -206,6 +206,78 @@ describe("Accounts (e2e) — RBAC, tenant + legal-entity isolation, audit immuta
     });
   });
 
+  /**
+   * Milestone 3.2 Stage 2 — proves the shared `requireTenantContext()`
+   * (packages/auth-core/src/tenant-context.ts) is actually wired into and
+   * enforced by this controller, not just unit-tested in isolation. This
+   * is deliberately the one controller carrying this focused proof — per
+   * the Stage 2 approval, the mechanism itself doesn't need duplicate e2e
+   * coverage in all four controllers, only proof it works end-to-end
+   * somewhere real.
+   */
+  describe("shared tenant-context enforcement (requireTenantContext)", () => {
+    it("rejects a token with no tenant context (403)", async () => {
+      const token = jwt.sign({
+        sub: randomUUID(),
+        tenantId: null,
+        legalEntityId: legalEntityA1Id,
+        tier: "TENANT_INTERNAL",
+        roles: ["finance.viewer"],
+        modules: ["sphere-finance"],
+      });
+      await request(app.getHttpServer())
+        .get("/v1/finance/accounts")
+        .set("Authorization", `Bearer ${token}`)
+        .expect(403);
+    });
+
+    it("rejects a token with no legal-entity context (403)", async () => {
+      const token = jwt.sign({
+        sub: randomUUID(),
+        tenantId: tenantAId,
+        legalEntityId: null,
+        tier: "TENANT_INTERNAL",
+        roles: ["finance.viewer"],
+        modules: ["sphere-finance"],
+      });
+      await request(app.getHttpServer())
+        .get("/v1/finance/accounts")
+        .set("Authorization", `Bearer ${token}`)
+        .expect(403);
+    });
+
+    it("rejects a token with neither tenant nor legal-entity context (403), with the tenant-context failure winning", async () => {
+      const token = jwt.sign({
+        sub: randomUUID(),
+        tenantId: null,
+        legalEntityId: null,
+        tier: "TENANT_INTERNAL",
+        roles: ["finance.viewer"],
+        modules: ["sphere-finance"],
+      });
+      const res = await request(app.getHttpServer())
+        .get("/v1/finance/accounts")
+        .set("Authorization", `Bearer ${token}`)
+        .expect(403);
+      // Proves evaluation order, not just the status code: the tenant
+      // message is thrown, not the legal-entity one, matching
+      // requireTenantContext()'s tenant-first check (and the four prior
+      // duplicated implementations it replaced, which always evaluated
+      // requireTenantId() before requireLegalEntityId()).
+      expect(res.body.error.message).toBe(
+        "This token has no tenant context; Chart of Accounts requires a tenant-scoped token.",
+      );
+    });
+
+    it("allows a request through when both tenant and legal-entity context are present (200)", async () => {
+      const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.viewer"]);
+      await request(app.getHttpServer())
+        .get("/v1/finance/accounts")
+        .set("Authorization", `Bearer ${token}`)
+        .expect(200);
+    });
+  });
+
   describe("cross-tenant isolation — the negative-case proof", () => {
     let accountAId: string;
     let accountBId: string;

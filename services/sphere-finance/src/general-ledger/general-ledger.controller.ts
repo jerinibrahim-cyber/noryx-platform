@@ -1,12 +1,11 @@
+import { Controller, Get, Param, Query, UseGuards } from "@nestjs/common";
 import {
-  Controller,
-  ForbiddenException,
-  Get,
-  Param,
-  Query,
-  UseGuards,
-} from "@nestjs/common";
-import { JwtAuthGuard, RolesGuard, Roles, CurrentUser } from "@noryx/auth-core";
+  JwtAuthGuard,
+  RolesGuard,
+  Roles,
+  CurrentUser,
+  requireTenantContext,
+} from "@noryx/auth-core";
 import type { AuthenticatedRequestUser } from "@noryx/shared-types";
 import { ApiSuccessWithMeta } from "../common/interceptors/response.interceptor";
 import { GeneralLedgerService } from "./general-ledger.service";
@@ -35,6 +34,12 @@ import { TrialBalanceQueryDto } from "./dto/trial-balance-query.dto";
  * `ResponseInterceptor` without changing any other route's behavior.
  * Account Balance returns a single computed answer with no `meta`
  * (§3.1.4), so it returns its plain result object.
+ *
+ * Milestone 3.2 Stage 2 — the tenant/legal-entity presence check below is
+ * now the shared `requireTenantContext()` from `@noryx/auth-core`
+ * (previously this controller's own private requireTenantId()/
+ * requireLegalEntityId() methods). Behavior and message wording are
+ * unchanged.
  */
 @Controller()
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -48,9 +53,13 @@ export class GeneralLedgerController {
     @Param("id") id: string,
     @Query() query: LedgerQueryDto,
   ) {
+    const { tenantId, legalEntityId } = requireTenantContext(
+      user,
+      "the general ledger requires",
+    );
     const result = await this.generalLedger.getLedger(
-      this.requireTenantId(user),
-      this.requireLegalEntityId(user),
+      tenantId,
+      legalEntityId,
       id,
       query,
     );
@@ -64,12 +73,11 @@ export class GeneralLedgerController {
     @Param("id") id: string,
     @Query() query: AccountBalanceQueryDto,
   ) {
-    return this.generalLedger.getBalance(
-      this.requireTenantId(user),
-      this.requireLegalEntityId(user),
-      id,
-      query,
+    const { tenantId, legalEntityId } = requireTenantContext(
+      user,
+      "the general ledger requires",
     );
+    return this.generalLedger.getBalance(tenantId, legalEntityId, id, query);
   }
 
   @Get("trial-balance")
@@ -78,29 +86,15 @@ export class GeneralLedgerController {
     @CurrentUser() user: AuthenticatedRequestUser,
     @Query() query: TrialBalanceQueryDto,
   ) {
+    const { tenantId, legalEntityId } = requireTenantContext(
+      user,
+      "the general ledger requires",
+    );
     const result = await this.generalLedger.getTrialBalance(
-      this.requireTenantId(user),
-      this.requireLegalEntityId(user),
+      tenantId,
+      legalEntityId,
       query,
     );
     return new ApiSuccessWithMeta(result.rows, result.meta);
-  }
-
-  private requireTenantId(user: AuthenticatedRequestUser): string {
-    if (!user.tenantId) {
-      throw new ForbiddenException(
-        "This token has no tenant context; the general ledger requires a tenant-scoped token.",
-      );
-    }
-    return user.tenantId;
-  }
-
-  private requireLegalEntityId(user: AuthenticatedRequestUser): string {
-    if (!user.legalEntityId) {
-      throw new ForbiddenException(
-        "This token has no legal-entity context; the general ledger requires a legal-entity-scoped token.",
-      );
-    }
-    return user.legalEntityId;
   }
 }

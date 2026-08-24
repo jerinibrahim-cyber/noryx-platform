@@ -1,14 +1,19 @@
 import {
   Body,
   Controller,
-  ForbiddenException,
   Get,
   Param,
   Patch,
   Post,
   UseGuards,
 } from "@nestjs/common";
-import { JwtAuthGuard, RolesGuard, Roles, CurrentUser } from "@noryx/auth-core";
+import {
+  JwtAuthGuard,
+  RolesGuard,
+  Roles,
+  CurrentUser,
+  requireTenantContext,
+} from "@noryx/auth-core";
 import type { AuthenticatedRequestUser } from "@noryx/shared-types";
 import { AccountingPeriodsService } from "./accounting-periods.service";
 import { CreateAccountingPeriodDto } from "./dto/create-accounting-period.dto";
@@ -20,6 +25,12 @@ import { CreateAccountingPeriodDto } from "./dto/create-accounting-period.dto";
  * used for journal entries. §3/§9 of the 2c proposal.
  * tenantId/legalEntityId always come from the verified JWT, never from
  * a request param/body — same convention as AccountsController.
+ *
+ * Milestone 3.2 Stage 2 — the tenant/legal-entity presence check below is
+ * now the shared `requireTenantContext()` from `@noryx/auth-core`
+ * (previously this controller's own private requireTenantId()/
+ * requireLegalEntityId() methods). Behavior and message wording are
+ * unchanged.
  */
 @Controller("accounting-periods")
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -32,21 +43,21 @@ export class AccountingPeriodsController {
     @CurrentUser() user: AuthenticatedRequestUser,
     @Body() dto: CreateAccountingPeriodDto,
   ) {
-    return this.periods.create(
-      this.requireTenantId(user),
-      this.requireLegalEntityId(user),
-      user.userId,
-      dto,
+    const { tenantId, legalEntityId } = requireTenantContext(
+      user,
+      "accounting periods require",
     );
+    return this.periods.create(tenantId, legalEntityId, user.userId, dto);
   }
 
   @Get()
   @Roles("finance.viewer", "finance.poster", "finance.admin")
   list(@CurrentUser() user: AuthenticatedRequestUser) {
-    return this.periods.list(
-      this.requireTenantId(user),
-      this.requireLegalEntityId(user),
+    const { tenantId, legalEntityId } = requireTenantContext(
+      user,
+      "accounting periods require",
     );
+    return this.periods.list(tenantId, legalEntityId);
   }
 
   @Patch(":id/close")
@@ -55,29 +66,10 @@ export class AccountingPeriodsController {
     @CurrentUser() user: AuthenticatedRequestUser,
     @Param("id") id: string,
   ) {
-    return this.periods.close(
-      this.requireTenantId(user),
-      this.requireLegalEntityId(user),
-      user.userId,
-      id,
+    const { tenantId, legalEntityId } = requireTenantContext(
+      user,
+      "accounting periods require",
     );
-  }
-
-  private requireTenantId(user: AuthenticatedRequestUser): string {
-    if (!user.tenantId) {
-      throw new ForbiddenException(
-        "This token has no tenant context; accounting periods require a tenant-scoped token.",
-      );
-    }
-    return user.tenantId;
-  }
-
-  private requireLegalEntityId(user: AuthenticatedRequestUser): string {
-    if (!user.legalEntityId) {
-      throw new ForbiddenException(
-        "This token has no legal-entity context; accounting periods require a legal-entity-scoped token.",
-      );
-    }
-    return user.legalEntityId;
+    return this.periods.close(tenantId, legalEntityId, user.userId, id);
   }
 }

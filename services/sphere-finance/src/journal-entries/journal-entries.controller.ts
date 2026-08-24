@@ -3,7 +3,6 @@ import {
   Body,
   Controller,
   Delete,
-  ForbiddenException,
   Get,
   HttpCode,
   Param,
@@ -12,7 +11,13 @@ import {
   Query,
   UseGuards,
 } from "@nestjs/common";
-import { JwtAuthGuard, RolesGuard, Roles, CurrentUser } from "@noryx/auth-core";
+import {
+  JwtAuthGuard,
+  RolesGuard,
+  Roles,
+  CurrentUser,
+  requireTenantContext,
+} from "@noryx/auth-core";
 import type { AuthenticatedRequestUser } from "@noryx/shared-types";
 import { JournalEntriesService } from "./journal-entries.service";
 import { CreateJournalEntryDto } from "./dto/create-journal-entry.dto";
@@ -33,6 +38,12 @@ import { ReverseJournalEntryDto } from "./dto/reverse-journal-entry.dto";
  * the concurrent-posting test's expected "winner 200 / loser 409" shape
  * (§11). `/reverse` keeps the `201` default since it does create a new
  * journal entry.
+ *
+ * Milestone 3.2 Stage 2 — the tenant/legal-entity presence check below is
+ * now the shared `requireTenantContext()` from `@noryx/auth-core`
+ * (previously this controller's own private requireTenantId()/
+ * requireLegalEntityId() methods). Behavior and message wording are
+ * unchanged.
  */
 @Controller("journal-entries")
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -45,9 +56,13 @@ export class JournalEntriesController {
     @CurrentUser() user: AuthenticatedRequestUser,
     @Body() dto: CreateJournalEntryDto,
   ) {
+    const { tenantId, legalEntityId } = requireTenantContext(
+      user,
+      "journal entries require",
+    );
     return this.journalEntries.create(
-      this.requireTenantId(user),
-      this.requireLegalEntityId(user),
+      tenantId,
+      legalEntityId,
       user.userId,
       dto,
     );
@@ -67,11 +82,16 @@ export class JournalEntriesController {
         'status filter must be "DRAFT" or "POSTED".',
       );
     }
-    return this.journalEntries.list(
-      this.requireTenantId(user),
-      this.requireLegalEntityId(user),
-      { status, periodId, dateFrom, dateTo },
+    const { tenantId, legalEntityId } = requireTenantContext(
+      user,
+      "journal entries require",
     );
+    return this.journalEntries.list(tenantId, legalEntityId, {
+      status,
+      periodId,
+      dateFrom,
+      dateTo,
+    });
   }
 
   @Get(":id")
@@ -80,11 +100,11 @@ export class JournalEntriesController {
     @CurrentUser() user: AuthenticatedRequestUser,
     @Param("id") id: string,
   ) {
-    return this.journalEntries.findOne(
-      this.requireTenantId(user),
-      this.requireLegalEntityId(user),
-      id,
+    const { tenantId, legalEntityId } = requireTenantContext(
+      user,
+      "journal entries require",
     );
+    return this.journalEntries.findOne(tenantId, legalEntityId, id);
   }
 
   @Patch(":id")
@@ -94,9 +114,13 @@ export class JournalEntriesController {
     @Param("id") id: string,
     @Body() dto: UpdateJournalEntryDto,
   ) {
+    const { tenantId, legalEntityId } = requireTenantContext(
+      user,
+      "journal entries require",
+    );
     return this.journalEntries.update(
-      this.requireTenantId(user),
-      this.requireLegalEntityId(user),
+      tenantId,
+      legalEntityId,
       user.userId,
       id,
       dto,
@@ -109,24 +133,22 @@ export class JournalEntriesController {
     @CurrentUser() user: AuthenticatedRequestUser,
     @Param("id") id: string,
   ) {
-    return this.journalEntries.remove(
-      this.requireTenantId(user),
-      this.requireLegalEntityId(user),
-      user.userId,
-      id,
+    const { tenantId, legalEntityId } = requireTenantContext(
+      user,
+      "journal entries require",
     );
+    return this.journalEntries.remove(tenantId, legalEntityId, user.userId, id);
   }
 
   @Post(":id/post")
   @HttpCode(200)
   @Roles("finance.poster")
   post(@CurrentUser() user: AuthenticatedRequestUser, @Param("id") id: string) {
-    return this.journalEntries.post(
-      this.requireTenantId(user),
-      this.requireLegalEntityId(user),
-      user.userId,
-      id,
+    const { tenantId, legalEntityId } = requireTenantContext(
+      user,
+      "journal entries require",
     );
+    return this.journalEntries.post(tenantId, legalEntityId, user.userId, id);
   }
 
   @Post(":id/reverse")
@@ -136,30 +158,16 @@ export class JournalEntriesController {
     @Param("id") id: string,
     @Body() dto: ReverseJournalEntryDto,
   ) {
+    const { tenantId, legalEntityId } = requireTenantContext(
+      user,
+      "journal entries require",
+    );
     return this.journalEntries.reverse(
-      this.requireTenantId(user),
-      this.requireLegalEntityId(user),
+      tenantId,
+      legalEntityId,
       user.userId,
       id,
       dto,
     );
-  }
-
-  private requireTenantId(user: AuthenticatedRequestUser): string {
-    if (!user.tenantId) {
-      throw new ForbiddenException(
-        "This token has no tenant context; journal entries require a tenant-scoped token.",
-      );
-    }
-    return user.tenantId;
-  }
-
-  private requireLegalEntityId(user: AuthenticatedRequestUser): string {
-    if (!user.legalEntityId) {
-      throw new ForbiddenException(
-        "This token has no legal-entity context; journal entries require a legal-entity-scoped token.",
-      );
-    }
-    return user.legalEntityId;
   }
 }

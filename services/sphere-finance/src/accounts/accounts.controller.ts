@@ -1,7 +1,6 @@
 import {
   Body,
   Controller,
-  ForbiddenException,
   Get,
   Param,
   Patch,
@@ -9,7 +8,13 @@ import {
   Query,
   UseGuards,
 } from "@nestjs/common";
-import { JwtAuthGuard, RolesGuard, Roles, CurrentUser } from "@noryx/auth-core";
+import {
+  JwtAuthGuard,
+  RolesGuard,
+  Roles,
+  CurrentUser,
+  requireTenantContext,
+} from "@noryx/auth-core";
 import type { AuthenticatedRequestUser } from "@noryx/shared-types";
 import { AccountsService } from "./accounts.service";
 import { CreateAccountDto } from "./dto/create-account.dto";
@@ -28,6 +33,18 @@ import { CreateAccountDto } from "./dto/create-account.dto";
  * scoped to the caller's own legal entity only — no cross-entity
  * selector, no entity switching. That's a deliberate non-goal for this
  * increment, not an oversight.
+ *
+ * Milestone 3.2 Stage 2 — the tenant/legal-entity presence check below is
+ * now the shared `requireTenantContext()` from `@noryx/auth-core`
+ * (previously this controller's own private requireTenantId()/
+ * requireLegalEntityId() methods; docs/hardening/milestone-3.2-proposal.md
+ * §9 item 2). Behavior, including the exact message wording below and the
+ * PLATFORM_OPERATOR reasoning in this doc comment, is unchanged:
+ * PLATFORM_OPERATOR tokens carry tenantId: null (System Architecture v1
+ * §3.2) — Chart of Accounts is inherently tenant-owned data, so there is
+ * no meaningful cross-tenant operation here. A platform operator would
+ * need to impersonate a specific tenant (out of scope for this
+ * milestone) rather than call these routes directly.
  */
 @Controller("accounts")
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -40,12 +57,11 @@ export class AccountsController {
     @CurrentUser() user: AuthenticatedRequestUser,
     @Body() dto: CreateAccountDto,
   ) {
-    return this.accounts.create(
-      this.requireTenantId(user),
-      this.requireLegalEntityId(user),
-      user.userId,
-      dto,
+    const { tenantId, legalEntityId } = requireTenantContext(
+      user,
+      "Chart of Accounts requires",
     );
+    return this.accounts.create(tenantId, legalEntityId, user.userId, dto);
   }
 
   @Get()
@@ -54,9 +70,13 @@ export class AccountsController {
     @CurrentUser() user: AuthenticatedRequestUser,
     @Query("includeInactive") includeInactive?: string,
   ) {
+    const { tenantId, legalEntityId } = requireTenantContext(
+      user,
+      "Chart of Accounts requires",
+    );
     return this.accounts.list(
-      this.requireTenantId(user),
-      this.requireLegalEntityId(user),
+      tenantId,
+      legalEntityId,
       includeInactive === "true",
     );
   }
@@ -67,11 +87,11 @@ export class AccountsController {
     @CurrentUser() user: AuthenticatedRequestUser,
     @Param("id") id: string,
   ) {
-    return this.accounts.findOne(
-      this.requireTenantId(user),
-      this.requireLegalEntityId(user),
-      id,
+    const { tenantId, legalEntityId } = requireTenantContext(
+      user,
+      "Chart of Accounts requires",
     );
+    return this.accounts.findOne(tenantId, legalEntityId, id);
   }
 
   @Patch(":id/archive")
@@ -80,38 +100,10 @@ export class AccountsController {
     @CurrentUser() user: AuthenticatedRequestUser,
     @Param("id") id: string,
   ) {
-    return this.accounts.archive(
-      this.requireTenantId(user),
-      this.requireLegalEntityId(user),
-      user.userId,
-      id,
+    const { tenantId, legalEntityId } = requireTenantContext(
+      user,
+      "Chart of Accounts requires",
     );
-  }
-
-  /** PLATFORM_OPERATOR tokens carry tenantId: null (System Architecture v1
-   * §3.2) — Chart of Accounts is inherently tenant-owned data, so there is
-   * no meaningful cross-tenant operation here. A platform operator would
-   * need to impersonate a specific tenant (out of scope for this
-   * milestone) rather than call these routes directly. */
-  private requireTenantId(user: AuthenticatedRequestUser): string {
-    if (!user.tenantId) {
-      throw new ForbiddenException(
-        "This token has no tenant context; Chart of Accounts requires a tenant-scoped token.",
-      );
-    }
-    return user.tenantId;
-  }
-
-  /** Same reasoning as requireTenantId, one level down: a token with no
-   * legal-entity context (e.g. a PLATFORM_OPERATOR token, which also has
-   * tenantId: null and would already be rejected above) cannot act
-   * against a legal-entity-scoped resource. */
-  private requireLegalEntityId(user: AuthenticatedRequestUser): string {
-    if (!user.legalEntityId) {
-      throw new ForbiddenException(
-        "This token has no legal-entity context; Chart of Accounts requires a legal-entity-scoped token.",
-      );
-    }
-    return user.legalEntityId;
+    return this.accounts.archive(tenantId, legalEntityId, user.userId, id);
   }
 }

@@ -1,4 +1,5 @@
 export * from "./authorization";
+export * from "./tenant-context";
 export * from "./module";
 export * from "./strategies/jwt.strategy";
 export * from "./guards/jwt-auth.guard";
