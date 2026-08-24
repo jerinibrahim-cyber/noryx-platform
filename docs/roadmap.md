@@ -70,7 +70,12 @@ goes through a dedicated hardening and security audit milestone. This is
 scoped and tracked separately from the functional build above:
 
 - [ ] 3.1 — Tenant/RLS Hardening
-- [ ] 3.2 — RBAC & Authorization Hardening
+- [x] 3.2 — RBAC & Authorization Hardening — Work Items 1–8 and 10
+      implemented, verified, and pushed (latest: `d5d0bc5`); Work Item 9
+      (`TENANT_EXTERNAL` enforcement) and Work Item 11 (role-grant
+      auditing) formally deferred pending future dependencies, not
+      unfinished implementation — see
+      `docs/hardening/milestone-3.2-closure-report.md`
 - [ ] 3.3 — Transaction & Concurrency Hardening
 - [ ] 3.4 — Accounting & Audit Integrity
 - [ ] 3.5 — Production-Readiness Audit
