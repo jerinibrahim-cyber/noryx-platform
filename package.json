@@ -20,6 +20,7 @@
     "db:migrate": "pnpm --filter @noryx/db-core run migrate",
     "db:generate": "pnpm --filter @noryx/db-core run generate",
     "db:apply-app-role": "pnpm --filter @noryx/db-core run apply-app-role",
+    "db:apply-db-constraints": "pnpm --filter @noryx/db-core run apply-db-constraints",
     "db:assert-role-privileges": "pnpm --filter @noryx/db-core run assert-role-privileges",
     "prepare": "husky || true"
   },

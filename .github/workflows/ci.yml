@@ -122,6 +122,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Run migrations + RLS policies (db-core)
         run: pnpm --filter @noryx/db-core run migrate
+      - name: Apply role-catalog DB constraint (db-core)
+        run: pnpm run db:apply-db-constraints
       - name: Run migrations + RLS policies (sphere-finance)
         run: pnpm --filter @noryx/sphere-finance run migrate
       - name: Apply accounting-invariant DB constraints (sphere-finance)
