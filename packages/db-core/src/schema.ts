@@ -155,6 +155,16 @@ export const users = pgTable(
     /// Hash of the current refresh token (never the token itself) — rotated
     /// on every refresh so a stolen hash from a DB leak can't mint new tokens.
     refreshTokenHash: text("refresh_token_hash"),
+    /// Milestone 3.2 Work Item 7 (docs/hardening/milestone-3.2-work-item-7-
+    /// refresh-token-ttl-enforcement-proposal.md) — set once, at login()
+    /// (a *new* session), never touched by refresh() rotation. Absolute TTL
+    /// model: AuthService.refresh() rejects once now - refreshTokenIssuedAt
+    /// exceeds TokenService.refreshTokenTtlSeconds, regardless of how
+    /// recently the token was last rotated. NULL is fail-closed (treated as
+    /// expired), not "no TTL" — see proposal §6.
+    refreshTokenIssuedAt: timestamp("refresh_token_issued_at", {
+      withTimezone: true,
+    }),
     /// Time-boxed access grants (chat decision on role-based access
     /// "windows") — null means standing access.
     accessExpiresAt: timestamp("access_expires_at", { withTimezone: true }),

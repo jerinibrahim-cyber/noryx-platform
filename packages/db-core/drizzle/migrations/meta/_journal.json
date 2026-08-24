@@ -8,6 +8,13 @@
       "when": 1786965204464,
       "tag": "0000_early_fat_cobra",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1787572824378,
+      "tag": "0001_small_lorna_dane",
+      "breakpoints": true
     }
   ]
 }

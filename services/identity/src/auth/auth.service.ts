@@ -108,7 +108,7 @@ export class AuthService {
     }
 
     failedAttempts.delete(attemptKey);
-    return this.issueTokensAndPersistRefresh(user, entitledModules);
+    return this.issueTokensAndPersistRefresh(user, entitledModules, true);
   }
 
   async refresh(refreshToken: string): Promise<IssuedTokens> {
@@ -157,6 +157,23 @@ export class AuthService {
       throw new ForbiddenException("This account's access window has expired.");
     }
 
+    // Milestone 3.2 Work Item 7 (docs/hardening/milestone-3.2-work-item-7-
+    // refresh-token-ttl-enforcement-proposal.md) — absolute TTL: bounds the
+    // total lifetime of this refresh-token session to refreshTokenTtlSeconds
+    // from the ORIGINAL login, regardless of how recently it was rotated.
+    // refreshTokenIssuedAt is only ever set at login() (see
+    // issueTokensAndPersistRefresh below) and is never reset by rotation, so
+    // this is a hard session cap, not a sliding/idle timeout. A null
+    // timestamp (no known issuance time — e.g. a pre-migration row) is
+    // fail-closed, treated as expired, per the approved proposal §6.
+    const issuedAt = user.refreshTokenIssuedAt;
+    const ttlMs = this.tokens.refreshTokenTtlSeconds * 1000;
+    if (!issuedAt || Date.now() - issuedAt.getTime() > ttlMs) {
+      throw new UnauthorizedException(
+        "Refresh token has expired. Please log in again.",
+      );
+    }
+
     let entitledModules: string[] = [];
     if (user.tier !== "PLATFORM_OPERATOR" && user.tenantId) {
       const subRows = await getDb()
@@ -194,6 +211,12 @@ export class AuthService {
       roles: string[];
     },
     entitledModules: string[],
+    // Milestone 3.2 Work Item 7 — true only when this call starts a brand
+    // new refresh-token session (i.e. from login()). refresh() calls this
+    // helper too, for rotation, and must leave `isNewSession` at its
+    // default `false` so refreshTokenIssuedAt is never reset by rotation —
+    // that's the entire mechanism that makes the TTL absolute, not sliding.
+    isNewSession = false,
   ): Promise<IssuedTokens> {
     const accessToken = this.tokens.issueAccessToken(
       user as any,
@@ -204,7 +227,13 @@ export class AuthService {
       await this.tokens.hashRefreshToken(rawRefreshToken);
 
     await withTenant(user.tenantId, (tx) =>
-      tx.update(users).set({ refreshTokenHash }).where(eq(users.id, user.id)),
+      tx
+        .update(users)
+        .set({
+          refreshTokenHash,
+          ...(isNewSession ? { refreshTokenIssuedAt: new Date() } : {}),
+        })
+        .where(eq(users.id, user.id)),
     );
 
     return {
