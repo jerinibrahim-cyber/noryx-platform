@@ -182,12 +182,22 @@ export class AuthService {
         .where(eq(subscriptions.tenantId, user.tenantId))
         .limit(1);
       const subscription = subRows[0];
+
+      // Milestone 3.2 Work Item 8 (docs/hardening/milestone-3.2-work-item-8-
+      // subscription-termination-refresh-proposal.md) — mirrors the
+      // identical check in login() above verbatim. A tenant whose
+      // subscription is missing or TERMINATED must not be able to keep a
+      // session alive by refreshing it either.
+      if (!subscription || subscription.status === "TERMINATED") {
+        throw new ForbiddenException(
+          "This tenant's subscription is not active. Contact Noryx support.",
+        );
+      }
+
+      // Unchanged — SUSPENDED still succeeds with zero entitlements,
+      // matching login()'s own soft-degrade treatment.
       entitledModules =
-        subscription &&
-        subscription.status !== "SUSPENDED" &&
-        subscription.status !== "TERMINATED"
-          ? subscription.entitledModules
-          : [];
+        subscription.status === "SUSPENDED" ? [] : subscription.entitledModules;
     }
 
     return this.issueTokensAndPersistRefresh(user, entitledModules);
