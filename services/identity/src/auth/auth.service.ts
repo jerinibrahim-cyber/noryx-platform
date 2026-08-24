@@ -137,6 +137,16 @@ export class AuthService {
     );
     if (!valid) throw new UnauthorizedException("Invalid refresh token.");
 
+    // Milestone 3.2 (docs/hardening/milestone-3.2-proposal.md §8 gap 3,
+    // T5) — mirrors the identical check in login() above verbatim. A
+    // time-boxed access grant that expired since the last token issuance
+    // must stop refresh() from minting new access tokens too, not just
+    // block a fresh login(). Reuses the user row already fetched above —
+    // no new query.
+    if (user.accessExpiresAt && user.accessExpiresAt < new Date()) {
+      throw new ForbiddenException("This account's access window has expired.");
+    }
+
     let entitledModules: string[] = [];
     if (user.tier !== "PLATFORM_OPERATOR" && user.tenantId) {
       const subRows = await getDb()
