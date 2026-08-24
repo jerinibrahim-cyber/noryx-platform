@@ -7,14 +7,18 @@ import {
 import { Reflector } from "@nestjs/core";
 import { ROLES_KEY } from "../decorators/roles.decorator";
 import type { AuthenticatedRequestUser } from "@noryx/shared-types";
+import { hasRequiredRole, requiredRolesMessage } from "../authorization";
 
 /**
- * Copied from services/identity/src/auth/guards/roles.guard.ts — identical
- * logic. This is the per-route, server-side RBAC enforcement for Finance:
- * the API Gateway's manifest-level requiredRoles is only a coarse
- * module-wide gate, not fine-grained per-route enforcement — this guard is
- * what actually distinguishes finance.viewer (read) from finance.admin
- * (write) on each AccountsController route.
+ * Milestone 3.2 Stage 1 — the single shared RolesGuard; previously
+ * duplicated verbatim in services/identity (unused by any route there)
+ * and services/sphere-finance (the copy actually enforced on every
+ * Finance controller route). Internally delegates the pass/fail decision
+ * to hasRequiredRole() (../authorization.ts) — the same function
+ * api-gateway's ProxyController now calls for its own module-level
+ * requiredRoles check, so there is exactly one implementation of "does
+ * this role list satisfy that requirement" in the whole platform
+ * (docs/hardening/milestone-3.2-proposal.md §8 gap 4, Threat T2).
  */
 @Injectable()
 export class RolesGuard implements CanActivate {
@@ -31,15 +35,8 @@ export class RolesGuard implements CanActivate {
     const user = request.user as AuthenticatedRequestUser | undefined;
     if (!user) return false;
 
-    // Platform Operators bypass per-tenant role checks by design — they
-    // operate cross-tenant for support/provisioning (System Architecture v1 §3.2).
-    if (user.tier === "PLATFORM_OPERATOR") return true;
-
-    const hasRole = requiredRoles.some((r) => user.roles.includes(r));
-    if (!hasRole) {
-      throw new ForbiddenException(
-        `Requires one of roles: ${requiredRoles.join(", ")}`,
-      );
+    if (!hasRequiredRole(user, requiredRoles)) {
+      throw new ForbiddenException(requiredRolesMessage(requiredRoles));
     }
     return true;
   }

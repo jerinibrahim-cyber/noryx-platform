@@ -17,6 +17,7 @@
     "migrate:dev": "drizzle-kit push && ts-node src/db/apply-rls.ts"
   },
   "dependencies": {
+    "@noryx/auth-core": "workspace:*",
     "@noryx/db-core": "workspace:*",
     "@noryx/shared-types": "workspace:*",
     "@nestjs/common": "^10.4.0",

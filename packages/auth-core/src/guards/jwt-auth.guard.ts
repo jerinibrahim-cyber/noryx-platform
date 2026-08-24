@@ -3,6 +3,11 @@ import { AuthGuard } from "@nestjs/passport";
 import { Reflector } from "@nestjs/core";
 import { IS_PUBLIC_KEY } from "../decorators/public.decorator";
 
+/**
+ * Milestone 3.2 Stage 1 — the single shared JwtAuthGuard; previously
+ * duplicated verbatim in services/identity and services/sphere-finance
+ * (docs/hardening/milestone-3.2-proposal.md §8 gap 4).
+ */
 @Injectable()
 export class JwtAuthGuard extends AuthGuard("jwt") {
   constructor(private readonly reflector: Reflector) {

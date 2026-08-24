@@ -1,0 +1,32 @@
+{
+  "name": "@noryx/auth-core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Milestone 3.2 Stage 1 — the single shared implementation of JWT verification and RBAC role-checking used by every Noryx service (Identity, Finance, API Gateway). Centralizes the JwtStrategy/JwtAuthGuard/RolesGuard/Roles()/Public() mechanism that was previously three independent, drifting implementations (docs/hardening/milestone-3.2-proposal.md §8 gap 4). Authentication *workflows* — login, refresh, logout, token issuance, credential handling — remain services/identity's responsibility; this package holds only the reusable authorization *mechanism*.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "lint": "eslint src --ext .ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "jest --passWithNoTests"
+  },
+  "dependencies": {
+    "@noryx/shared-types": "workspace:*",
+    "@nestjs/common": "^10.4.0",
+    "@nestjs/core": "^10.4.0",
+    "@nestjs/passport": "^10.0.3",
+    "passport": "^0.7.0",
+    "passport-jwt": "^4.0.1",
+    "rxjs": "^7.8.1"
+  },
+  "devDependencies": {
+    "@noryx/eslint-config": "workspace:*",
+    "typescript": "^5.6.0",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.2.0",
+    "@types/node": "^20.14.0",
+    "@types/jest": "^29.5.0",
+    "@types/passport-jwt": "^4.0.1"
+  }
+}

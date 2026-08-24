@@ -1,11 +1,9 @@
 import { Body, Controller, Post, UseGuards } from "@nestjs/common";
 import { Throttle } from "@nestjs/throttler";
+import { Public, JwtAuthGuard, CurrentUser } from "@noryx/auth-core";
 import { AuthService } from "./auth.service";
 import { LoginDto } from "./dto/login.dto";
 import { RefreshDto } from "./dto/refresh.dto";
-import { Public } from "./decorators/public.decorator";
-import { JwtAuthGuard } from "./guards/jwt-auth.guard";
-import { CurrentUser } from "./decorators/current-user.decorator";
 import type { AuthenticatedRequestUser } from "@noryx/shared-types";
 
 @Controller("auth")

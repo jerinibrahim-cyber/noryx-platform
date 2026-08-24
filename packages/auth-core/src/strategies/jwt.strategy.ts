@@ -6,6 +6,16 @@ import type {
   AuthenticatedRequestUser,
 } from "@noryx/shared-types";
 
+/**
+ * Milestone 3.2 Stage 1 — the single Passport JWT strategy every service
+ * that verifies (not issues) Noryx access tokens uses. Previously
+ * duplicated verbatim in services/identity and services/sphere-finance
+ * (docs/hardening/milestone-3.2-proposal.md §8 gap 4); identical logic,
+ * now with exactly one implementation. Only services/identity issues
+ * tokens (its own token.service.ts, unaffected by this move) — every
+ * service, including identity itself, verifies them through this
+ * strategy.
+ */
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
   constructor() {

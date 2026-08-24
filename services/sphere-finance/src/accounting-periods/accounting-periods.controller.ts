@@ -8,10 +8,7 @@ import {
   Post,
   UseGuards,
 } from "@nestjs/common";
-import { JwtAuthGuard } from "../auth/guards/jwt-auth.guard";
-import { RolesGuard } from "../auth/guards/roles.guard";
-import { Roles } from "../auth/decorators/roles.decorator";
-import { CurrentUser } from "../auth/decorators/current-user.decorator";
+import { JwtAuthGuard, RolesGuard, Roles, CurrentUser } from "@noryx/auth-core";
 import type { AuthenticatedRequestUser } from "@noryx/shared-types";
 import { AccountingPeriodsService } from "./accounting-periods.service";
 import { CreateAccountingPeriodDto } from "./dto/create-accounting-period.dto";

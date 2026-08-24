@@ -1,14 +1,15 @@
 import { Module } from "@nestjs/common";
-import { FinanceAuthModule } from "../auth/finance-auth.module";
+import { AuthCoreModule } from "@noryx/auth-core";
 import { GeneralLedgerController } from "./general-ledger.controller";
 import { GeneralLedgerService } from "./general-ledger.service";
 
-// 2d — General Ledger read layer. Same FinanceAuthModule wiring as
-// AccountingPeriodsModule/JournalEntriesModule (2c-1) — see
-// FinanceAuthModule's own doc comment for why AccountsModule alone is
-// exempt from this pattern.
+// 2d — General Ledger read layer. Milestone 3.2 Stage 1 — FinanceAuthModule
+// (formerly ../auth/finance-auth.module) was replaced by the shared
+// @noryx/auth-core package's AuthCoreModule; identical wiring, now shared
+// platform-wide (including AccountsModule, which previously had its own
+// separate inline registration) rather than Finance-only.
 @Module({
-  imports: [FinanceAuthModule],
+  imports: [AuthCoreModule],
   controllers: [GeneralLedgerController],
   providers: [GeneralLedgerService],
 })

@@ -5,6 +5,7 @@ module.exports = {
   rootDir: ".",
   testRegex: "src/.*\\.spec\\.ts$",
   moduleNameMapper: {
+    "^@noryx/auth-core$": "<rootDir>/../../packages/auth-core/src/index.ts",
     "^@noryx/shared-types$":
       "<rootDir>/../../packages/shared-types/src/index.ts",
   },

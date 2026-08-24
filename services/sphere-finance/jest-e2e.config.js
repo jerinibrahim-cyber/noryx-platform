@@ -6,6 +6,7 @@ module.exports = {
   testRegex: "test/.*\\.e2e-spec\\.ts$",
   setupFiles: ["<rootDir>/test/env-setup.ts"],
   moduleNameMapper: {
+    "^@noryx/auth-core$": "<rootDir>/../../packages/auth-core/src/index.ts",
     "^@noryx/db-core$": "<rootDir>/../../packages/db-core/src/index.ts",
     "^@noryx/shared-types$":
       "<rootDir>/../../packages/shared-types/src/index.ts",
