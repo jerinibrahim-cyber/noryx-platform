@@ -137,6 +137,16 @@ export class AuthService {
     );
     if (!valid) throw new UnauthorizedException("Invalid refresh token.");
 
+    // Milestone 3.2 Work Item 6 (docs/hardening/milestone-3.2-work-item-6-
+    // refresh-status-enforcement-proposal.md) — mirrors the identical check
+    // in login() above verbatim. A user suspended/deactivated after their
+    // refresh token was issued must not be able to keep refreshing it
+    // indefinitely — ordered after refresh-token validation so an invalid
+    // token still yields 401 for the same reason as before, not this check.
+    if (user.status !== "ACTIVE") {
+      throw new UnauthorizedException("Invalid credentials.");
+    }
+
     // Milestone 3.2 (docs/hardening/milestone-3.2-proposal.md §8 gap 3,
     // T5) — mirrors the identical check in login() above verbatim. A
     // time-boxed access grant that expired since the last token issuance
