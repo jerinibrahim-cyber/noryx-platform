@@ -14,6 +14,7 @@ import { SuppliersController } from "./accounts-payable/suppliers/suppliers.cont
 import { ApSettingsController } from "./accounts-payable/ap-settings/ap-settings.controller";
 import { SupplierBillsController } from "./accounts-payable/supplier-bills/supplier-bills.controller";
 import { SupplierPaymentsController } from "./accounts-payable/supplier-payments/supplier-payments.controller";
+import { ApReportsController } from "./accounts-payable/ap-reports/ap-reports.controller";
 
 /**
  * Milestone 3.2 — Route → Required-Role Matrix Hardening
@@ -28,9 +29,11 @@ import { SupplierPaymentsController } from "./accounts-payable/supplier-payments
  * -proposal.md §16) to also discover SuppliersController and
  * ApSettingsController, for AP-1b
  * (docs/finance-work-item-1b-supplier-bills-proposal.md §14/§16) to
- * also discover SupplierBillsController, and for AP-1c
+ * also discover SupplierBillsController, for AP-1c
  * (docs/finance-work-item-1c-supplier-payments-proposal.md §10/§11) to
- * also discover SupplierPaymentsController — this test is repo-wide,
+ * also discover SupplierPaymentsController, and for AP-1d
+ * (docs/finance-work-item-1d-supplier-balance-statement-ageing-proposal.md
+ * §5) to also discover ApReportsController — this test is repo-wide,
  * not per-module, so a new controller must be added to both the import
  * list above and the `actual` array below, or its routes simply go
  * unverified.
@@ -153,7 +156,7 @@ function role(
 }
 
 /**
- * Single source of truth. Every route across all eight Finance
+ * Single source of truth. Every route across all nine Finance
  * controllers — the original four (re-verified live, matching
  * docs/hardening/milestone-3.2-route-role-matrix-proposal.md §2 exactly,
  * 17 routes) plus AP-1a's two controllers (7 routes, added per
@@ -161,8 +164,10 @@ function role(
  * SupplierBillsController (6 routes, added per
  * docs/finance-work-item-1b-supplier-bills-proposal.md §14/§16) plus
  * AP-1c's SupplierPaymentsController (6 routes, added per
- * docs/finance-work-item-1c-supplier-payments-proposal.md §10/§11), 36
- * routes total.
+ * docs/finance-work-item-1c-supplier-payments-proposal.md §10/§11) plus
+ * AP-1d's ApReportsController (4 routes, added per
+ * docs/finance-work-item-1d-supplier-balance-statement-ageing-proposal.md
+ * §5), 40 routes total.
  */
 const EXPECTED: DiscoveredRoute[] = [
   role("POST", "accounts", "AccountsController", ["finance.admin"]),
@@ -302,6 +307,30 @@ const EXPECTED: DiscoveredRoute[] = [
   role("POST", "payments/:id/post", "SupplierPaymentsController", [
     "finance.poster",
   ]),
+
+  // AP-1d — docs/finance-work-item-1d-supplier-balance-statement-ageing-
+  // proposal.md §5. Pure reads, no write-side split to make — same
+  // any-finance-role posture as GeneralLedgerController.
+  role("GET", "suppliers/:id/balance", "ApReportsController", [
+    "finance.viewer",
+    "finance.poster",
+    "finance.admin",
+  ]),
+  role("GET", "suppliers/:id/statement", "ApReportsController", [
+    "finance.viewer",
+    "finance.poster",
+    "finance.admin",
+  ]),
+  role("GET", "ap/ageing", "ApReportsController", [
+    "finance.viewer",
+    "finance.poster",
+    "finance.admin",
+  ]),
+  role("GET", "ap/reconciliation", "ApReportsController", [
+    "finance.viewer",
+    "finance.poster",
+    "finance.admin",
+  ]),
 ];
 
 describe("Route → required-role matrix (sphere-finance)", () => {
@@ -314,6 +343,7 @@ describe("Route → required-role matrix (sphere-finance)", () => {
     ...discoverRoutes(ApSettingsController),
     ...discoverRoutes(SupplierBillsController),
     ...discoverRoutes(SupplierPaymentsController),
+    ...discoverRoutes(ApReportsController),
   ];
   const actualByKey = new Map(actual.map((r) => [r.key, r]));
   const expectedByKey = new Map(EXPECTED.map((r) => [r.key, r]));
