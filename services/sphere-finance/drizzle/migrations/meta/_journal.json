@@ -43,6 +43,13 @@
       "when": 1787681898421,
       "tag": "0005_special_tempest",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1787691013995,
+      "tag": "0006_talented_hannibal_king",
+      "breakpoints": true
     }
   ]
 }

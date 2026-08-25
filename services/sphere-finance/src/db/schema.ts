@@ -446,3 +446,191 @@ export const apSettings = pgTable(
 
 export type ApSettings = typeof apSettings.$inferSelect;
 export type NewApSettings = typeof apSettings.$inferInsert;
+
+// ---------------------------------------------------------------------------
+// AP Foundation — AP-1b (Supplier Bills).
+// docs/finance-work-item-1b-supplier-bills-proposal.md §4.
+//
+// Bill posting does NOT call JournalEntriesService (that service owns its
+// own transaction — an atomicity mismatch for a sub-ledger that needs its
+// own writes atomic with a journal posting, proposal §8). It inserts
+// directly into journal_entries/journal_lines/journal_number_counters,
+// already importable from this same schema file, replicating
+// JournalEntriesService.post()'s validation/locking/numbering discipline
+// rather than calling it. See SupplierBillsService.post().
+//
+// Same conventions as every table above: no Postgres FK to db-core's
+// tenants/legal_entities (cross-service boundary); real FKs to Finance's
+// own tables (suppliers, chart_of_accounts, journal_entries,
+// accounting_periods — same migration lifecycle); RLS is tenant_id-only,
+// legal_entity_id isolation is an explicit service-layer predicate on
+// every query.
+// ---------------------------------------------------------------------------
+
+/// Race-free bill-numbering allocation, structurally identical to
+/// journalNumberCounters but a SEPARATE table/row — bills and journal
+/// entries must never contend for the same sequence, and their number
+/// formats differ (BILL-NNNNNN vs JE-NNNNNN). Deliberately bill-only for
+/// AP-1b (no counter_type discriminator column) — proposal §4/§24 item 1:
+/// AP-1c decides then whether to widen this table or add a separate one
+/// for payment numbering; either is a compatible additive migration.
+export const apNumberCounters = pgTable(
+  "ap_number_counters",
+  {
+    tenantId: uuid("tenant_id").notNull(),
+    legalEntityId: uuid("legal_entity_id").notNull(),
+    lastAssignedNumber: integer("last_assigned_number").notNull().default(0),
+  },
+  (t) => [primaryKey({ columns: [t.tenantId, t.legalEntityId] })],
+);
+
+export type ApNumberCounter = typeof apNumberCounters.$inferSelect;
+
+export const supplierBillStatusEnum = pgEnum("supplier_bill_status", [
+  "DRAFT",
+  "POSTED",
+]);
+
+export const billPaymentStatusEnum = pgEnum("bill_payment_status", [
+  "UNPAID",
+  "PARTIALLY_PAID",
+  "PAID",
+]);
+
+export const supplierBills = pgTable(
+  "supplier_bills",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id").notNull(),
+    legalEntityId: uuid("legal_entity_id").notNull(),
+    supplierId: uuid("supplier_id")
+      .notNull()
+      .references(() => suppliers.id),
+    /// The SUPPLIER's own invoice/bill number — an external reference,
+    /// not unique in our system, not validated for format.
+    supplierBillNumber: varchar("supplier_bill_number", {
+      length: 50,
+    }).notNull(),
+    /// Our own "BILL-000123" — null while DRAFT, assigned only at
+    /// posting time via apNumberCounters, mirrors journalNumber's
+    /// null-while-DRAFT/immutable-after-POST shape exactly.
+    internalReference: varchar("internal_reference", { length: 20 }),
+    status: supplierBillStatusEnum("status").notNull().default("DRAFT"),
+    /// Meaningful only once status = POSTED. AP-1b never writes anything
+    /// but the default UNPAID — AP-1c's payment-allocation posting is
+    /// the sole future writer (proposal §2/§22). The column exists now
+    /// because it is structural to this table's design, not because
+    /// AP-1b exercises it.
+    paymentStatus: billPaymentStatusEnum("payment_status")
+      .notNull()
+      .default("UNPAID"),
+    billDate: date("bill_date").notNull(),
+    /// Defaults to billDate + supplier.paymentTermsDays at create time
+    /// if the supplier has one configured, else null; independently
+    /// editable while DRAFT (SupplierBillsService.computeDefaultDueDate).
+    dueDate: date("due_date"),
+    /// Resolved from the legal entity's functional currency at creation
+    /// — never client-supplied, identical to journalEntries.currencyCode.
+    currencyCode: varchar("currency_code", { length: 3 }).notNull(),
+    /// Server-computed: SUM(line.amountMinor).
+    subtotalMinor: bigint("subtotal_minor", { mode: "number" }).notNull(),
+    /// Server-computed: SUM(line.taxAmountMinor).
+    taxMinor: bigint("tax_minor", { mode: "number" }).notNull().default(0),
+    /// Server-computed: subtotalMinor + taxMinor.
+    totalMinor: bigint("total_minor", { mode: "number" }).notNull(),
+    /// AP-1b never writes anything but 0 — see the paid_minor_zero_until_ap1c
+    /// CHECK constraint below (proposal §24 item 3). AP-1c's migration
+    /// loosens this constraint together with introducing the first writer.
+    paidMinor: bigint("paid_minor", { mode: "number" }).notNull().default(0),
+    /// Set exactly once, at posting. Real FK: journal_entries is
+    /// Finance's own table, same migration lifecycle.
+    journalEntryId: uuid("journal_entry_id").references(
+      () => journalEntries.id,
+    ),
+    /// Set exactly once, at posting. Real FK: accounting_periods is
+    /// Finance's own table, same migration lifecycle.
+    periodId: uuid("period_id").references(() => accountingPeriods.id),
+    memo: text("memo"),
+    createdBy: uuid("created_by"),
+    postedBy: uuid("posted_by"),
+    postedAt: timestamp("posted_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    // NULL-distinct, unlimited DRAFT rows — identical shape to
+    // journal_entries_tenant_entity_number_unique.
+    unique("supplier_bills_tenant_entity_reference_unique").on(
+      t.tenantId,
+      t.legalEntityId,
+      t.internalReference,
+    ),
+    index("supplier_bills_tenant_entity_idx").on(t.tenantId, t.legalEntityId),
+    index("supplier_bills_supplier_idx").on(t.supplierId),
+    check(
+      "supplier_bills_total_equals_subtotal_plus_tax",
+      sql`${t.totalMinor} = ${t.subtotalMinor} + ${t.taxMinor}`,
+    ),
+    check(
+      "supplier_bills_amounts_non_negative",
+      sql`${t.subtotalMinor} >= 0 AND ${t.taxMinor} >= 0 AND ${t.totalMinor} >= 0`,
+    ),
+    // Tightened from the original AP Foundation proposal's `>= 0 AND <=
+    // total_minor` range (proposal §24 item 3): no AP-1b code path can
+    // ever produce a nonzero value, so the constraint says so until
+    // AP-1c's migration loosens it together with introducing the first
+    // writer.
+    check("supplier_bills_paid_minor_zero_until_ap1c", sql`${t.paidMinor} = 0`),
+  ],
+);
+
+export type SupplierBill = typeof supplierBills.$inferSelect;
+export type NewSupplierBill = typeof supplierBills.$inferInsert;
+
+export const supplierBillLines = pgTable(
+  "supplier_bill_lines",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /// Denormalized from the parent bill — required for this table's
+    /// own RLS policy, identical reasoning to journalLines.tenantId.
+    tenantId: uuid("tenant_id").notNull(),
+    billId: uuid("bill_id")
+      .notNull()
+      .references(() => supplierBills.id, { onDelete: "cascade" }),
+    lineNumber: integer("line_number").notNull(),
+    /// The expense/asset account this line's cost distributes to. NO
+    /// type restriction (any active in-scope account) — same posture as
+    /// journalLines.accountId. Real FK: chart_of_accounts is Finance's
+    /// own table, same migration lifecycle.
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => chartOfAccounts.id),
+    description: varchar("description", { length: 500 }),
+    amountMinor: bigint("amount_minor", { mode: "number" }).notNull(),
+    taxAmountMinor: bigint("tax_amount_minor", { mode: "number" })
+      .notNull()
+      .default(0),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    unique("supplier_bill_lines_bill_line_number_unique").on(
+      t.billId,
+      t.lineNumber,
+    ),
+    index("supplier_bill_lines_account_idx").on(t.accountId),
+    check("supplier_bill_lines_amount_positive", sql`${t.amountMinor} > 0`),
+    check(
+      "supplier_bill_lines_tax_amount_non_negative",
+      sql`${t.taxAmountMinor} >= 0`,
+    ),
+  ],
+);
+
+export type SupplierBillLine = typeof supplierBillLines.$inferSelect;
+export type NewSupplierBillLine = typeof supplierBillLines.$inferInsert;
