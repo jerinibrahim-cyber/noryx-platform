@@ -6,11 +6,14 @@ import postgres from "postgres";
  *
  * Same direct-RLS-proof concept as packages/db-core/test/
  * rls-hardening.e2e-spec.ts (see that file's doc comment for the full
- * rationale), applied to Finance's own tables — chart_of_accounts here.
- * Existing tests like accounts.e2e-spec.ts prove the full HTTP -> service
- * -> Drizzle stack blocks cross-tenant access; this file proves Postgres's
- * RLS policy itself does, with no service code, no Drizzle query builder,
- * and no application-layer tenant predicate anywhere in the query.
+ * rationale), applied to Finance's own tables — chart_of_accounts here,
+ * plus `suppliers` (AP-1a, docs/finance-work-item-1-ap-foundation
+ * -proposal.md §17/§21/§23) as the representative AP-1a table. Existing
+ * tests like accounts.e2e-spec.ts/suppliers.e2e-spec.ts prove the full
+ * HTTP -> service -> Drizzle stack blocks cross-tenant access; this file
+ * proves Postgres's RLS policy itself does, with no service code, no
+ * Drizzle query builder, and no application-layer tenant predicate
+ * anywhere in the query.
  */
 describe("Milestone 3.1 §2.6 — direct RLS proof (chart_of_accounts)", () => {
   const ownerUrl = process.env.DATABASE_URL!;
@@ -92,6 +95,89 @@ describe("Milestone 3.1 §2.6 — direct RLS proof (chart_of_accounts)", () => {
       const ids = rows.map((r) => r.id);
       expect(ids).toContain(accountAId);
       expect(ids).toContain(accountBId);
+    } finally {
+      await client.end();
+    }
+  });
+});
+
+describe("AP-1a §21/§23 — direct RLS proof (suppliers)", () => {
+  const ownerUrl = process.env.DATABASE_URL!;
+  const appRoleUrl = process.env.APP_ROLE_DATABASE_URL!;
+  const suffix = `${process.pid}-${Math.random().toString(36).slice(2, 8)}-sup`;
+
+  let owner: postgres.Sql;
+  let tenantAId: string;
+  let tenantBId: string;
+  let supplierAId: string;
+  let supplierBId: string;
+
+  beforeAll(async () => {
+    owner = postgres(ownerUrl, { max: 2 });
+    tenantAId = crypto.randomUUID();
+    tenantBId = crypto.randomUUID();
+    const [supplierA] = await owner`
+      INSERT INTO suppliers (tenant_id, legal_entity_id, code, name)
+      VALUES (${tenantAId}, ${crypto.randomUUID()}, ${`RLS-SUP-A-${suffix}`}, ${"RLS Hardening Supplier A"})
+      RETURNING id
+    `;
+    const [supplierB] = await owner`
+      INSERT INTO suppliers (tenant_id, legal_entity_id, code, name)
+      VALUES (${tenantBId}, ${crypto.randomUUID()}, ${`RLS-SUP-B-${suffix}`}, ${"RLS Hardening Supplier B"})
+      RETURNING id
+    `;
+    supplierAId = supplierA!.id;
+    supplierBId = supplierB!.id;
+  });
+
+  afterAll(async () => {
+    await owner`DELETE FROM suppliers WHERE tenant_id IN (${tenantAId}, ${tenantBId})`;
+    await owner.end();
+  });
+
+  it("a raw, predicate-free SELECT scoped to tenant A returns only tenant A's supplier", async () => {
+    const client = postgres(appRoleUrl, { max: 1 });
+    try {
+      const rows = await client.begin(async (tx) => {
+        await tx`SELECT set_config('app.current_tenant_id', ${tenantAId}, true)`;
+        return tx`SELECT id, tenant_id FROM suppliers`;
+      });
+      const ids = rows.map((r) => r.id);
+      expect(ids).toContain(supplierAId);
+      expect(ids).not.toContain(supplierBId);
+      expect(rows.every((r) => r.tenant_id === tenantAId)).toBe(true);
+    } finally {
+      await client.end();
+    }
+  });
+
+  it("a raw, predicate-free SELECT scoped to tenant B returns only tenant B's supplier", async () => {
+    const client = postgres(appRoleUrl, { max: 1 });
+    try {
+      const rows = await client.begin(async (tx) => {
+        await tx`SELECT set_config('app.current_tenant_id', ${tenantBId}, true)`;
+        return tx`SELECT id, tenant_id FROM suppliers`;
+      });
+      const ids = rows.map((r) => r.id);
+      expect(ids).toContain(supplierBId);
+      expect(ids).not.toContain(supplierAId);
+    } finally {
+      await client.end();
+    }
+  });
+
+  it("§1.4/§2.4-style bypass fix, included from day one for this table: a connection 'poisoned' by a prior committed tenant scope still bypasses correctly", async () => {
+    const client = postgres(appRoleUrl, { max: 1 });
+    try {
+      await client.begin(async (tx) => {
+        await tx`SELECT set_config('app.current_tenant_id', ${tenantAId}, true)`;
+      });
+      const rows = await client.begin(async (tx) => {
+        return tx`SELECT id FROM suppliers`;
+      });
+      const ids = rows.map((r) => r.id);
+      expect(ids).toContain(supplierAId);
+      expect(ids).toContain(supplierBId);
     } finally {
       await client.end();
     }

@@ -5,6 +5,7 @@ import { AccountsModule } from "./accounts/accounts.module";
 import { AccountingPeriodsModule } from "./accounting-periods/accounting-periods.module";
 import { JournalEntriesModule } from "./journal-entries/journal-entries.module";
 import { GeneralLedgerModule } from "./general-ledger/general-ledger.module";
+import { AccountsPayableModule } from "./accounts-payable/accounts-payable.module";
 import { HealthController } from "./health/health.controller";
 import { TenantContextMiddleware } from "./tenant/tenant-context.middleware";
 
@@ -21,6 +22,10 @@ import { TenantContextMiddleware } from "./tenant/tenant-context.middleware";
     // Trial Balance. Read-only; queries the tables the three modules
     // above already own, touches none of their files.
     GeneralLedgerModule,
+    // AP-1a — Supplier Master + AP Settings (Accounts Payable Foundation).
+    // docs/finance-work-item-1-ap-foundation-proposal.md §22. Reads/writes
+    // its own new tables only; touches none of the four modules above.
+    AccountsPayableModule,
     // Scoped registration so TenantContextMiddleware can inject JwtService
     // without importing AccountsModule's other providers — same pattern as
     // services/identity/src/app.module.ts.

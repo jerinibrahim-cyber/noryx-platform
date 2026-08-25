@@ -340,3 +340,109 @@ export const journalLines = pgTable(
 
 export type JournalLine = typeof journalLines.$inferSelect;
 export type NewJournalLine = typeof journalLines.$inferInsert;
+
+// ---------------------------------------------------------------------------
+// AP Foundation — AP-1a (Supplier Master + AP Settings only).
+// docs/finance-work-item-1-ap-foundation-proposal.md §5.
+//
+// AP-1a implements exactly these two tables — no bill/payment/allocation
+// tables, and deliberately no `ap_number_counters` either: that counter
+// table has no consumer until AP-1b (bill posting) exists, and adding it
+// now would be exactly the kind of speculative-abstraction-ahead-of-need
+// the implementation brief rules out. It is added in AP-1b alongside the
+// first code that actually allocates from it.
+//
+// Same conventions as chart_of_accounts/accounting_periods above: no
+// Postgres FK to db-core's tenants/legal_entities (cross-service
+// boundary — tenantId/legalEntityId validated at the application layer,
+// always sourced from a verified JWT claim); real FKs to Finance's own
+// chart_of_accounts (same migration lifecycle); RLS is tenant_id-only,
+// legal_entity_id isolation is an explicit service-layer predicate on
+// every query (see SuppliersService/ApSettingsService).
+// ---------------------------------------------------------------------------
+
+export const suppliers = pgTable(
+  "suppliers",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id").notNull(),
+    legalEntityId: uuid("legal_entity_id").notNull(),
+    code: varchar("code", { length: 32 }).notNull(),
+    name: varchar("name", { length: 255 }).notNull(),
+    isActive: boolean("is_active").notNull().default(true),
+    /// Net payment terms in days (e.g. 30 for "Net 30"). Nullable —
+    /// optional at the supplier level. Not consumed by any code in
+    /// AP-1a; AP-1b (bill due-date defaulting) and AP-1d (ageing) are
+    /// its documented future consumers (proposal §5/§20).
+    paymentTermsDays: integer("payment_terms_days"),
+    /// Informational only (e.g. a VAT number) — not read or validated
+    /// by any tax logic in this or any later AP-1a-adjacent work item.
+    taxRegistrationNo: varchar("tax_registration_no", { length: 64 }),
+    /// Pre-fills new bill lines in AP-1b; not enforced against any bill
+    /// line at write time (proposal §5). Validated the same way as
+    /// journal_lines.accountId at write time here: must exist, must be
+    /// active, must be in the same (tenantId, legalEntityId) — see
+    /// SuppliersService.validateOptionalAccountRef.
+    defaultExpenseAccountId: uuid("default_expense_account_id").references(
+      () => chartOfAccounts.id,
+    ),
+    createdBy: uuid("created_by"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    unique("suppliers_tenant_entity_code_unique").on(
+      t.tenantId,
+      t.legalEntityId,
+      t.code,
+    ),
+    index("suppliers_tenant_entity_idx").on(t.tenantId, t.legalEntityId),
+  ],
+);
+
+export type Supplier = typeof suppliers.$inferSelect;
+export type NewSupplier = typeof suppliers.$inferInsert;
+
+/// One configuration row per legal entity — the AP control account (and
+/// optional tax-input account) AP-1b's bill posting will debit/credit.
+/// AP-1a only creates/reads this configuration; nothing in AP-1a posts
+/// against it (proposal §5, §15 "Do not implement bill posting yet").
+export const apSettings = pgTable(
+  "ap_settings",
+  {
+    tenantId: uuid("tenant_id").notNull(),
+    legalEntityId: uuid("legal_entity_id").notNull(),
+    /// The single AP liability account for this legal entity. Validated
+    /// at write time: must exist, must be active, must be in this
+    /// (tenantId, legalEntityId), and — because "AP control account" is
+    /// unambiguously a liability by definition — must be of type
+    /// LIABILITY (ApSettingsService.upsert). Real FK: chart_of_accounts
+    /// is Finance's own table, same migration lifecycle.
+    apControlAccountId: uuid("ap_control_account_id")
+      .notNull()
+      .references(() => chartOfAccounts.id),
+    /// Optional in AP-1a. Required by AP-1b only once a bill actually
+    /// carries a nonzero tax line (proposal §13/§15) — not enforced
+    /// here. Deliberately NOT type-constrained the way
+    /// apControlAccountId is: tax accounting treatment (asset vs.
+    /// expense) is jurisdiction-dependent and out of scope for this
+    /// increment to decide on the caller's behalf.
+    taxInputAccountId: uuid("tax_input_account_id").references(
+      () => chartOfAccounts.id,
+    ),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.tenantId, t.legalEntityId] })],
+);
+
+export type ApSettings = typeof apSettings.$inferSelect;
+export type NewApSettings = typeof apSettings.$inferInsert;
