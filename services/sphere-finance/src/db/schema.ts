@@ -813,3 +813,105 @@ export type SupplierPaymentAllocation =
   typeof supplierPaymentAllocations.$inferSelect;
 export type NewSupplierPaymentAllocation =
   typeof supplierPaymentAllocations.$inferInsert;
+
+// ---------------------------------------------------------------------------
+// AR Foundation — AR-1a (Customer Master + AR Foundation).
+// docs/finance-work-item-ar-1a-customer-master-ar-foundation-proposal.md §3.
+//
+// Mirrors the suppliers/ap_settings conventions above exactly: no Postgres
+// FK to db-core's tenants/legal_entities (cross-service boundary —
+// tenantId/legalEntityId validated at the application layer, always sourced
+// from a verified JWT claim); real FKs to Finance's own chart_of_accounts
+// (same migration lifecycle); RLS is tenant_id-only, legal_entity_id
+// isolation is an explicit service-layer predicate on every query (see
+// CustomersService/ArSettingsService).
+// ---------------------------------------------------------------------------
+
+export const customers = pgTable(
+  "customers",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id").notNull(),
+    legalEntityId: uuid("legal_entity_id").notNull(),
+    code: varchar("code", { length: 32 }).notNull(),
+    name: varchar("name", { length: 255 }).notNull(),
+    isActive: boolean("is_active").notNull().default(true),
+    /// Net payment terms in days (e.g. 30 for "Net 30"). Nullable —
+    /// optional at the customer level. Not consumed by any code in
+    /// AR-1a; later AR Work Items (invoice due-date defaulting, AR
+    /// ageing) are its documented future consumers, mirroring
+    /// suppliers.paymentTermsDays.
+    paymentTermsDays: integer("payment_terms_days"),
+    /// Informational only (e.g. a VAT number) — not read or validated
+    /// by any tax logic in this or any later AR-1a-adjacent work item.
+    taxRegistrationNo: varchar("tax_registration_no", { length: 64 }),
+    /// Pre-fills new invoice lines in a later AR Work Item; not enforced
+    /// against any invoice line at write time. Validated the same way
+    /// as suppliers.defaultExpenseAccountId at write time here: must
+    /// exist, must be active, must be in the same (tenantId,
+    /// legalEntityId) — see CustomersService.validateAccountRefOrThrow.
+    defaultRevenueAccountId: uuid("default_revenue_account_id").references(
+      () => chartOfAccounts.id,
+    ),
+    createdBy: uuid("created_by"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    unique("customers_tenant_entity_code_unique").on(
+      t.tenantId,
+      t.legalEntityId,
+      t.code,
+    ),
+    index("customers_tenant_entity_idx").on(t.tenantId, t.legalEntityId),
+  ],
+);
+
+export type Customer = typeof customers.$inferSelect;
+export type NewCustomer = typeof customers.$inferInsert;
+
+/// One configuration row per legal entity — the AR control account (and
+/// optional tax-output account) a later AR Work Item's invoice/receipt
+/// posting will debit/credit. AR-1a only creates/reads this
+/// configuration; nothing in AR-1a posts against it, mirroring
+/// ap_settings's own AP-1a-scope restriction.
+export const arSettings = pgTable(
+  "ar_settings",
+  {
+    tenantId: uuid("tenant_id").notNull(),
+    legalEntityId: uuid("legal_entity_id").notNull(),
+    /// The single AR receivable account for this legal entity. Validated
+    /// at write time: must exist, must be active, must be in this
+    /// (tenantId, legalEntityId), and — because "AR control account" is
+    /// unambiguously an asset by definition — must be of type ASSET
+    /// (ArSettingsService.upsert). Real FK: chart_of_accounts is
+    /// Finance's own table, same migration lifecycle.
+    arControlAccountId: uuid("ar_control_account_id")
+      .notNull()
+      .references(() => chartOfAccounts.id),
+    /// Optional in AR-1a. Required by a later AR Work Item only once an
+    /// invoice actually carries a nonzero tax line — not enforced here.
+    /// Deliberately NOT type-constrained the way arControlAccountId is:
+    /// output-tax accounting treatment (liability) is
+    /// jurisdiction-dependent and out of scope for this increment to
+    /// decide on the caller's behalf, mirroring ap_settings's own
+    /// taxInputAccountId reasoning (input vs. output tax direction).
+    taxOutputAccountId: uuid("tax_output_account_id").references(
+      () => chartOfAccounts.id,
+    ),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.tenantId, t.legalEntityId] })],
+);
+
+export type ArSettings = typeof arSettings.$inferSelect;
+export type NewArSettings = typeof arSettings.$inferInsert;

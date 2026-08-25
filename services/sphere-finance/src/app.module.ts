@@ -6,6 +6,7 @@ import { AccountingPeriodsModule } from "./accounting-periods/accounting-periods
 import { JournalEntriesModule } from "./journal-entries/journal-entries.module";
 import { GeneralLedgerModule } from "./general-ledger/general-ledger.module";
 import { AccountsPayableModule } from "./accounts-payable/accounts-payable.module";
+import { AccountsReceivableModule } from "./accounts-receivable/accounts-receivable.module";
 import { HealthController } from "./health/health.controller";
 import { TenantContextMiddleware } from "./tenant/tenant-context.middleware";
 
@@ -26,6 +27,12 @@ import { TenantContextMiddleware } from "./tenant/tenant-context.middleware";
     // docs/finance-work-item-1-ap-foundation-proposal.md §22. Reads/writes
     // its own new tables only; touches none of the four modules above.
     AccountsPayableModule,
+    // AR-1a — Customer Master + AR Settings (Accounts Receivable
+    // Foundation). docs/finance-work-item-ar-1a-customer-master-ar-
+    // foundation-proposal.md §6. Reads/writes its own new tables only;
+    // touches none of the modules above — sibling of AccountsPayableModule,
+    // not nested inside it.
+    AccountsReceivableModule,
     // Scoped registration so TenantContextMiddleware can inject JwtService
     // without importing AccountsModule's other providers — same pattern as
     // services/identity/src/app.module.ts.

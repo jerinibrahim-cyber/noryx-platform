@@ -15,6 +15,8 @@ import { ApSettingsController } from "./accounts-payable/ap-settings/ap-settings
 import { SupplierBillsController } from "./accounts-payable/supplier-bills/supplier-bills.controller";
 import { SupplierPaymentsController } from "./accounts-payable/supplier-payments/supplier-payments.controller";
 import { ApReportsController } from "./accounts-payable/ap-reports/ap-reports.controller";
+import { CustomersController } from "./accounts-receivable/customers/customers.controller";
+import { ArSettingsController } from "./accounts-receivable/ar-settings/ar-settings.controller";
 
 /**
  * Milestone 3.2 — Route → Required-Role Matrix Hardening
@@ -167,7 +169,10 @@ function role(
  * docs/finance-work-item-1c-supplier-payments-proposal.md §10/§11) plus
  * AP-1d's ApReportsController (4 routes, added per
  * docs/finance-work-item-1d-supplier-balance-statement-ageing-proposal.md
- * §5), 40 routes total.
+ * §5) plus AR-1a's two controllers, CustomersController and
+ * ArSettingsController (8 routes, added per
+ * docs/finance-work-item-ar-1a-customer-master-ar-foundation-proposal.md
+ * §5), 48 routes total across 11 controllers.
  */
 const EXPECTED: DiscoveredRoute[] = [
   role("POST", "accounts", "AccountsController", ["finance.admin"]),
@@ -331,6 +336,35 @@ const EXPECTED: DiscoveredRoute[] = [
     "finance.poster",
     "finance.admin",
   ]),
+
+  // AR-1a — docs/finance-work-item-ar-1a-customer-master-ar-foundation-
+  // proposal.md §5. Customers mirrors SuppliersController's exact
+  // admin-writes/any-role-reads split — same master-data posture.
+  role("POST", "customers", "CustomersController", ["finance.admin"]),
+  role("GET", "customers", "CustomersController", [
+    "finance.viewer",
+    "finance.poster",
+    "finance.admin",
+  ]),
+  role("GET", "customers/:id", "CustomersController", [
+    "finance.viewer",
+    "finance.poster",
+    "finance.admin",
+  ]),
+  role("PATCH", "customers/:id", "CustomersController", ["finance.admin"]),
+  role("PATCH", "customers/:id/deactivate", "CustomersController", [
+    "finance.admin",
+  ]),
+  role("PATCH", "customers/:id/reactivate", "CustomersController", [
+    "finance.admin",
+  ]),
+
+  role("POST", "ar/settings", "ArSettingsController", ["finance.admin"]),
+  role("GET", "ar/settings", "ArSettingsController", [
+    "finance.viewer",
+    "finance.poster",
+    "finance.admin",
+  ]),
 ];
 
 describe("Route → required-role matrix (sphere-finance)", () => {
@@ -344,11 +378,13 @@ describe("Route → required-role matrix (sphere-finance)", () => {
     ...discoverRoutes(SupplierBillsController),
     ...discoverRoutes(SupplierPaymentsController),
     ...discoverRoutes(ApReportsController),
+    ...discoverRoutes(CustomersController),
+    ...discoverRoutes(ArSettingsController),
   ];
   const actualByKey = new Map(actual.map((r) => [r.key, r]));
   const expectedByKey = new Map(EXPECTED.map((r) => [r.key, r]));
 
-  it("discovers exactly the expected number of routes across all four controllers", () => {
+  it("discovers exactly the expected number of routes across all eleven controllers", () => {
     expect(actual).toHaveLength(EXPECTED.length);
   });
 
