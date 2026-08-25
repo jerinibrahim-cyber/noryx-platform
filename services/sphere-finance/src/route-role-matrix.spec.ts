@@ -13,6 +13,7 @@ import { GeneralLedgerController } from "./general-ledger/general-ledger.control
 import { SuppliersController } from "./accounts-payable/suppliers/suppliers.controller";
 import { ApSettingsController } from "./accounts-payable/ap-settings/ap-settings.controller";
 import { SupplierBillsController } from "./accounts-payable/supplier-bills/supplier-bills.controller";
+import { SupplierPaymentsController } from "./accounts-payable/supplier-payments/supplier-payments.controller";
 
 /**
  * Milestone 3.2 — Route → Required-Role Matrix Hardening
@@ -25,11 +26,13 @@ import { SupplierBillsController } from "./accounts-payable/supplier-bills/suppl
  * the live Postgres catalog instead of trusting a remembered table
  * list. Extended for AP-1a (docs/finance-work-item-1-ap-foundation
  * -proposal.md §16) to also discover SuppliersController and
- * ApSettingsController, and for AP-1b
+ * ApSettingsController, for AP-1b
  * (docs/finance-work-item-1b-supplier-bills-proposal.md §14/§16) to
- * also discover SupplierBillsController — this test is repo-wide, not
- * per-module, so a new controller must be added to both the import list
- * above and the `actual` array below, or its routes simply go
+ * also discover SupplierBillsController, and for AP-1c
+ * (docs/finance-work-item-1c-supplier-payments-proposal.md §10/§11) to
+ * also discover SupplierPaymentsController — this test is repo-wide,
+ * not per-module, so a new controller must be added to both the import
+ * list above and the `actual` array below, or its routes simply go
  * unverified.
  *
  * Every route here is authenticated (JwtAuthGuard) AND role-restricted
@@ -150,13 +153,15 @@ function role(
 }
 
 /**
- * Single source of truth. Every route across all seven Finance
+ * Single source of truth. Every route across all eight Finance
  * controllers — the original four (re-verified live, matching
  * docs/hardening/milestone-3.2-route-role-matrix-proposal.md §2 exactly,
  * 17 routes) plus AP-1a's two controllers (7 routes, added per
  * docs/finance-work-item-1-ap-foundation-proposal.md §16) plus AP-1b's
  * SupplierBillsController (6 routes, added per
- * docs/finance-work-item-1b-supplier-bills-proposal.md §14/§16), 30
+ * docs/finance-work-item-1b-supplier-bills-proposal.md §14/§16) plus
+ * AP-1c's SupplierPaymentsController (6 routes, added per
+ * docs/finance-work-item-1c-supplier-payments-proposal.md §10/§11), 36
  * routes total.
  */
 const EXPECTED: DiscoveredRoute[] = [
@@ -272,6 +277,31 @@ const EXPECTED: DiscoveredRoute[] = [
   role("PATCH", "bills/:id", "SupplierBillsController", ["finance.poster"]),
   role("DELETE", "bills/:id", "SupplierBillsController", ["finance.poster"]),
   role("POST", "bills/:id/post", "SupplierBillsController", ["finance.poster"]),
+
+  // AP-1c — docs/finance-work-item-1c-supplier-payments-proposal.md
+  // §10/§11. Same finance.poster-writes/any-role-reads split as
+  // SupplierBillsController — payments are a transactional/posting
+  // document, not master data.
+  role("POST", "payments", "SupplierPaymentsController", ["finance.poster"]),
+  role("GET", "payments", "SupplierPaymentsController", [
+    "finance.viewer",
+    "finance.poster",
+    "finance.admin",
+  ]),
+  role("GET", "payments/:id", "SupplierPaymentsController", [
+    "finance.viewer",
+    "finance.poster",
+    "finance.admin",
+  ]),
+  role("PATCH", "payments/:id", "SupplierPaymentsController", [
+    "finance.poster",
+  ]),
+  role("DELETE", "payments/:id", "SupplierPaymentsController", [
+    "finance.poster",
+  ]),
+  role("POST", "payments/:id/post", "SupplierPaymentsController", [
+    "finance.poster",
+  ]),
 ];
 
 describe("Route → required-role matrix (sphere-finance)", () => {
@@ -283,6 +313,7 @@ describe("Route → required-role matrix (sphere-finance)", () => {
     ...discoverRoutes(SuppliersController),
     ...discoverRoutes(ApSettingsController),
     ...discoverRoutes(SupplierBillsController),
+    ...discoverRoutes(SupplierPaymentsController),
   ];
   const actualByKey = new Map(actual.map((r) => [r.key, r]));
   const expectedByKey = new Map(EXPECTED.map((r) => [r.key, r]));

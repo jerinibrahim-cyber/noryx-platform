@@ -579,12 +579,15 @@ export const supplierBills = pgTable(
       "supplier_bills_amounts_non_negative",
       sql`${t.subtotalMinor} >= 0 AND ${t.taxMinor} >= 0 AND ${t.totalMinor} >= 0`,
     ),
-    // Tightened from the original AP Foundation proposal's `>= 0 AND <=
-    // total_minor` range (proposal §24 item 3): no AP-1b code path can
-    // ever produce a nonzero value, so the constraint says so until
-    // AP-1c's migration loosens it together with introducing the first
-    // writer.
-    check("supplier_bills_paid_minor_zero_until_ap1c", sql`${t.paidMinor} = 0`),
+    // Loosened in AP-1c (docs/finance-work-item-1c-supplier-payments-
+    // proposal.md §3) from the AP-1b-only `paid_minor = 0` pin
+    // (supplier_bills_paid_minor_zero_until_ap1c, proposal §24 item 3)
+    // back to the original AP Foundation proposal's intended range, now
+    // that SupplierPaymentsService.post() is the first real writer.
+    check(
+      "supplier_bills_paid_minor_within_total",
+      sql`${t.paidMinor} >= 0 AND ${t.paidMinor} <= ${t.totalMinor}`,
+    ),
   ],
 );
 
@@ -634,3 +637,179 @@ export const supplierBillLines = pgTable(
 
 export type SupplierBillLine = typeof supplierBillLines.$inferSelect;
 export type NewSupplierBillLine = typeof supplierBillLines.$inferInsert;
+
+// ---------------------------------------------------------------------------
+// AP Foundation — AP-1c (Supplier Payments & Allocations).
+// docs/finance-work-item-1c-supplier-payments-proposal.md §3.
+//
+// Payment posting does NOT call JournalEntriesService, same architectural
+// reasoning as AP-1b's bill posting (transaction-atomicity mismatch) — it
+// replicates JournalEntriesService.post()'s discipline directly against
+// journal_entries/journal_lines/journal_number_counters, drawing journal
+// numbers from the SAME sequence bills and hand-posted journal entries
+// use. See SupplierPaymentsService.post().
+//
+// ap_payment_number_counters is a SEPARATE table from ap_number_counters
+// (proposal §12 decision 1, approved) — ap_number_counters is not widened
+// with a discriminator column and is not otherwise touched by AP-1c.
+//
+// Same conventions as every table above: no Postgres FK to db-core's
+// tenants/legal_entities (cross-service boundary); real FKs to Finance's
+// own tables (suppliers, supplier_bills, chart_of_accounts,
+// journal_entries, accounting_periods — same migration lifecycle); RLS is
+// tenant_id-only, legal_entity_id isolation is an explicit service-layer
+// predicate on every query.
+// ---------------------------------------------------------------------------
+
+/// Race-free payment-numbering allocation, structurally identical to
+/// ap_number_counters and journal_number_counters but its OWN separate
+/// table/row — payments must never contend with bills for the same
+/// sequence, and their number formats differ (PAY-NNNNNN vs BILL-NNNNNN).
+export const apPaymentNumberCounters = pgTable(
+  "ap_payment_number_counters",
+  {
+    tenantId: uuid("tenant_id").notNull(),
+    legalEntityId: uuid("legal_entity_id").notNull(),
+    lastAssignedNumber: integer("last_assigned_number").notNull().default(0),
+  },
+  (t) => [primaryKey({ columns: [t.tenantId, t.legalEntityId] })],
+);
+
+export type ApPaymentNumberCounter =
+  typeof apPaymentNumberCounters.$inferSelect;
+
+export const paymentMethodEnum = pgEnum("payment_method", [
+  "BANK_TRANSFER",
+  "CHEQUE",
+  "CASH",
+  "CARD",
+  "OTHER",
+]);
+
+export const supplierPaymentStatusEnum = pgEnum("supplier_payment_status", [
+  "DRAFT",
+  "POSTED",
+]);
+
+export const supplierPayments = pgTable(
+  "supplier_payments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id").notNull(),
+    legalEntityId: uuid("legal_entity_id").notNull(),
+    supplierId: uuid("supplier_id")
+      .notNull()
+      .references(() => suppliers.id),
+    /// Our own "PAY-000123" — null while DRAFT, assigned only at posting
+    /// time via apPaymentNumberCounters, mirrors internalReference's
+    /// null-while-DRAFT/immutable-after-POST shape exactly.
+    internalReference: varchar("internal_reference", { length: 20 }),
+    status: supplierPaymentStatusEnum("status").notNull().default("DRAFT"),
+    paymentDate: date("payment_date").notNull(),
+    /// Resolved from the legal entity's functional currency at creation —
+    /// never client-supplied, identical to supplierBills.currencyCode.
+    currencyCode: varchar("currency_code", { length: 3 }).notNull(),
+    /// The actual cash amount paid — client-supplied. Must equal
+    /// SUM(allocations.allocatedAmountMinor) to post (proposal §7); no
+    /// "payment on account" in this Work Item.
+    paymentAmountMinor: bigint("payment_amount_minor", {
+      mode: "number",
+    }).notNull(),
+    paymentMethod: paymentMethodEnum("payment_method").notNull(),
+    /// Manually-selected GL cash/bank account — validated ACTIVE + type
+    /// ASSET at create/edit/post time. No real bank-account entity yet
+    /// (proposal §1/§13's documented future seam). Real FK:
+    /// chart_of_accounts is Finance's own table, same migration
+    /// lifecycle.
+    bankCashAccountId: uuid("bank_cash_account_id")
+      .notNull()
+      .references(() => chartOfAccounts.id),
+    /// Free-text external reference (cheque number, transfer reference).
+    /// No format validation — same posture as supplierBills.
+    /// supplierBillNumber.
+    reference: varchar("reference", { length: 100 }),
+    memo: text("memo"),
+    /// Set exactly once, at posting. Real FK: journal_entries is
+    /// Finance's own table, same migration lifecycle.
+    journalEntryId: uuid("journal_entry_id").references(
+      () => journalEntries.id,
+    ),
+    /// Set exactly once, at posting. Real FK: accounting_periods is
+    /// Finance's own table, same migration lifecycle.
+    periodId: uuid("period_id").references(() => accountingPeriods.id),
+    createdBy: uuid("created_by"),
+    postedBy: uuid("posted_by"),
+    postedAt: timestamp("posted_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    // NULL-distinct, unlimited DRAFT rows — identical shape to
+    // supplier_bills_tenant_entity_reference_unique.
+    unique("supplier_payments_tenant_entity_reference_unique").on(
+      t.tenantId,
+      t.legalEntityId,
+      t.internalReference,
+    ),
+    index("supplier_payments_tenant_entity_idx").on(
+      t.tenantId,
+      t.legalEntityId,
+    ),
+    index("supplier_payments_supplier_idx").on(t.supplierId),
+    check(
+      "supplier_payments_amount_positive",
+      sql`${t.paymentAmountMinor} > 0`,
+    ),
+  ],
+);
+
+export type SupplierPayment = typeof supplierPayments.$inferSelect;
+export type NewSupplierPayment = typeof supplierPayments.$inferInsert;
+
+export const supplierPaymentAllocations = pgTable(
+  "supplier_payment_allocations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /// Denormalized from the parent payment — required for this table's
+    /// own RLS policy, identical reasoning to supplierBillLines.tenantId.
+    tenantId: uuid("tenant_id").notNull(),
+    paymentId: uuid("payment_id")
+      .notNull()
+      .references(() => supplierPayments.id, { onDelete: "cascade" }),
+    /// No onDelete cascade from supplier_bills — a bill is never deleted
+    /// once POSTED (immutable), and only a POSTED bill may be allocated
+    /// against (proposal §7), so this FK never needs cascade behavior.
+    billId: uuid("bill_id")
+      .notNull()
+      .references(() => supplierBills.id),
+    allocatedAmountMinor: bigint("allocated_amount_minor", {
+      mode: "number",
+    }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    // At most one allocation row per (payment, bill) pair — an edit to
+    // an existing allocation changes this row's amount rather than
+    // adding a second row for the same pair.
+    unique("supplier_payment_allocations_payment_bill_unique").on(
+      t.paymentId,
+      t.billId,
+    ),
+    index("supplier_payment_allocations_bill_idx").on(t.billId),
+    check(
+      "supplier_payment_allocations_amount_positive",
+      sql`${t.allocatedAmountMinor} > 0`,
+    ),
+  ],
+);
+
+export type SupplierPaymentAllocation =
+  typeof supplierPaymentAllocations.$inferSelect;
+export type NewSupplierPaymentAllocation =
+  typeof supplierPaymentAllocations.$inferInsert;

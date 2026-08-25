@@ -19,43 +19,39 @@ import {
   requireTenantContext,
 } from "@noryx/auth-core";
 import type { AuthenticatedRequestUser } from "@noryx/shared-types";
-import { SupplierBillsService } from "./supplier-bills.service";
-import { CreateSupplierBillDto } from "./dto/create-supplier-bill.dto";
-import { UpdateSupplierBillDto } from "./dto/update-supplier-bill.dto";
+import { SupplierPaymentsService } from "./supplier-payments.service";
+import { CreateSupplierPaymentDto } from "./dto/create-supplier-payment.dto";
+import { UpdateSupplierPaymentDto } from "./dto/update-supplier-payment.dto";
 
 /**
- * docs/finance-work-item-1b-supplier-bills-proposal.md §14/§16.
+ * docs/finance-work-item-1c-supplier-payments-proposal.md §10/§11.
  *
  * finance.viewer/poster/admin can read; only finance.poster can write
- * (create/edit/delete a draft, post) — matches JournalEntriesController's
- * split, not AP-1a's SuppliersController/ApSettingsController
- * admin-writes split (proposal §24 item 4, approved): bills are a
- * transactional/posting document like journal entries, not master data/
- * configuration like suppliers or AP settings, so the role split follows
- * the nature of the object rather than the module it lives in.
+ * (create/edit/delete a draft, post) — matches SupplierBillsController's/
+ * JournalEntriesController's split: payments are a transactional/
+ * posting document, not master data.
  *
  * tenantId and legalEntityId always come from the verified JWT, never
  * from a request param/body, same convention as every other Finance
  * controller. `/post` returns 200 (not Nest's `@Post()` default 201)
- * since it transitions an existing resource rather than creating one —
- * same reasoning as JournalEntriesController.post().
+ * since it transitions an existing resource rather than creating one.
  */
-@Controller("bills")
+@Controller("payments")
 @UseGuards(JwtAuthGuard, RolesGuard)
-export class SupplierBillsController {
-  constructor(private readonly bills: SupplierBillsService) {}
+export class SupplierPaymentsController {
+  constructor(private readonly payments: SupplierPaymentsService) {}
 
   @Post()
   @Roles("finance.poster")
   create(
     @CurrentUser() user: AuthenticatedRequestUser,
-    @Body() dto: CreateSupplierBillDto,
+    @Body() dto: CreateSupplierPaymentDto,
   ) {
     const { tenantId, legalEntityId } = requireTenantContext(
       user,
-      "Supplier bills require",
+      "Supplier payments require",
     );
-    return this.bills.create(tenantId, legalEntityId, user.userId, dto);
+    return this.payments.create(tenantId, legalEntityId, user.userId, dto);
   }
 
   @Get()
@@ -66,33 +62,21 @@ export class SupplierBillsController {
     @Query("supplierId") supplierId?: string,
     @Query("dateFrom") dateFrom?: string,
     @Query("dateTo") dateTo?: string,
-    @Query("paymentStatus") paymentStatus?: string,
   ) {
     if (status !== undefined && status !== "DRAFT" && status !== "POSTED") {
       throw new BadRequestException(
         'status filter must be "DRAFT" or "POSTED".',
       );
     }
-    if (
-      paymentStatus !== undefined &&
-      paymentStatus !== "UNPAID" &&
-      paymentStatus !== "PARTIALLY_PAID" &&
-      paymentStatus !== "PAID"
-    ) {
-      throw new BadRequestException(
-        'paymentStatus filter must be "UNPAID", "PARTIALLY_PAID", or "PAID".',
-      );
-    }
     const { tenantId, legalEntityId } = requireTenantContext(
       user,
-      "Supplier bills require",
+      "Supplier payments require",
     );
-    return this.bills.list(tenantId, legalEntityId, {
+    return this.payments.list(tenantId, legalEntityId, {
       status,
       supplierId,
       dateFrom,
       dateTo,
-      paymentStatus,
     });
   }
 
@@ -104,9 +88,9 @@ export class SupplierBillsController {
   ) {
     const { tenantId, legalEntityId } = requireTenantContext(
       user,
-      "Supplier bills require",
+      "Supplier payments require",
     );
-    return this.bills.findOne(tenantId, legalEntityId, id);
+    return this.payments.findOne(tenantId, legalEntityId, id);
   }
 
   @Patch(":id")
@@ -114,13 +98,13 @@ export class SupplierBillsController {
   update(
     @CurrentUser() user: AuthenticatedRequestUser,
     @Param("id") id: string,
-    @Body() dto: UpdateSupplierBillDto,
+    @Body() dto: UpdateSupplierPaymentDto,
   ) {
     const { tenantId, legalEntityId } = requireTenantContext(
       user,
-      "Supplier bills require",
+      "Supplier payments require",
     );
-    return this.bills.update(tenantId, legalEntityId, user.userId, id, dto);
+    return this.payments.update(tenantId, legalEntityId, user.userId, id, dto);
   }
 
   @Delete(":id")
@@ -131,9 +115,9 @@ export class SupplierBillsController {
   ) {
     const { tenantId, legalEntityId } = requireTenantContext(
       user,
-      "Supplier bills require",
+      "Supplier payments require",
     );
-    return this.bills.remove(tenantId, legalEntityId, user.userId, id);
+    return this.payments.remove(tenantId, legalEntityId, user.userId, id);
   }
 
   @Post(":id/post")
@@ -142,8 +126,8 @@ export class SupplierBillsController {
   post(@CurrentUser() user: AuthenticatedRequestUser, @Param("id") id: string) {
     const { tenantId, legalEntityId } = requireTenantContext(
       user,
-      "Supplier bills require",
+      "Supplier payments require",
     );
-    return this.bills.post(tenantId, legalEntityId, user.userId, id);
+    return this.payments.post(tenantId, legalEntityId, user.userId, id);
   }
 }

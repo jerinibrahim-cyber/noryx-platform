@@ -45,6 +45,11 @@ export interface ListSupplierBillsFilters {
   supplierId?: string;
   dateFrom?: string;
   dateTo?: string;
+  /// Added in AP-1c (docs/finance-work-item-1c-supplier-payments-
+  /// proposal.md §1/§11) — a minimal, direct enabler of AP-1c's own
+  /// payment-allocation flow (finding candidate bills to allocate
+  /// against), not an AP-1d report endpoint.
+  paymentStatus?: "UNPAID" | "PARTIALLY_PAID" | "PAID";
 }
 
 /**
@@ -168,6 +173,9 @@ export class SupplierBillsService {
       }
       if (filters.dateTo) {
         conditions.push(lte(supplierBills.billDate, filters.dateTo));
+      }
+      if (filters.paymentStatus) {
+        conditions.push(eq(supplierBills.paymentStatus, filters.paymentStatus));
       }
       return tx
         .select()
