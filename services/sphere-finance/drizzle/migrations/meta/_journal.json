@@ -71,6 +71,13 @@
       "when": 1787750692011,
       "tag": "0009_ambitious_tinkerer",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1787755364077,
+      "tag": "0010_closed_shard",
+      "breakpoints": true
     }
   ]
 }

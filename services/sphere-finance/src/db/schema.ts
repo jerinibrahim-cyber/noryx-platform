@@ -1006,11 +1006,11 @@ export const customerInvoices = pgTable(
     taxMinor: bigint("tax_minor", { mode: "number" }).notNull().default(0),
     /// Server-computed: subtotalMinor + taxMinor.
     totalMinor: bigint("total_minor", { mode: "number" }).notNull(),
-    /// AR-1b never writes anything but 0 — see the
-    /// customer_invoices_paid_minor_zero_until_ar1c CHECK constraint
-    /// below, mirroring supplier_bills_paid_minor_zero_until_ap1c. A
-    /// later AR Work Item's migration loosens this constraint together
-    /// with introducing the first writer.
+    /// AR-1b wrote only 0 (customer_invoices_paid_minor_zero_until_ar1c,
+    /// mirroring supplier_bills_paid_minor_zero_until_ap1c). AR-1c
+    /// (CustomerReceiptsService.post()) is the first real writer — see
+    /// the customer_invoices_paid_minor_within_total CHECK constraint
+    /// below, mirroring supplier_bills_paid_minor_within_total.
     paidMinor: bigint("paid_minor", { mode: "number" }).notNull().default(0),
     /// Set exactly once, at posting. Real FK: journal_entries is
     /// Finance's own table, same migration lifecycle.
@@ -1052,12 +1052,14 @@ export const customerInvoices = pgTable(
       "customer_invoices_amounts_non_negative",
       sql`${t.subtotalMinor} >= 0 AND ${t.taxMinor} >= 0 AND ${t.totalMinor} >= 0`,
     ),
-    // Pinned to 0 for AR-1b, exactly like AP-1b's own
-    // supplier_bills_paid_minor_zero_until_ap1c — a later AR Work Item's
-    // receipt-allocation posting is this constraint's first loosener.
+    // Loosened in AR-1c (docs/finance-work-item-1c-customer-receipts-
+    // proposal.md §6) from the AR-1b-only `paid_minor = 0` pin
+    // (customer_invoices_paid_minor_zero_until_ar1c) to the full range,
+    // now that CustomerReceiptsService.post() is the first real writer
+    // — mirrors supplier_bills_paid_minor_within_total exactly.
     check(
-      "customer_invoices_paid_minor_zero_until_ar1c",
-      sql`${t.paidMinor} = 0`,
+      "customer_invoices_paid_minor_within_total",
+      sql`${t.paidMinor} >= 0 AND ${t.paidMinor} <= ${t.totalMinor}`,
     ),
   ],
 );
@@ -1109,3 +1111,185 @@ export const customerInvoiceLines = pgTable(
 
 export type CustomerInvoiceLine = typeof customerInvoiceLines.$inferSelect;
 export type NewCustomerInvoiceLine = typeof customerInvoiceLines.$inferInsert;
+
+// ---------------------------------------------------------------------------
+// AR Foundation — AR-1c (Customer Receipts & Settlement).
+// docs/finance-work-item-1c-customer-receipts-proposal.md §6, CTO-approved.
+//
+// Receipt posting does NOT call JournalEntriesService, same architectural
+// reasoning as AR-1b/AP-1b/AP-1c (transaction-atomicity mismatch) — it
+// replicates JournalEntriesService.post()'s discipline directly against
+// journal_entries/journal_lines/journal_number_counters, drawing journal
+// numbers from the SAME sequence invoices, bills, and payments already use.
+// See CustomerReceiptsService.post().
+//
+// ar_receipt_number_counters is a SEPARATE table from ar_number_counters/
+// ap_number_counters/ap_payment_number_counters/journal_number_counters —
+// receipts must never contend with invoices, bills, payments, or
+// hand-posted journal entries for the same sequence (CTO-approved decision
+// 1, proposal §14).
+//
+// receipt_method reuses the EXISTING `paymentMethodEnum` type declared
+// above for supplier_payments — CTO-approved decision 2, proposal §14: a
+// direction-agnostic, closed vocabulary with no rows/lifecycle of its own,
+// unlike the domain-owned tables (ar_settings, ar_number_counters,
+// customer_invoices) that are always duplicated per side. No new Postgres
+// enum type is declared here.
+//
+// Same conventions as every table above: no Postgres FK to db-core's
+// tenants/legal_entities (cross-service boundary); real FKs to Finance's
+// own tables (customers, customer_invoices, chart_of_accounts,
+// journal_entries, accounting_periods — same migration lifecycle); RLS is
+// tenant_id-only, legal_entity_id isolation is an explicit service-layer
+// predicate on every query.
+// ---------------------------------------------------------------------------
+
+/// Race-free receipt-numbering allocation, structurally identical to
+/// arNumberCounters/apPaymentNumberCounters but its OWN separate
+/// table/row — receipts must never contend with invoices, bills,
+/// payments, or hand-posted journal entries for the same sequence.
+export const arReceiptNumberCounters = pgTable(
+  "ar_receipt_number_counters",
+  {
+    tenantId: uuid("tenant_id").notNull(),
+    legalEntityId: uuid("legal_entity_id").notNull(),
+    lastAssignedNumber: integer("last_assigned_number").notNull().default(0),
+  },
+  (t) => [primaryKey({ columns: [t.tenantId, t.legalEntityId] })],
+);
+
+export type ArReceiptNumberCounter =
+  typeof arReceiptNumberCounters.$inferSelect;
+
+export const customerReceiptStatusEnum = pgEnum("customer_receipt_status", [
+  "DRAFT",
+  "POSTED",
+]);
+
+export const customerReceipts = pgTable(
+  "customer_receipts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id").notNull(),
+    legalEntityId: uuid("legal_entity_id").notNull(),
+    customerId: uuid("customer_id")
+      .notNull()
+      .references(() => customers.id),
+    /// Our own "RCT-000123" — null while DRAFT, assigned only at posting
+    /// time via arReceiptNumberCounters. Same null-while-DRAFT/
+    /// immutable-after-POST shape as every other Finance document's own
+    /// number.
+    internalReference: varchar("internal_reference", { length: 20 }),
+    status: customerReceiptStatusEnum("status").notNull().default("DRAFT"),
+    receiptDate: date("receipt_date").notNull(),
+    /// Resolved from the legal entity's functional currency at creation —
+    /// never client-supplied, identical to customerInvoices.currencyCode.
+    currencyCode: varchar("currency_code", { length: 3 }).notNull(),
+    /// The actual cash amount received — client-supplied. Must equal
+    /// SUM(allocations.allocatedAmountMinor) to post (proposal §10); no
+    /// "receipt on account" in this Work Item.
+    receiptAmountMinor: bigint("receipt_amount_minor", {
+      mode: "number",
+    }).notNull(),
+    /// Reuses the existing payment_method enum type — CTO-approved
+    /// decision 2 above.
+    receiptMethod: paymentMethodEnum("receipt_method").notNull(),
+    /// Manually-selected GL cash/bank account — validated ACTIVE + type
+    /// ASSET at create/edit/post time, identical posture to
+    /// supplierPayments.bankCashAccountId. No real bank-account entity
+    /// yet (proposal §4's documented future seam). Real FK:
+    /// chart_of_accounts is Finance's own table, same migration
+    /// lifecycle.
+    bankCashAccountId: uuid("bank_cash_account_id")
+      .notNull()
+      .references(() => chartOfAccounts.id),
+    /// Free-text external reference (cheque number, transfer reference).
+    /// No format validation — same posture as supplierPayments.reference.
+    reference: varchar("reference", { length: 100 }),
+    memo: text("memo"),
+    /// Set exactly once, at posting. Real FK: journal_entries is
+    /// Finance's own table, same migration lifecycle.
+    journalEntryId: uuid("journal_entry_id").references(
+      () => journalEntries.id,
+    ),
+    /// Set exactly once, at posting. Real FK: accounting_periods is
+    /// Finance's own table, same migration lifecycle.
+    periodId: uuid("period_id").references(() => accountingPeriods.id),
+    createdBy: uuid("created_by"),
+    postedBy: uuid("posted_by"),
+    postedAt: timestamp("posted_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    // NULL-distinct, unlimited DRAFT rows — identical shape to every
+    // other Finance document's own reference-number uniqueness.
+    unique("customer_receipts_tenant_entity_reference_unique").on(
+      t.tenantId,
+      t.legalEntityId,
+      t.internalReference,
+    ),
+    index("customer_receipts_tenant_entity_idx").on(
+      t.tenantId,
+      t.legalEntityId,
+    ),
+    index("customer_receipts_customer_idx").on(t.customerId),
+    check(
+      "customer_receipts_amount_positive",
+      sql`${t.receiptAmountMinor} > 0`,
+    ),
+  ],
+);
+
+export type CustomerReceipt = typeof customerReceipts.$inferSelect;
+export type NewCustomerReceipt = typeof customerReceipts.$inferInsert;
+
+export const customerReceiptAllocations = pgTable(
+  "customer_receipt_allocations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /// Denormalized from the parent receipt — required for this table's
+    /// own RLS policy, identical reasoning to
+    /// supplierPaymentAllocations.tenantId.
+    tenantId: uuid("tenant_id").notNull(),
+    receiptId: uuid("receipt_id")
+      .notNull()
+      .references(() => customerReceipts.id, { onDelete: "cascade" }),
+    /// No onDelete cascade from customer_invoices — an invoice is never
+    /// deleted once POSTED (immutable), and only a POSTED invoice may be
+    /// allocated against (proposal §10), so this FK never needs cascade
+    /// behavior.
+    invoiceId: uuid("invoice_id")
+      .notNull()
+      .references(() => customerInvoices.id),
+    allocatedAmountMinor: bigint("allocated_amount_minor", {
+      mode: "number",
+    }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    // At most one allocation row per (receipt, invoice) pair — an edit to
+    // an existing allocation changes this row's amount rather than
+    // adding a second row for the same pair.
+    unique("customer_receipt_allocations_receipt_invoice_unique").on(
+      t.receiptId,
+      t.invoiceId,
+    ),
+    index("customer_receipt_allocations_invoice_idx").on(t.invoiceId),
+    check(
+      "customer_receipt_allocations_amount_positive",
+      sql`${t.allocatedAmountMinor} > 0`,
+    ),
+  ],
+);
+
+export type CustomerReceiptAllocation =
+  typeof customerReceiptAllocations.$inferSelect;
+export type NewCustomerReceiptAllocation =
+  typeof customerReceiptAllocations.$inferInsert;

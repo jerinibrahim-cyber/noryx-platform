@@ -19,43 +19,40 @@ import {
   requireTenantContext,
 } from "@noryx/auth-core";
 import type { AuthenticatedRequestUser } from "@noryx/shared-types";
-import { CustomerInvoicesService } from "./customer-invoices.service";
-import { CreateCustomerInvoiceDto } from "./dto/create-customer-invoice.dto";
-import { UpdateCustomerInvoiceDto } from "./dto/update-customer-invoice.dto";
+import { CustomerReceiptsService } from "./customer-receipts.service";
+import { CreateCustomerReceiptDto } from "./dto/create-customer-receipt.dto";
+import { UpdateCustomerReceiptDto } from "./dto/update-customer-receipt.dto";
 
 /**
- * docs/finance-work-item-ar-1b-customer-invoicing-proposal.md §5.
+ * docs/finance-work-item-1c-customer-receipts-proposal.md §16/§18.
  *
  * finance.viewer/poster/admin can read; only finance.poster can write
- * (create/edit/delete a draft, post) — matches SupplierBillsController's
- * split, not AR-1a's CustomersController/ArSettingsController
- * admin-writes split: invoices are a transactional/posting document
- * like supplier bills, not master data/configuration like customers or
- * AR settings, so the role split follows the nature of the object
- * rather than the module it lives in.
+ * (create/edit/delete a draft, post) — matches
+ * SupplierPaymentsController's split: receipts are a transactional/
+ * posting document, not master data.
  *
  * tenantId and legalEntityId always come from the verified JWT, never
  * from a request param/body, same convention as every other Finance
  * controller. `/post` returns 200 (not Nest's `@Post()` default 201)
  * since it transitions an existing resource rather than creating one —
- * same reasoning as SupplierBillsController.post().
+ * same reasoning as SupplierPaymentsController.post().
  */
-@Controller("invoices")
+@Controller("receipts")
 @UseGuards(JwtAuthGuard, RolesGuard)
-export class CustomerInvoicesController {
-  constructor(private readonly invoices: CustomerInvoicesService) {}
+export class CustomerReceiptsController {
+  constructor(private readonly receipts: CustomerReceiptsService) {}
 
   @Post()
   @Roles("finance.poster")
   create(
     @CurrentUser() user: AuthenticatedRequestUser,
-    @Body() dto: CreateCustomerInvoiceDto,
+    @Body() dto: CreateCustomerReceiptDto,
   ) {
     const { tenantId, legalEntityId } = requireTenantContext(
       user,
-      "Customer invoices require",
+      "Customer receipts require",
     );
-    return this.invoices.create(tenantId, legalEntityId, user.userId, dto);
+    return this.receipts.create(tenantId, legalEntityId, user.userId, dto);
   }
 
   @Get()
@@ -66,33 +63,21 @@ export class CustomerInvoicesController {
     @Query("customerId") customerId?: string,
     @Query("dateFrom") dateFrom?: string,
     @Query("dateTo") dateTo?: string,
-    @Query("paymentStatus") paymentStatus?: string,
   ) {
     if (status !== undefined && status !== "DRAFT" && status !== "POSTED") {
       throw new BadRequestException(
         'status filter must be "DRAFT" or "POSTED".',
       );
     }
-    if (
-      paymentStatus !== undefined &&
-      paymentStatus !== "UNPAID" &&
-      paymentStatus !== "PARTIALLY_PAID" &&
-      paymentStatus !== "PAID"
-    ) {
-      throw new BadRequestException(
-        'paymentStatus filter must be "UNPAID", "PARTIALLY_PAID", or "PAID".',
-      );
-    }
     const { tenantId, legalEntityId } = requireTenantContext(
       user,
-      "Customer invoices require",
+      "Customer receipts require",
     );
-    return this.invoices.list(tenantId, legalEntityId, {
+    return this.receipts.list(tenantId, legalEntityId, {
       status,
       customerId,
       dateFrom,
       dateTo,
-      paymentStatus,
     });
   }
 
@@ -104,9 +89,9 @@ export class CustomerInvoicesController {
   ) {
     const { tenantId, legalEntityId } = requireTenantContext(
       user,
-      "Customer invoices require",
+      "Customer receipts require",
     );
-    return this.invoices.findOne(tenantId, legalEntityId, id);
+    return this.receipts.findOne(tenantId, legalEntityId, id);
   }
 
   @Patch(":id")
@@ -114,13 +99,13 @@ export class CustomerInvoicesController {
   update(
     @CurrentUser() user: AuthenticatedRequestUser,
     @Param("id") id: string,
-    @Body() dto: UpdateCustomerInvoiceDto,
+    @Body() dto: UpdateCustomerReceiptDto,
   ) {
     const { tenantId, legalEntityId } = requireTenantContext(
       user,
-      "Customer invoices require",
+      "Customer receipts require",
     );
-    return this.invoices.update(tenantId, legalEntityId, user.userId, id, dto);
+    return this.receipts.update(tenantId, legalEntityId, user.userId, id, dto);
   }
 
   @Delete(":id")
@@ -131,9 +116,9 @@ export class CustomerInvoicesController {
   ) {
     const { tenantId, legalEntityId } = requireTenantContext(
       user,
-      "Customer invoices require",
+      "Customer receipts require",
     );
-    return this.invoices.remove(tenantId, legalEntityId, user.userId, id);
+    return this.receipts.remove(tenantId, legalEntityId, user.userId, id);
   }
 
   @Post(":id/post")
@@ -142,8 +127,8 @@ export class CustomerInvoicesController {
   post(@CurrentUser() user: AuthenticatedRequestUser, @Param("id") id: string) {
     const { tenantId, legalEntityId } = requireTenantContext(
       user,
-      "Customer invoices require",
+      "Customer receipts require",
     );
-    return this.invoices.post(tenantId, legalEntityId, user.userId, id);
+    return this.receipts.post(tenantId, legalEntityId, user.userId, id);
   }
 }

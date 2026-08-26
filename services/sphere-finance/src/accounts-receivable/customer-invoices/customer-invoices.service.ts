@@ -45,6 +45,13 @@ export interface ListCustomerInvoicesFilters {
   customerId?: string;
   dateFrom?: string;
   dateTo?: string;
+  /**
+   * AR-1c — docs/finance-work-item-1c-customer-receipts-proposal.md
+   * §3/§4/§18. Added so a receipts UI can list a customer's open
+   * invoices to allocate against. Mirrors SupplierBillsService's
+   * ListSupplierBillsFilters.paymentStatus addition from AP-1c exactly.
+   */
+  paymentStatus?: "UNPAID" | "PARTIALLY_PAID" | "PAID";
 }
 
 /**
@@ -161,6 +168,11 @@ export class CustomerInvoicesService {
       }
       if (filters.dateTo) {
         conditions.push(lte(customerInvoices.invoiceDate, filters.dateTo));
+      }
+      if (filters.paymentStatus) {
+        conditions.push(
+          eq(customerInvoices.paymentStatus, filters.paymentStatus),
+        );
       }
       return tx
         .select()
