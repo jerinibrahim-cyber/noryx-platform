@@ -5,6 +5,7 @@ import { AccountsModule } from "./accounts/accounts.module";
 import { AccountingPeriodsModule } from "./accounting-periods/accounting-periods.module";
 import { JournalEntriesModule } from "./journal-entries/journal-entries.module";
 import { GeneralLedgerModule } from "./general-ledger/general-ledger.module";
+import { FinancialStatementsModule } from "./financial-statements/financial-statements.module";
 import { AccountsPayableModule } from "./accounts-payable/accounts-payable.module";
 import { AccountsReceivableModule } from "./accounts-receivable/accounts-receivable.module";
 import { HealthController } from "./health/health.controller";
@@ -23,6 +24,11 @@ import { TenantContextMiddleware } from "./tenant/tenant-context.middleware";
     // Trial Balance. Read-only; queries the tables the three modules
     // above already own, touches none of their files.
     GeneralLedgerModule,
+    // Financial Statements — Profit & Loss, Balance Sheet.
+    // docs/finance-work-item-financial-statements-proposal.md §13/§14. A
+    // top-level Accounting Core sibling of GeneralLedgerModule; pure read
+    // layer over the same tables, touches none of the modules above.
+    FinancialStatementsModule,
     // AP-1a — Supplier Master + AP Settings (Accounts Payable Foundation).
     // docs/finance-work-item-1-ap-foundation-proposal.md §22. Reads/writes
     // its own new tables only; touches none of the four modules above.

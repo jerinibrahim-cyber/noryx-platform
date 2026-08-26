@@ -10,6 +10,7 @@ import { AccountsController } from "./accounts/accounts.controller";
 import { AccountingPeriodsController } from "./accounting-periods/accounting-periods.controller";
 import { JournalEntriesController } from "./journal-entries/journal-entries.controller";
 import { GeneralLedgerController } from "./general-ledger/general-ledger.controller";
+import { FinancialStatementsController } from "./financial-statements/financial-statements.controller";
 import { SuppliersController } from "./accounts-payable/suppliers/suppliers.controller";
 import { ApSettingsController } from "./accounts-payable/ap-settings/ap-settings.controller";
 import { SupplierBillsController } from "./accounts-payable/supplier-bills/supplier-bills.controller";
@@ -184,8 +185,10 @@ function role(
  * AR-1c's CustomerReceiptsController (6 routes, added per
  * docs/finance-work-item-1c-customer-receipts-proposal.md §16/§18) plus
  * AR-1d's ArReportsController (4 routes, added per
- * docs/finance-work-item-1d-ar-reports-proposal.md §10), 64 routes
- * total across 14 controllers.
+ * docs/finance-work-item-1d-ar-reports-proposal.md §10) plus Financial
+ * Statements' FinancialStatementsController (2 routes, added per
+ * docs/finance-work-item-financial-statements-proposal.md §4/§13), 66
+ * routes total across 15 controllers.
  */
 const EXPECTED: DiscoveredRoute[] = [
   role("POST", "accounts", "AccountsController", ["finance.admin"]),
@@ -254,6 +257,23 @@ const EXPECTED: DiscoveredRoute[] = [
     "finance.poster",
     "finance.admin",
   ]),
+
+  // Financial Statements —
+  // docs/finance-work-item-financial-statements-proposal.md §4. Pure
+  // reads, no write-side split to make — same any-finance-role posture
+  // as GeneralLedgerController/ApReportsController/ArReportsController.
+  role(
+    "GET",
+    "financial-statements/profit-and-loss",
+    "FinancialStatementsController",
+    ["finance.viewer", "finance.poster", "finance.admin"],
+  ),
+  role(
+    "GET",
+    "financial-statements/balance-sheet",
+    "FinancialStatementsController",
+    ["finance.viewer", "finance.poster", "finance.admin"],
+  ),
 
   // AP-1a — docs/finance-work-item-1-ap-foundation-proposal.md §16.
   role("POST", "suppliers", "SuppliersController", ["finance.admin"]),
@@ -461,6 +481,7 @@ describe("Route → required-role matrix (sphere-finance)", () => {
     ...discoverRoutes(AccountingPeriodsController),
     ...discoverRoutes(JournalEntriesController),
     ...discoverRoutes(GeneralLedgerController),
+    ...discoverRoutes(FinancialStatementsController),
     ...discoverRoutes(SuppliersController),
     ...discoverRoutes(ApSettingsController),
     ...discoverRoutes(SupplierBillsController),
@@ -475,7 +496,7 @@ describe("Route → required-role matrix (sphere-finance)", () => {
   const actualByKey = new Map(actual.map((r) => [r.key, r]));
   const expectedByKey = new Map(EXPECTED.map((r) => [r.key, r]));
 
-  it("discovers exactly the expected number of routes across all fourteen controllers", () => {
+  it("discovers exactly the expected number of routes across all fifteen controllers", () => {
     expect(actual).toHaveLength(EXPECTED.length);
   });
 
