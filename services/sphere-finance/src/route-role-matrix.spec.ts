@@ -17,6 +17,7 @@ import { SupplierPaymentsController } from "./accounts-payable/supplier-payments
 import { ApReportsController } from "./accounts-payable/ap-reports/ap-reports.controller";
 import { CustomersController } from "./accounts-receivable/customers/customers.controller";
 import { ArSettingsController } from "./accounts-receivable/ar-settings/ar-settings.controller";
+import { CustomerInvoicesController } from "./accounts-receivable/customer-invoices/customer-invoices.controller";
 
 /**
  * Milestone 3.2 — Route → Required-Role Matrix Hardening
@@ -172,7 +173,9 @@ function role(
  * §5) plus AR-1a's two controllers, CustomersController and
  * ArSettingsController (8 routes, added per
  * docs/finance-work-item-ar-1a-customer-master-ar-foundation-proposal.md
- * §5), 48 routes total across 11 controllers.
+ * §5) plus AR-1b's CustomerInvoicesController (6 routes, added per
+ * docs/finance-work-item-ar-1b-customer-invoicing-proposal.md §5), 54
+ * routes total across 12 controllers.
  */
 const EXPECTED: DiscoveredRoute[] = [
   role("POST", "accounts", "AccountsController", ["finance.admin"]),
@@ -365,6 +368,31 @@ const EXPECTED: DiscoveredRoute[] = [
     "finance.poster",
     "finance.admin",
   ]),
+
+  // AR-1b — docs/finance-work-item-ar-1b-customer-invoicing-proposal.md
+  // §5. Same finance.poster-writes/any-role-reads split as
+  // SupplierBillsController — invoices are a transactional/posting
+  // document, not master data.
+  role("POST", "invoices", "CustomerInvoicesController", ["finance.poster"]),
+  role("GET", "invoices", "CustomerInvoicesController", [
+    "finance.viewer",
+    "finance.poster",
+    "finance.admin",
+  ]),
+  role("GET", "invoices/:id", "CustomerInvoicesController", [
+    "finance.viewer",
+    "finance.poster",
+    "finance.admin",
+  ]),
+  role("PATCH", "invoices/:id", "CustomerInvoicesController", [
+    "finance.poster",
+  ]),
+  role("DELETE", "invoices/:id", "CustomerInvoicesController", [
+    "finance.poster",
+  ]),
+  role("POST", "invoices/:id/post", "CustomerInvoicesController", [
+    "finance.poster",
+  ]),
 ];
 
 describe("Route → required-role matrix (sphere-finance)", () => {
@@ -380,11 +408,12 @@ describe("Route → required-role matrix (sphere-finance)", () => {
     ...discoverRoutes(ApReportsController),
     ...discoverRoutes(CustomersController),
     ...discoverRoutes(ArSettingsController),
+    ...discoverRoutes(CustomerInvoicesController),
   ];
   const actualByKey = new Map(actual.map((r) => [r.key, r]));
   const expectedByKey = new Map(EXPECTED.map((r) => [r.key, r]));
 
-  it("discovers exactly the expected number of routes across all eleven controllers", () => {
+  it("discovers exactly the expected number of routes across all twelve controllers", () => {
     expect(actual).toHaveLength(EXPECTED.length);
   });
 

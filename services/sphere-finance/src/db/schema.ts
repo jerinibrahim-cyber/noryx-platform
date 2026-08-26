@@ -915,3 +915,197 @@ export const arSettings = pgTable(
 
 export type ArSettings = typeof arSettings.$inferSelect;
 export type NewArSettings = typeof arSettings.$inferInsert;
+
+// ---------------------------------------------------------------------------
+// AR Foundation — AR-1b (Customer Invoicing).
+// docs/finance-work-item-ar-1b-customer-invoicing-proposal.md §3.
+//
+// Invoice posting does NOT call JournalEntriesService, same architectural
+// reasoning as AP-1b's bill posting (transaction-atomicity mismatch) — it
+// replicates JournalEntriesService.post()'s discipline directly against
+// journal_entries/journal_lines/journal_number_counters, drawing journal
+// numbers from the SAME sequence bills, payments, and hand-posted journal
+// entries use. See CustomerInvoicesService.post().
+//
+// ar_number_counters is a SEPARATE table from ap_number_counters/
+// journal_number_counters — invoices must never contend with bills or
+// hand-posted journal entries for the same sequence, and their number
+// formats differ (INV-NNNNNN vs BILL-NNNNNN vs JE-NNNNNN).
+//
+// Same conventions as every table above: no Postgres FK to db-core's
+// tenants/legal_entities (cross-service boundary); real FKs to Finance's
+// own tables (customers, chart_of_accounts, journal_entries,
+// accounting_periods — same migration lifecycle); RLS is tenant_id-only,
+// legal_entity_id isolation is an explicit service-layer predicate on
+// every query.
+// ---------------------------------------------------------------------------
+
+/// Race-free invoice-numbering allocation, structurally identical to
+/// apNumberCounters but its OWN separate table/row — invoices must never
+/// contend with bills, payments, or hand-posted journal entries for the
+/// same sequence.
+export const arNumberCounters = pgTable(
+  "ar_number_counters",
+  {
+    tenantId: uuid("tenant_id").notNull(),
+    legalEntityId: uuid("legal_entity_id").notNull(),
+    lastAssignedNumber: integer("last_assigned_number").notNull().default(0),
+  },
+  (t) => [primaryKey({ columns: [t.tenantId, t.legalEntityId] })],
+);
+
+export type ArNumberCounter = typeof arNumberCounters.$inferSelect;
+
+export const customerInvoiceStatusEnum = pgEnum("customer_invoice_status", [
+  "DRAFT",
+  "POSTED",
+]);
+
+export const invoicePaymentStatusEnum = pgEnum("invoice_payment_status", [
+  "UNPAID",
+  "PARTIALLY_PAID",
+  "PAID",
+]);
+
+export const customerInvoices = pgTable(
+  "customer_invoices",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id").notNull(),
+    legalEntityId: uuid("legal_entity_id").notNull(),
+    customerId: uuid("customer_id")
+      .notNull()
+      .references(() => customers.id),
+    /// Our own "INV-000123" — null while DRAFT, assigned only at posting
+    /// time via arNumberCounters. Unlike supplierBills.supplierBillNumber,
+    /// there is no client-supplied external-number field here: a customer
+    /// invoice is a document WE originate, not one we're recording from
+    /// an external party, so internalReference is this invoice's only
+    /// number (proposal §2 decision 1).
+    internalReference: varchar("internal_reference", { length: 20 }),
+    status: customerInvoiceStatusEnum("status").notNull().default("DRAFT"),
+    /// Meaningful only once status = POSTED. AR-1b never writes anything
+    /// but the default UNPAID — a later AR Work Item's receipt-allocation
+    /// posting is the sole future writer, exactly mirroring
+    /// supplierBills.paymentStatus's own AP-1b-structural/AP-1c-consumed
+    /// shape (proposal §2 decision 2).
+    paymentStatus: invoicePaymentStatusEnum("payment_status")
+      .notNull()
+      .default("UNPAID"),
+    invoiceDate: date("invoice_date").notNull(),
+    /// Defaults to invoiceDate + customer.paymentTermsDays at create time
+    /// if the customer has one configured, else null; independently
+    /// editable while DRAFT (CustomerInvoicesService.computeDefaultDueDate).
+    dueDate: date("due_date"),
+    /// Resolved from the legal entity's functional currency at creation —
+    /// never client-supplied, identical to supplierBills.currencyCode.
+    currencyCode: varchar("currency_code", { length: 3 }).notNull(),
+    /// Server-computed: SUM(line.amountMinor).
+    subtotalMinor: bigint("subtotal_minor", { mode: "number" }).notNull(),
+    /// Server-computed: SUM(line.taxAmountMinor).
+    taxMinor: bigint("tax_minor", { mode: "number" }).notNull().default(0),
+    /// Server-computed: subtotalMinor + taxMinor.
+    totalMinor: bigint("total_minor", { mode: "number" }).notNull(),
+    /// AR-1b never writes anything but 0 — see the
+    /// customer_invoices_paid_minor_zero_until_ar1c CHECK constraint
+    /// below, mirroring supplier_bills_paid_minor_zero_until_ap1c. A
+    /// later AR Work Item's migration loosens this constraint together
+    /// with introducing the first writer.
+    paidMinor: bigint("paid_minor", { mode: "number" }).notNull().default(0),
+    /// Set exactly once, at posting. Real FK: journal_entries is
+    /// Finance's own table, same migration lifecycle.
+    journalEntryId: uuid("journal_entry_id").references(
+      () => journalEntries.id,
+    ),
+    /// Set exactly once, at posting. Real FK: accounting_periods is
+    /// Finance's own table, same migration lifecycle.
+    periodId: uuid("period_id").references(() => accountingPeriods.id),
+    memo: text("memo"),
+    createdBy: uuid("created_by"),
+    postedBy: uuid("posted_by"),
+    postedAt: timestamp("posted_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    // NULL-distinct, unlimited DRAFT rows — identical shape to
+    // supplier_bills_tenant_entity_reference_unique.
+    unique("customer_invoices_tenant_entity_reference_unique").on(
+      t.tenantId,
+      t.legalEntityId,
+      t.internalReference,
+    ),
+    index("customer_invoices_tenant_entity_idx").on(
+      t.tenantId,
+      t.legalEntityId,
+    ),
+    index("customer_invoices_customer_idx").on(t.customerId),
+    check(
+      "customer_invoices_total_equals_subtotal_plus_tax",
+      sql`${t.totalMinor} = ${t.subtotalMinor} + ${t.taxMinor}`,
+    ),
+    check(
+      "customer_invoices_amounts_non_negative",
+      sql`${t.subtotalMinor} >= 0 AND ${t.taxMinor} >= 0 AND ${t.totalMinor} >= 0`,
+    ),
+    // Pinned to 0 for AR-1b, exactly like AP-1b's own
+    // supplier_bills_paid_minor_zero_until_ap1c — a later AR Work Item's
+    // receipt-allocation posting is this constraint's first loosener.
+    check(
+      "customer_invoices_paid_minor_zero_until_ar1c",
+      sql`${t.paidMinor} = 0`,
+    ),
+  ],
+);
+
+export type CustomerInvoice = typeof customerInvoices.$inferSelect;
+export type NewCustomerInvoice = typeof customerInvoices.$inferInsert;
+
+export const customerInvoiceLines = pgTable(
+  "customer_invoice_lines",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /// Denormalized from the parent invoice — required for this table's
+    /// own RLS policy, identical reasoning to supplierBillLines.tenantId.
+    tenantId: uuid("tenant_id").notNull(),
+    invoiceId: uuid("invoice_id")
+      .notNull()
+      .references(() => customerInvoices.id, { onDelete: "cascade" }),
+    lineNumber: integer("line_number").notNull(),
+    /// The revenue account this line's amount distributes to. NO type
+    /// restriction (any active in-scope account) — same posture as
+    /// supplierBillLines.accountId (proposal §2 decision 3). Real FK:
+    /// chart_of_accounts is Finance's own table, same migration
+    /// lifecycle.
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => chartOfAccounts.id),
+    description: varchar("description", { length: 500 }),
+    amountMinor: bigint("amount_minor", { mode: "number" }).notNull(),
+    taxAmountMinor: bigint("tax_amount_minor", { mode: "number" })
+      .notNull()
+      .default(0),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    unique("customer_invoice_lines_invoice_line_number_unique").on(
+      t.invoiceId,
+      t.lineNumber,
+    ),
+    index("customer_invoice_lines_account_idx").on(t.accountId),
+    check("customer_invoice_lines_amount_positive", sql`${t.amountMinor} > 0`),
+    check(
+      "customer_invoice_lines_tax_amount_non_negative",
+      sql`${t.taxAmountMinor} >= 0`,
+    ),
+  ],
+);
+
+export type CustomerInvoiceLine = typeof customerInvoiceLines.$inferSelect;
+export type NewCustomerInvoiceLine = typeof customerInvoiceLines.$inferInsert;
