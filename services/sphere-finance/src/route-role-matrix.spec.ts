@@ -19,6 +19,7 @@ import { CustomersController } from "./accounts-receivable/customers/customers.c
 import { ArSettingsController } from "./accounts-receivable/ar-settings/ar-settings.controller";
 import { CustomerInvoicesController } from "./accounts-receivable/customer-invoices/customer-invoices.controller";
 import { CustomerReceiptsController } from "./accounts-receivable/customer-receipts/customer-receipts.controller";
+import { ArReportsController } from "./accounts-receivable/ar-reports/ar-reports.controller";
 
 /**
  * Milestone 3.2 — Route → Required-Role Matrix Hardening
@@ -37,10 +38,12 @@ import { CustomerReceiptsController } from "./accounts-receivable/customer-recei
  * (docs/finance-work-item-1c-supplier-payments-proposal.md §10/§11) to
  * also discover SupplierPaymentsController, and for AP-1d
  * (docs/finance-work-item-1d-supplier-balance-statement-ageing-proposal.md
- * §5) to also discover ApReportsController, and for AR-1c
+ * §5) to also discover ApReportsController, for AR-1c
  * (docs/finance-work-item-1c-customer-receipts-proposal.md §16/§18) to
- * also discover CustomerReceiptsController — this test is repo-wide,
- * not per-module, so a new controller must be added to both the import
+ * also discover CustomerReceiptsController, and for AR-1d
+ * (docs/finance-work-item-1d-ar-reports-proposal.md §10) to also
+ * discover ArReportsController — this test is repo-wide, not
+ * per-module, so a new controller must be added to both the import
  * list above and the `actual` array below, or its routes simply go
  * unverified.
  *
@@ -179,8 +182,10 @@ function role(
  * §5) plus AR-1b's CustomerInvoicesController (6 routes, added per
  * docs/finance-work-item-ar-1b-customer-invoicing-proposal.md §5) plus
  * AR-1c's CustomerReceiptsController (6 routes, added per
- * docs/finance-work-item-1c-customer-receipts-proposal.md §16/§18), 60
- * routes total across 13 controllers.
+ * docs/finance-work-item-1c-customer-receipts-proposal.md §16/§18) plus
+ * AR-1d's ArReportsController (4 routes, added per
+ * docs/finance-work-item-1d-ar-reports-proposal.md §10), 64 routes
+ * total across 14 controllers.
  */
 const EXPECTED: DiscoveredRoute[] = [
   role("POST", "accounts", "AccountsController", ["finance.admin"]),
@@ -423,6 +428,31 @@ const EXPECTED: DiscoveredRoute[] = [
   role("POST", "receipts/:id/post", "CustomerReceiptsController", [
     "finance.poster",
   ]),
+
+  // AR-1d — docs/finance-work-item-1d-ar-reports-proposal.md §10. Pure
+  // reads, no write-side split to make — same any-finance-role posture
+  // as ApReportsController/GeneralLedgerController. No customerId
+  // parameter on ar/reconciliation (§9.3, §14 decision 3, resolved).
+  role("GET", "customers/:id/balance", "ArReportsController", [
+    "finance.viewer",
+    "finance.poster",
+    "finance.admin",
+  ]),
+  role("GET", "customers/:id/statement", "ArReportsController", [
+    "finance.viewer",
+    "finance.poster",
+    "finance.admin",
+  ]),
+  role("GET", "ar/ageing", "ArReportsController", [
+    "finance.viewer",
+    "finance.poster",
+    "finance.admin",
+  ]),
+  role("GET", "ar/reconciliation", "ArReportsController", [
+    "finance.viewer",
+    "finance.poster",
+    "finance.admin",
+  ]),
 ];
 
 describe("Route → required-role matrix (sphere-finance)", () => {
@@ -440,11 +470,12 @@ describe("Route → required-role matrix (sphere-finance)", () => {
     ...discoverRoutes(ArSettingsController),
     ...discoverRoutes(CustomerInvoicesController),
     ...discoverRoutes(CustomerReceiptsController),
+    ...discoverRoutes(ArReportsController),
   ];
   const actualByKey = new Map(actual.map((r) => [r.key, r]));
   const expectedByKey = new Map(EXPECTED.map((r) => [r.key, r]));
 
-  it("discovers exactly the expected number of routes across all thirteen controllers", () => {
+  it("discovers exactly the expected number of routes across all fourteen controllers", () => {
     expect(actual).toHaveLength(EXPECTED.length);
   });
 
