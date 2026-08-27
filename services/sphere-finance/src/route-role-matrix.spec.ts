@@ -26,6 +26,7 @@ import { SupplierDebitNotesController } from "./accounts-payable/supplier-debit-
 import { BankCashAccountsController } from "./bank-cash-accounts/bank-cash-accounts.controller";
 import { BankTransactionsController } from "./bank-transactions/bank-transactions.controller";
 import { BankReconciliationController } from "./bank-reconciliation/bank-reconciliation.controller";
+import { BankReportsController } from "./bank-reports/bank-reports.controller";
 
 /**
  * Milestone 3.2 — Route → Required-Role Matrix Hardening
@@ -214,7 +215,10 @@ function role(
  * §11/§13, CTO-approved), plus Banking-1c's
  * BankReconciliationController (13 routes, added per
  * docs/finance-work-item-banking-1c-proposal.md §13, CTO-approved —
- * implementation-authorization turn), 103 routes total across 20
+ * implementation-authorization turn), plus Banking-1d's
+ * BankReportsController (3 routes, added per
+ * docs/finance-work-item-banking-1d-proposal.md §4, CTO-approved —
+ * combined discovery/implementation turn), 106 routes total across 21
  * controllers.
  */
 const EXPECTED: DiscoveredRoute[] = [
@@ -695,6 +699,28 @@ const EXPECTED: DiscoveredRoute[] = [
     "BankReconciliationController",
     ["finance.poster"],
   ),
+
+  // Banking-1d — docs/finance-work-item-banking-1d-proposal.md §4,
+  // CTO-approved (combined discovery/implementation turn). Pure read
+  // layer, same any-role-reads-only posture as GeneralLedgerController/
+  // ApReportsController/ArReportsController — no write route exists in
+  // this controller at all.
+  role("GET", "bank-reports/cash-position", "BankReportsController", [
+    "finance.viewer",
+    "finance.poster",
+    "finance.admin",
+  ]),
+  role("GET", "bank-cash-accounts/:id/statement", "BankReportsController", [
+    "finance.viewer",
+    "finance.poster",
+    "finance.admin",
+  ]),
+  role(
+    "GET",
+    "bank-reports/unreconciled-transactions",
+    "BankReportsController",
+    ["finance.viewer", "finance.poster", "finance.admin"],
+  ),
 ];
 
 describe("Route → required-role matrix (sphere-finance)", () => {
@@ -719,11 +745,12 @@ describe("Route → required-role matrix (sphere-finance)", () => {
     ...discoverRoutes(BankCashAccountsController),
     ...discoverRoutes(BankTransactionsController),
     ...discoverRoutes(BankReconciliationController),
+    ...discoverRoutes(BankReportsController),
   ];
   const actualByKey = new Map(actual.map((r) => [r.key, r]));
   const expectedByKey = new Map(EXPECTED.map((r) => [r.key, r]));
 
-  it("discovers exactly the expected number of routes across all twenty controllers", () => {
+  it("discovers exactly the expected number of routes across all twenty-one controllers", () => {
     expect(actual).toHaveLength(EXPECTED.length);
   });
 

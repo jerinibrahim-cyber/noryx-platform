@@ -11,6 +11,7 @@ import { AccountsReceivableModule } from "./accounts-receivable/accounts-receiva
 import { BankCashAccountsModule } from "./bank-cash-accounts/bank-cash-accounts.module";
 import { BankTransactionsModule } from "./bank-transactions/bank-transactions.module";
 import { BankReconciliationModule } from "./bank-reconciliation/bank-reconciliation.module";
+import { BankReportsModule } from "./bank-reports/bank-reports.module";
 import { HealthController } from "./health/health.controller";
 import { TenantContextMiddleware } from "./tenant/tenant-context.middleware";
 
@@ -79,6 +80,15 @@ import { TenantContextMiddleware } from "./tenant/tenant-context.middleware";
     // (bank_statement_imports/bank_statement_lines/
     // bank_reconciliation_matches); touches none of the modules above.
     BankReconciliationModule,
+    // Banking-1d — Cash Position, Bank/Cash Account Statement,
+    // Unreconciled Transactions. docs/finance-work-item-banking-1d-
+    // proposal.md §4/§6. A top-level sibling of BankReconciliationModule,
+    // not nested inside it — a pure read layer over bank_cash_accounts/
+    // bank_transactions/bank_reconciliation_matches/
+    // bank_statement_lines/supplier_payments/customer_receipts/
+    // journal_lines, all owned by other modules; writes nothing and
+    // touches none of the modules above. No new table, no migration.
+    BankReportsModule,
     // Scoped registration so TenantContextMiddleware can inject JwtService
     // without importing AccountsModule's other providers — same pattern as
     // services/identity/src/app.module.ts.
