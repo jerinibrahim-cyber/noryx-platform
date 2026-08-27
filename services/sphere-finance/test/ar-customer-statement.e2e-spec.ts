@@ -111,6 +111,37 @@ describe("AR Reports — Customer Statement (e2e)", () => {
     };
   }
 
+  /** §9a.2 (Credit/Debit Notes work item, CTO-approved) — a credit note
+   * contributes a "CREDIT_NOTE" StatementLine, structured identically to
+   * the RECEIPT block, negative-signed. */
+  async function createAndPostCreditNote(
+    customerId: string,
+    creditNoteDate: string,
+    amountMinor: number,
+    allocations: { invoiceId: string; allocatedAmountMinor: number }[],
+    reason?: string,
+  ): Promise<{ id: string; internalReference: string }> {
+    const created = await request(app.getHttpServer())
+      .post("/v1/finance/credit-notes")
+      .set("Authorization", `Bearer ${posterToken}`)
+      .send({
+        customerId,
+        creditNoteDate,
+        reason,
+        lines: [{ accountId: revenueAccountId, amountMinor }],
+        allocations,
+      })
+      .expect(201);
+    const posted = await request(app.getHttpServer())
+      .post(`/v1/finance/credit-notes/${created.body.data.id}/post`)
+      .set("Authorization", `Bearer ${posterToken}`)
+      .expect(200);
+    return {
+      id: posted.body.data.id,
+      internalReference: posted.body.data.internalReference,
+    };
+  }
+
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
       imports: [AppModule],
@@ -439,5 +470,118 @@ describe("AR Reports — Customer Statement (e2e)", () => {
       )
       .set("Authorization", `Bearer ${posterToken}`)
       .expect(400);
+  });
+
+  describe("Credit Notes work item (§9a.2, CTO-approved) — CREDIT_NOTE statement rows", () => {
+    it("a posted credit note appears as a CREDIT_NOTE row, negative-signed, with its own allocations, merged into chronological order", async () => {
+      const customerId = await newCustomer("CrnWalkthrough");
+
+      const invoice = await createAndPostInvoice(
+        customerId,
+        "2026-06-01",
+        1000,
+        "Consulting — June",
+      );
+      const receipt = await createAndPostReceipt(
+        customerId,
+        "2026-06-05",
+        300,
+        [{ invoiceId: invoice.id, allocatedAmountMinor: 300 }],
+      );
+      void receipt;
+      const creditNote = await createAndPostCreditNote(
+        customerId,
+        "2026-06-10",
+        400,
+        [{ invoiceId: invoice.id, allocatedAmountMinor: 400 }],
+        "Goodwill adjustment",
+      );
+
+      const res = await request(app.getHttpServer())
+        .get(
+          `/v1/finance/customers/${customerId}/statement?dateFrom=2026-01-01&dateTo=2026-12-31`,
+        )
+        .set("Authorization", `Bearer ${posterToken}`)
+        .expect(200);
+
+      expect(res.body.data).toHaveLength(3);
+      const [rowInv, rowRct, rowCrn] = res.body.data;
+      expect(rowInv.type).toBe("INVOICE");
+      expect(rowRct.type).toBe("RECEIPT");
+      expect(rowCrn).toMatchObject({
+        type: "CREDIT_NOTE",
+        date: "2026-06-10",
+        reference: creditNote.internalReference,
+        description: "Goodwill adjustment",
+        amountMinor: -400,
+        runningBalanceMinor: 1000 - 300 - 400,
+      });
+      expect(rowCrn.creditNoteId).toBe(creditNote.id);
+      expect(rowCrn.allocations).toEqual([
+        {
+          invoiceId: invoice.id,
+          invoiceReference: invoice.internalReference,
+          allocatedAmountMinor: 400,
+        },
+      ]);
+
+      expect(res.body.meta.closingBalanceMinor).toBe(1000 - 300 - 400);
+    });
+
+    it("credit note description falls back to a generic label when reason is omitted (mirrors RECEIPT's fallback chain, §9a.2)", async () => {
+      const customerId = await newCustomer("CrnDescFallback");
+      const invoice = await createAndPostInvoice(customerId, "2026-06-01", 500);
+      const creditNote = await createAndPostCreditNote(
+        customerId,
+        "2026-06-05",
+        500,
+        [{ invoiceId: invoice.id, allocatedAmountMinor: 500 }],
+        // no reason — falls back to "Credit note".
+      );
+
+      const res = await request(app.getHttpServer())
+        .get(`/v1/finance/customers/${customerId}/statement`)
+        .set("Authorization", `Bearer ${posterToken}`)
+        .expect(200);
+
+      const row = res.body.data.find(
+        (r: { type: string }) => r.type === "CREDIT_NOTE",
+      );
+      expect(row.description).toBe("Credit note");
+      void creditNote;
+    });
+
+    it("opening balance reflects a credit note dated strictly before dateFrom (via the §9a.1-extended asOfTotals(strict:true))", async () => {
+      const customerId = await newCustomer("CrnOpeningBalance");
+      const invoice = await createAndPostInvoice(
+        customerId,
+        "2026-07-01",
+        1000,
+      );
+      await createAndPostCreditNote(customerId, "2026-07-05", 300, [
+        { invoiceId: invoice.id, allocatedAmountMinor: 300 },
+      ]);
+      const invoiceInWindow = await createAndPostInvoice(
+        customerId,
+        "2026-07-15",
+        200,
+      );
+
+      const res = await request(app.getHttpServer())
+        .get(
+          `/v1/finance/customers/${customerId}/statement?dateFrom=2026-07-10&dateTo=2026-07-31`,
+        )
+        .set("Authorization", `Bearer ${posterToken}`)
+        .expect(200);
+
+      // The July 1 invoice (1000) and July 5 credit note (-300) are both
+      // strictly before dateFrom -> folded into opening balance (700).
+      // Only the July 15 invoice falls inside the window.
+      expect(res.body.meta.openingBalanceMinor).toBe(700);
+      expect(res.body.data).toHaveLength(1);
+      expect(res.body.data[0].invoiceId).toBe(invoiceInWindow.id);
+      expect(res.body.data[0].runningBalanceMinor).toBe(900);
+      expect(res.body.meta.closingBalanceMinor).toBe(900);
+    });
   });
 });

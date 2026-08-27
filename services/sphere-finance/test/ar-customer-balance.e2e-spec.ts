@@ -99,6 +99,33 @@ describe("AR Reports — Customer Balance (e2e)", () => {
     return posted.body.data.id;
   }
 
+  /** §9a.1 (Credit/Debit Notes work item, CTO-approved) — a credit note
+   * reduces totalReceived (and therefore outstanding) the same direction
+   * a receipt does, so asOfTotals()'s new unioned subquery is exercised
+   * the same way createAndPostReceipt exercises the pre-existing one. */
+  async function createAndPostCreditNote(
+    customerId: string,
+    creditNoteDate: string,
+    amountMinor: number,
+    allocations: { invoiceId: string; allocatedAmountMinor: number }[],
+  ): Promise<string> {
+    const created = await request(app.getHttpServer())
+      .post("/v1/finance/credit-notes")
+      .set("Authorization", `Bearer ${posterA1Token}`)
+      .send({
+        customerId,
+        creditNoteDate,
+        lines: [{ accountId: revenueAccountA1Id, amountMinor }],
+        allocations,
+      })
+      .expect(201);
+    const posted = await request(app.getHttpServer())
+      .post(`/v1/finance/credit-notes/${created.body.data.id}/post`)
+      .set("Authorization", `Bearer ${posterA1Token}`)
+      .expect(200);
+    return posted.body.data.id;
+  }
+
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
       imports: [AppModule],
@@ -494,5 +521,106 @@ describe("AR Reports — Customer Balance (e2e)", () => {
       .get(`/v1/finance/customers/${customerAlphaId}/balance`)
       .set("Authorization", `Bearer ${viewerToken}`)
       .expect(200);
+  });
+
+  describe("Credit Notes work item (§9a, CTO-approved) — asOfTotals() extension", () => {
+    it("current mode (no asOf) — a posted credit note reduces outstanding the same as a receipt would", async () => {
+      const customer = await request(app.getHttpServer())
+        .post("/v1/finance/customers")
+        .set("Authorization", `Bearer ${adminA1Token}`)
+        .send({ code: `ARBAL-CRN-CUR-${suffix}`, name: "Credit Note Current" })
+        .expect(201);
+      const customerId = customer.body.data.id;
+
+      const invoice = await createAndPostInvoice(
+        customerId,
+        "2026-09-01",
+        1000,
+      );
+      await createAndPostCreditNote(customerId, "2026-09-05", 400, [
+        { invoiceId: invoice.id, allocatedAmountMinor: 400 },
+      ]);
+
+      const res = await request(app.getHttpServer())
+        .get(`/v1/finance/customers/${customerId}/balance`)
+        .set("Authorization", `Bearer ${posterA1Token}`)
+        .expect(200);
+      expect(res.body.data.totalInvoicedMinor).toBe(1000);
+      expect(res.body.data.totalReceivedMinor).toBe(400);
+      expect(res.body.data.totalOutstandingMinor).toBe(600);
+    });
+
+    it("historical as-of — a credit note dated after asOf does not reduce the as-of balance; before/on asOf it does", async () => {
+      const customer = await request(app.getHttpServer())
+        .post("/v1/finance/customers")
+        .set("Authorization", `Bearer ${adminA1Token}`)
+        .send({ code: `ARBAL-CRN-ASOF-${suffix}`, name: "Credit Note As-Of" })
+        .expect(201);
+      const customerId = customer.body.data.id;
+
+      const invoice = await createAndPostInvoice(
+        customerId,
+        "2026-10-01",
+        2000,
+      );
+      await createAndPostCreditNote(customerId, "2026-10-20", 2000, [
+        { invoiceId: invoice.id, allocatedAmountMinor: 2000 },
+      ]);
+
+      // Between the invoice and the credit note — invoiced but not yet
+      // credited as of this date, even though the credit note has since
+      // posted.
+      const between = await request(app.getHttpServer())
+        .get(`/v1/finance/customers/${customerId}/balance?asOf=2026-10-10`)
+        .set("Authorization", `Bearer ${posterA1Token}`)
+        .expect(200);
+      expect(between.body.data.totalInvoicedMinor).toBe(2000);
+      expect(between.body.data.totalReceivedMinor).toBe(0);
+      expect(between.body.data.totalOutstandingMinor).toBe(2000);
+
+      // On the credit note's own date — the `<=` cutoff includes it.
+      const onDate = await request(app.getHttpServer())
+        .get(`/v1/finance/customers/${customerId}/balance?asOf=2026-10-20`)
+        .set("Authorization", `Bearer ${posterA1Token}`)
+        .expect(200);
+      expect(onDate.body.data.totalReceivedMinor).toBe(2000);
+      expect(onDate.body.data.totalOutstandingMinor).toBe(0);
+
+      // After both — fully settled as of this date too.
+      const after = await request(app.getHttpServer())
+        .get(`/v1/finance/customers/${customerId}/balance?asOf=2026-10-31`)
+        .set("Authorization", `Bearer ${posterA1Token}`)
+        .expect(200);
+      expect(after.body.data.totalReceivedMinor).toBe(2000);
+      expect(after.body.data.totalOutstandingMinor).toBe(0);
+    });
+
+    it("a credit note and a receipt against the same invoice both contribute to totalReceived", async () => {
+      const customer = await request(app.getHttpServer())
+        .post("/v1/finance/customers")
+        .set("Authorization", `Bearer ${adminA1Token}`)
+        .send({ code: `ARBAL-CRN-MIX-${suffix}`, name: "Credit Note Mixed" })
+        .expect(201);
+      const customerId = customer.body.data.id;
+
+      const invoice = await createAndPostInvoice(
+        customerId,
+        "2026-11-01",
+        1000,
+      );
+      await createAndPostReceipt(customerId, "2026-11-05", 300, [
+        { invoiceId: invoice.id, allocatedAmountMinor: 300 },
+      ]);
+      await createAndPostCreditNote(customerId, "2026-11-10", 700, [
+        { invoiceId: invoice.id, allocatedAmountMinor: 700 },
+      ]);
+
+      const res = await request(app.getHttpServer())
+        .get(`/v1/finance/customers/${customerId}/balance`)
+        .set("Authorization", `Bearer ${posterA1Token}`)
+        .expect(200);
+      expect(res.body.data.totalReceivedMinor).toBe(1000);
+      expect(res.body.data.totalOutstandingMinor).toBe(0);
+    });
   });
 });

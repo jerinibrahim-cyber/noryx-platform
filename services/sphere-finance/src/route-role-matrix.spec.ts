@@ -21,6 +21,8 @@ import { ArSettingsController } from "./accounts-receivable/ar-settings/ar-setti
 import { CustomerInvoicesController } from "./accounts-receivable/customer-invoices/customer-invoices.controller";
 import { CustomerReceiptsController } from "./accounts-receivable/customer-receipts/customer-receipts.controller";
 import { ArReportsController } from "./accounts-receivable/ar-reports/ar-reports.controller";
+import { CustomerCreditNotesController } from "./accounts-receivable/customer-credit-notes/customer-credit-notes.controller";
+import { SupplierDebitNotesController } from "./accounts-payable/supplier-debit-notes/supplier-debit-notes.controller";
 
 /**
  * Milestone 3.2 — Route → Required-Role Matrix Hardening
@@ -43,10 +45,13 @@ import { ArReportsController } from "./accounts-receivable/ar-reports/ar-reports
  * (docs/finance-work-item-1c-customer-receipts-proposal.md §16/§18) to
  * also discover CustomerReceiptsController, and for AR-1d
  * (docs/finance-work-item-1d-ar-reports-proposal.md §10) to also
- * discover ArReportsController — this test is repo-wide, not
- * per-module, so a new controller must be added to both the import
- * list above and the `actual` array below, or its routes simply go
- * unverified.
+ * discover ArReportsController, and for the Credit/Debit Notes work
+ * item (docs/finance-work-item-credit-debit-notes-proposal.md
+ * §12/§13, CTO-approved) to also discover
+ * CustomerCreditNotesController and SupplierDebitNotesController —
+ * this test is repo-wide, not per-module, so a new controller must be
+ * added to both the import list above and the `actual` array below,
+ * or its routes simply go unverified.
  *
  * Every route here is authenticated (JwtAuthGuard) AND role-restricted
  * (RolesGuard + a non-empty @Roles() list) — this service has no public
@@ -187,8 +192,11 @@ function role(
  * AR-1d's ArReportsController (4 routes, added per
  * docs/finance-work-item-1d-ar-reports-proposal.md §10) plus Financial
  * Statements' FinancialStatementsController (2 routes, added per
- * docs/finance-work-item-financial-statements-proposal.md §4/§13), 66
- * routes total across 15 controllers.
+ * docs/finance-work-item-financial-statements-proposal.md §4/§13) plus
+ * the Credit/Debit Notes work item's CustomerCreditNotesController and
+ * SupplierDebitNotesController (6 routes each, added per
+ * docs/finance-work-item-credit-debit-notes-proposal.md §12/§13,
+ * CTO-approved), 78 routes total across 17 controllers.
  */
 const EXPECTED: DiscoveredRoute[] = [
   role("POST", "accounts", "AccountsController", ["finance.admin"]),
@@ -473,6 +481,57 @@ const EXPECTED: DiscoveredRoute[] = [
     "finance.poster",
     "finance.admin",
   ]),
+
+  // Credit/Debit Notes — docs/finance-work-item-credit-debit-notes-
+  // proposal.md §12/§13, CTO-approved. Same finance.poster-writes/
+  // any-role-reads split as CustomerReceiptsController/
+  // SupplierPaymentsController — credit/debit notes are a
+  // transactional/posting document, not master data.
+  role("POST", "credit-notes", "CustomerCreditNotesController", [
+    "finance.poster",
+  ]),
+  role("GET", "credit-notes", "CustomerCreditNotesController", [
+    "finance.viewer",
+    "finance.poster",
+    "finance.admin",
+  ]),
+  role("GET", "credit-notes/:id", "CustomerCreditNotesController", [
+    "finance.viewer",
+    "finance.poster",
+    "finance.admin",
+  ]),
+  role("PATCH", "credit-notes/:id", "CustomerCreditNotesController", [
+    "finance.poster",
+  ]),
+  role("DELETE", "credit-notes/:id", "CustomerCreditNotesController", [
+    "finance.poster",
+  ]),
+  role("POST", "credit-notes/:id/post", "CustomerCreditNotesController", [
+    "finance.poster",
+  ]),
+
+  role("POST", "debit-notes", "SupplierDebitNotesController", [
+    "finance.poster",
+  ]),
+  role("GET", "debit-notes", "SupplierDebitNotesController", [
+    "finance.viewer",
+    "finance.poster",
+    "finance.admin",
+  ]),
+  role("GET", "debit-notes/:id", "SupplierDebitNotesController", [
+    "finance.viewer",
+    "finance.poster",
+    "finance.admin",
+  ]),
+  role("PATCH", "debit-notes/:id", "SupplierDebitNotesController", [
+    "finance.poster",
+  ]),
+  role("DELETE", "debit-notes/:id", "SupplierDebitNotesController", [
+    "finance.poster",
+  ]),
+  role("POST", "debit-notes/:id/post", "SupplierDebitNotesController", [
+    "finance.poster",
+  ]),
 ];
 
 describe("Route → required-role matrix (sphere-finance)", () => {
@@ -492,11 +551,13 @@ describe("Route → required-role matrix (sphere-finance)", () => {
     ...discoverRoutes(CustomerInvoicesController),
     ...discoverRoutes(CustomerReceiptsController),
     ...discoverRoutes(ArReportsController),
+    ...discoverRoutes(CustomerCreditNotesController),
+    ...discoverRoutes(SupplierDebitNotesController),
   ];
   const actualByKey = new Map(actual.map((r) => [r.key, r]));
   const expectedByKey = new Map(EXPECTED.map((r) => [r.key, r]));
 
-  it("discovers exactly the expected number of routes across all fifteen controllers", () => {
+  it("discovers exactly the expected number of routes across all seventeen controllers", () => {
     expect(actual).toHaveLength(EXPECTED.length);
   });
 

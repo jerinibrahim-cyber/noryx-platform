@@ -115,6 +115,35 @@ describe("AP Reports — AP/GL Reconciliation (e2e)", () => {
       .expect(200);
   }
 
+  /** §9a (Credit/Debit Notes work item, CTO-approved) — a debit note
+   * reduces both the sub-ledger outstanding total and the GL AP control
+   * account balance together (Dr AP control / Cr expense+tax), so
+   * reconciliation must stay reconciled across one, exactly as it does
+   * across a payment. */
+  async function createAndPostDebitNote(
+    posterToken: string,
+    expenseAccountId: string,
+    supplierId: string,
+    debitNoteDate: string,
+    amountMinor: number,
+    allocations: { billId: string; allocatedAmountMinor: number }[],
+  ): Promise<void> {
+    const created = await request(app.getHttpServer())
+      .post("/v1/finance/debit-notes")
+      .set("Authorization", `Bearer ${posterToken}`)
+      .send({
+        supplierId,
+        debitNoteDate,
+        lines: [{ accountId: expenseAccountId, amountMinor }],
+        allocations,
+      })
+      .expect(201);
+    await request(app.getHttpServer())
+      .post(`/v1/finance/debit-notes/${created.body.data.id}/post`)
+      .set("Authorization", `Bearer ${posterToken}`)
+      .expect(200);
+  }
+
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
       imports: [AppModule],
@@ -421,5 +450,92 @@ describe("AP Reports — AP/GL Reconciliation (e2e)", () => {
       .get("/v1/finance/ap/reconciliation")
       .set("Authorization", `Bearer ${posterCToken}`)
       .expect(404);
+  });
+
+  describe("Debit Notes work item (§9a, CTO-approved) — reconciliation stays reconciled across a posted debit note", () => {
+    it("current mode: a posted debit note reduces both sub-ledger outstanding and the GL AP control balance together, staying reconciled", async () => {
+      // This file's own entity A carries no document dated after real
+      // "today" at this point (all prior tests in this file use May/June
+      // 2026 dates), so — unlike AR-1c's ar-gl-reconciliation.e2e-spec.ts,
+      // whose entity A by this point deliberately carries a receipt dated
+      // 2026-09-01 — entity A remains safe for a current-mode assertion
+      // here. Dates below are still kept safely before real "today" as a
+      // matter of hygiene, consistent with current mode's undocumented,
+      // AR-1c §12.1-documented, CTO-accepted no-date-filter limitation on
+      // the sub-ledger side.
+      const supplier = await newSupplier(adminAToken, "ReconDbnCurrent");
+      const bill = await createAndPostBill(
+        posterAToken,
+        expenseAccountAId,
+        supplier,
+        "2026-07-01",
+        1000,
+      );
+      await createAndPostDebitNote(
+        posterAToken,
+        expenseAccountAId,
+        supplier,
+        "2026-07-05",
+        400,
+        [{ billId: bill.id, allocatedAmountMinor: 400 }],
+      );
+
+      const reconciliation = await request(app.getHttpServer())
+        .get("/v1/finance/ap/reconciliation")
+        .set("Authorization", `Bearer ${posterAToken}`)
+        .expect(200);
+      expect(reconciliation.body.data.reconciled).toBe(true);
+      expect(reconciliation.body.data.differenceMinor).toBe(0);
+
+      const glBalance = await request(app.getHttpServer())
+        .get(`/v1/finance/accounts/${liabilityAccountAId}/balance`)
+        .set("Authorization", `Bearer ${posterAToken}`)
+        .expect(200);
+      expect(reconciliation.body.data.glApControlAccountBalanceMinor).toBe(
+        glBalance.body.data.closingBalanceMinor,
+      );
+    });
+
+    it("as-of mode: a debit note dated after asOf is excluded from both sides symmetrically, and reconciliation holds on/after its own date too", async () => {
+      const supplier = await newSupplier(adminAToken, "ReconDbnAsOf");
+      const bill = await createAndPostBill(
+        posterAToken,
+        expenseAccountAId,
+        supplier,
+        "2026-08-01",
+        1000,
+      );
+      await createAndPostDebitNote(
+        posterAToken,
+        expenseAccountAId,
+        supplier,
+        "2026-08-15",
+        1000,
+        [{ billId: bill.id, allocatedAmountMinor: 1000 }],
+      );
+
+      // Between the bill and the debit note — excluded from both sides,
+      // still reconciled (both sides agree on an unreduced outstanding
+      // balance).
+      const between = await request(app.getHttpServer())
+        .get(`/v1/finance/ap/reconciliation?asOf=2026-08-05`)
+        .set("Authorization", `Bearer ${posterAToken}`)
+        .expect(200);
+      expect(between.body.data.reconciled).toBe(true);
+      expect(
+        between.body.data.subLedgerTotalOutstandingMinor,
+      ).toBeGreaterThanOrEqual(1000);
+
+      // On the debit note's own date — the `<=` cutoff includes it on
+      // both sides (sub-ledger via debit_note_date, GL via the debit
+      // note's own journal_entries.transaction_date), so they still
+      // agree.
+      const onDate = await request(app.getHttpServer())
+        .get(`/v1/finance/ap/reconciliation?asOf=2026-08-15`)
+        .set("Authorization", `Bearer ${posterAToken}`)
+        .expect(200);
+      expect(onDate.body.data.reconciled).toBe(true);
+      expect(onDate.body.data.differenceMinor).toBe(0);
+    });
   });
 });

@@ -111,6 +111,37 @@ describe("AP Reports — Supplier Statement (e2e)", () => {
     };
   }
 
+  /** §9a.2 (Credit/Debit Notes work item, CTO-approved) — a debit note
+   * contributes a "DEBIT_NOTE" StatementLine, structured identically to
+   * the PAYMENT block, negative-signed. */
+  async function createAndPostDebitNote(
+    supplierId: string,
+    debitNoteDate: string,
+    amountMinor: number,
+    allocations: { billId: string; allocatedAmountMinor: number }[],
+    reason?: string,
+  ): Promise<{ id: string; internalReference: string }> {
+    const created = await request(app.getHttpServer())
+      .post("/v1/finance/debit-notes")
+      .set("Authorization", `Bearer ${posterToken}`)
+      .send({
+        supplierId,
+        debitNoteDate,
+        reason,
+        lines: [{ accountId: expenseAccountId, amountMinor }],
+        allocations,
+      })
+      .expect(201);
+    const posted = await request(app.getHttpServer())
+      .post(`/v1/finance/debit-notes/${created.body.data.id}/post`)
+      .set("Authorization", `Bearer ${posterToken}`)
+      .expect(200);
+    return {
+      id: posted.body.data.id,
+      internalReference: posted.body.data.internalReference,
+    };
+  }
+
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
       imports: [AppModule],
@@ -357,5 +388,125 @@ describe("AP Reports — Supplier Statement (e2e)", () => {
       )
       .set("Authorization", `Bearer ${posterToken}`)
       .expect(400);
+  });
+
+  describe("Debit Notes work item (§9a.2, CTO-approved) — DEBIT_NOTE statement rows", () => {
+    it("a posted debit note appears as a DEBIT_NOTE row, negative-signed, with its own allocations, merged into chronological order", async () => {
+      const supplierId = await newSupplier("DbnWalkthrough");
+
+      const bill = await createAndPostBill(
+        supplierId,
+        "2026-06-01",
+        1000,
+        "DBN-WT-BILL",
+      );
+      const payment = await createAndPostPayment(
+        supplierId,
+        "2026-06-05",
+        300,
+        [{ billId: bill.id, allocatedAmountMinor: 300 }],
+      );
+      void payment;
+      const debitNote = await createAndPostDebitNote(
+        supplierId,
+        "2026-06-10",
+        400,
+        [{ billId: bill.id, allocatedAmountMinor: 400 }],
+        "Goodwill adjustment",
+      );
+
+      const res = await request(app.getHttpServer())
+        .get(
+          `/v1/finance/suppliers/${supplierId}/statement?dateFrom=2026-01-01&dateTo=2026-12-31`,
+        )
+        .set("Authorization", `Bearer ${posterToken}`)
+        .expect(200);
+
+      expect(res.body.data).toHaveLength(3);
+      const [rowBill, rowPay, rowDbn] = res.body.data;
+      expect(rowBill.type).toBe("BILL");
+      expect(rowPay.type).toBe("PAYMENT");
+      expect(rowDbn).toMatchObject({
+        type: "DEBIT_NOTE",
+        date: "2026-06-10",
+        reference: debitNote.internalReference,
+        description: "Goodwill adjustment",
+        amountMinor: -400,
+        runningBalanceMinor: 1000 - 300 - 400,
+      });
+      expect(rowDbn.debitNoteId).toBe(debitNote.id);
+      expect(rowDbn.allocations).toEqual([
+        {
+          billId: bill.id,
+          billReference: bill.internalReference,
+          allocatedAmountMinor: 400,
+        },
+      ]);
+
+      expect(res.body.meta.closingBalanceMinor).toBe(1000 - 300 - 400);
+    });
+
+    it("debit note description falls back to a generic label when reason is omitted (mirrors PAYMENT's fallback chain, §9a.2)", async () => {
+      const supplierId = await newSupplier("DbnDescFallback");
+      const bill = await createAndPostBill(
+        supplierId,
+        "2026-06-01",
+        500,
+        "DBN-FALLBACK-BILL",
+      );
+      const debitNote = await createAndPostDebitNote(
+        supplierId,
+        "2026-06-05",
+        500,
+        [{ billId: bill.id, allocatedAmountMinor: 500 }],
+        // no reason — falls back to "Debit note".
+      );
+
+      const res = await request(app.getHttpServer())
+        .get(`/v1/finance/suppliers/${supplierId}/statement`)
+        .set("Authorization", `Bearer ${posterToken}`)
+        .expect(200);
+
+      const row = res.body.data.find(
+        (r: { type: string }) => r.type === "DEBIT_NOTE",
+      );
+      expect(row.description).toBe("Debit note");
+      void debitNote;
+    });
+
+    it("opening balance reflects a debit note dated strictly before dateFrom (via the §9a.1-extended asOfTotals(strict:true))", async () => {
+      const supplierId = await newSupplier("DbnOpeningBalance");
+      const bill = await createAndPostBill(
+        supplierId,
+        "2026-07-01",
+        1000,
+        "DBN-OPEN-BILL",
+      );
+      await createAndPostDebitNote(supplierId, "2026-07-05", 300, [
+        { billId: bill.id, allocatedAmountMinor: 300 },
+      ]);
+      const billInWindow = await createAndPostBill(
+        supplierId,
+        "2026-07-15",
+        200,
+        "DBN-OPEN-BILL-2",
+      );
+
+      const res = await request(app.getHttpServer())
+        .get(
+          `/v1/finance/suppliers/${supplierId}/statement?dateFrom=2026-07-10&dateTo=2026-07-31`,
+        )
+        .set("Authorization", `Bearer ${posterToken}`)
+        .expect(200);
+
+      // The July 1 bill (1000) and July 5 debit note (-300) are both
+      // strictly before dateFrom -> folded into opening balance (700).
+      // Only the July 15 bill falls inside the window.
+      expect(res.body.meta.openingBalanceMinor).toBe(700);
+      expect(res.body.data).toHaveLength(1);
+      expect(res.body.data[0].billId).toBe(billInWindow.id);
+      expect(res.body.data[0].runningBalanceMinor).toBe(900);
+      expect(res.body.meta.closingBalanceMinor).toBe(900);
+    });
   });
 });

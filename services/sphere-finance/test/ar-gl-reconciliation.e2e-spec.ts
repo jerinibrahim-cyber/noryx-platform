@@ -128,6 +128,38 @@ describe("AR Reports — AR/GL Reconciliation (e2e)", () => {
     return { id: posted.body.data.id };
   }
 
+  /** §9a.1 (Credit/Debit Notes work item, CTO-approved) — a credit note
+   * posts its own journal entry (Dr revenue / Cr AR control), so it
+   * moves BOTH sides of the reconciliation invariant together: the
+   * sub-ledger side via asOfTotals()'s new unioned subquery, the GL side
+   * via the ordinary journal_lines read every other document already
+   * uses. Reconciliation staying true across a posted credit note is
+   * exactly what proves the extension is additive, not a divergence. */
+  async function createAndPostCreditNote(
+    posterToken: string,
+    revenueAccountId: string,
+    customerId: string,
+    creditNoteDate: string,
+    amountMinor: number,
+    allocations: { invoiceId: string; allocatedAmountMinor: number }[],
+  ): Promise<{ id: string }> {
+    const created = await request(app.getHttpServer())
+      .post("/v1/finance/credit-notes")
+      .set("Authorization", `Bearer ${posterToken}`)
+      .send({
+        customerId,
+        creditNoteDate,
+        lines: [{ accountId: revenueAccountId, amountMinor }],
+        allocations,
+      })
+      .expect(201);
+    const posted = await request(app.getHttpServer())
+      .post(`/v1/finance/credit-notes/${created.body.data.id}/post`)
+      .set("Authorization", `Bearer ${posterToken}`)
+      .expect(200);
+    return { id: posted.body.data.id };
+  }
+
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
       imports: [AppModule],
@@ -723,5 +755,144 @@ describe("AR Reports — AR/GL Reconciliation (e2e)", () => {
     expect(later.body.data.subLedgerTotalOutstandingMinor).toBe(
       outstandingBefore + 9999,
     );
+  });
+
+  describe("Credit Notes work item (§9a, CTO-approved) — reconciliation stays reconciled across a posted credit note", () => {
+    it("current mode: a posted credit note reduces both sub-ledger outstanding and the GL AR control balance together, staying reconciled", async () => {
+      // Its OWN isolated legal entity, exactly the same reasoning as the
+      // "second, minimal variant" current-mode sanity check above:
+      // current mode's sub-ledger side applies no date filter at all, so
+      // entity A (which by this point in the file deliberately carries a
+      // receipt dated 2026-09-01, after real "today") is unsuitable for
+      // a current-mode assertion — this is AR-1c's own §12.1-documented,
+      // CTO-accepted limitation, not something this work item changes.
+      const platformDb = getPlatformDb();
+      const [entityE] = await platformDb
+        .insert(legalEntities)
+        .values({
+          tenantId,
+          name: "AR Reconciliation E2E Entity E (credit note current-mode)",
+          code: "ARRECONE",
+          countryCode: "AE",
+          currencyCode: "AED",
+          isDefault: false,
+        })
+        .returning();
+      const legalEntityEId = entityE!.id;
+
+      const financeDb = getFinanceDb();
+      const [revE] = await financeDb
+        .insert(chartOfAccounts)
+        .values({
+          tenantId,
+          legalEntityId: legalEntityEId,
+          code: `ARRECON-REV-E-${suffix}`,
+          name: "Consulting Revenue E",
+          type: "REVENUE",
+        })
+        .returning();
+      const [arE] = await financeDb
+        .insert(chartOfAccounts)
+        .values({
+          tenantId,
+          legalEntityId: legalEntityEId,
+          code: `ARRECON-AR-E-${suffix}`,
+          name: "Accounts Receivable E",
+          type: "ASSET",
+        })
+        .returning();
+
+      const adminEToken = tokenFor(legalEntityEId, ["finance.admin"]);
+      const posterEToken = tokenFor(legalEntityEId, ["finance.poster"]);
+
+      await request(app.getHttpServer())
+        .post("/v1/finance/ar/settings")
+        .set("Authorization", `Bearer ${adminEToken}`)
+        .send({ arControlAccountId: arE!.id })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post("/v1/finance/accounting-periods")
+        .set("Authorization", `Bearer ${adminEToken}`)
+        .send({
+          code: `ARRECON-OPEN-E-${suffix}`,
+          startDate: "2026-01-01",
+          endDate: "2026-06-30",
+        })
+        .expect(201);
+
+      const customer = await newCustomer(adminEToken, "ReconCrnCurrent");
+      const invoice = await createAndPostInvoice(
+        posterEToken,
+        revE!.id,
+        customer,
+        "2026-02-01",
+        1000,
+      );
+      await createAndPostCreditNote(
+        posterEToken,
+        revE!.id,
+        customer,
+        "2026-02-05",
+        400,
+        [{ invoiceId: invoice.id, allocatedAmountMinor: 400 }],
+      );
+
+      const reconciliation = await request(app.getHttpServer())
+        .get("/v1/finance/ar/reconciliation")
+        .set("Authorization", `Bearer ${posterEToken}`)
+        .expect(200);
+      expect(reconciliation.body.data.reconciled).toBe(true);
+      expect(reconciliation.body.data.differenceMinor).toBe(0);
+
+      const glBalance = await request(app.getHttpServer())
+        .get(`/v1/finance/accounts/${arE!.id}/balance`)
+        .set("Authorization", `Bearer ${posterEToken}`)
+        .expect(200);
+      expect(reconciliation.body.data.glArControlAccountBalanceMinor).toBe(
+        glBalance.body.data.closingBalanceMinor,
+      );
+    });
+
+    it("as-of mode: a credit note dated after asOf is excluded from both sides symmetrically, and reconciliation holds on/after its own date too", async () => {
+      const customer = await newCustomer(adminAToken, "ReconCrnAsOf");
+      const invoice = await createAndPostInvoice(
+        posterAToken,
+        revenueAccountAId,
+        customer,
+        "2026-07-10",
+        1000,
+      );
+      await createAndPostCreditNote(
+        posterAToken,
+        revenueAccountAId,
+        customer,
+        "2026-07-25",
+        1000,
+        [{ invoiceId: invoice.id, allocatedAmountMinor: 1000 }],
+      );
+
+      // Between the invoice and the credit note — excluded from both
+      // sides, still reconciled (both sides agree on an unreduced
+      // outstanding balance).
+      const between = await request(app.getHttpServer())
+        .get(`/v1/finance/ar/reconciliation?asOf=2026-07-15`)
+        .set("Authorization", `Bearer ${posterAToken}`)
+        .expect(200);
+      expect(between.body.data.reconciled).toBe(true);
+      expect(
+        between.body.data.subLedgerTotalOutstandingMinor,
+      ).toBeGreaterThanOrEqual(1000);
+
+      // On the credit note's own date — the `<=` cutoff includes it on
+      // both sides (sub-ledger via credit_note_date, GL via the credit
+      // note's own journal_entries.transaction_date), so they still
+      // agree.
+      const onDate = await request(app.getHttpServer())
+        .get(`/v1/finance/ar/reconciliation?asOf=2026-07-25`)
+        .set("Authorization", `Bearer ${posterAToken}`)
+        .expect(200);
+      expect(onDate.body.data.reconciled).toBe(true);
+      expect(onDate.body.data.differenceMinor).toBe(0);
+    });
   });
 });

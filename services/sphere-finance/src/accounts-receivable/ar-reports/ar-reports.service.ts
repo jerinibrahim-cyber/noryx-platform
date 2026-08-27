@@ -6,6 +6,8 @@ import {
   customerInvoices,
   customerReceipts,
   customerReceiptAllocations,
+  customerCreditNotes,
+  customerCreditNoteAllocations,
   type ArSettings,
   type Customer,
 } from "../../db/schema";
@@ -35,7 +37,7 @@ export interface StatementAllocation {
 }
 
 export interface StatementLine {
-  type: "INVOICE" | "RECEIPT";
+  type: "INVOICE" | "RECEIPT" | "CREDIT_NOTE";
   date: string;
   reference: string | null;
   description: string | null;
@@ -43,6 +45,7 @@ export interface StatementLine {
   runningBalanceMinor: number;
   invoiceId?: string;
   receiptId?: string;
+  creditNoteId?: string;
   allocations?: StatementAllocation[];
 }
 
@@ -134,6 +137,14 @@ interface Totals {
  * derived from customers/ar_settings/customer_invoices/
  * customer_receipts/customer_receipt_allocations/journal_lines, all
  * already written correctly by AR-1a/1b/1c.
+ *
+ * Extended by the Credit/Debit Notes work item
+ * (docs/finance-work-item-credit-debit-notes-proposal.md §9a,
+ * CTO-approved): `asOfTotals()` additionally unions in
+ * `customer_credit_note_allocations`/`customer_credit_notes` (§9a.1),
+ * and `getCustomerStatement()` additionally emits `CREDIT_NOTE` rows
+ * (§9a.2). `currentTotals()`/`getArAgeing()`/`getArReconciliation()`'s
+ * current-mode path are deliberately untouched — see §9a.3.
  *
  * Reconciliation mode dispatch (current vs. as-of) is on parameter
  * presence alone, NEVER a comparison of `asOf` against today (§9.1's
@@ -289,6 +300,68 @@ export class ArReportsService {
           allocationsByReceipt.set(a.receiptId, list);
         }
 
+        // §9a.2 (Credit/Debit Notes work item, CTO-approved) — structured
+        // identically to the RECEIPT block above: POSTED credit notes for
+        // this customer dated within [dateFrom, dateTo], plus their
+        // allocations for the `allocations: StatementAllocation[]` field,
+        // reusing that existing interface unchanged.
+        const creditNoteConditions = [
+          eq(customerCreditNotes.tenantId, tenantId),
+          eq(customerCreditNotes.legalEntityId, legalEntityId),
+          eq(customerCreditNotes.customerId, customerId),
+          eq(customerCreditNotes.status, "POSTED"),
+          lte(customerCreditNotes.creditNoteDate, dateTo),
+        ];
+        if (dateFrom) {
+          creditNoteConditions.push(
+            gte(customerCreditNotes.creditNoteDate, dateFrom),
+          );
+        }
+        const creditNotes = await tx
+          .select()
+          .from(customerCreditNotes)
+          .where(and(...creditNoteConditions));
+
+        const creditNoteIds = creditNotes.map((c) => c.id);
+        const creditNoteAllocationRows =
+          creditNoteIds.length > 0
+            ? await tx
+                .select({
+                  creditNoteId: customerCreditNoteAllocations.creditNoteId,
+                  invoiceId: customerCreditNoteAllocations.invoiceId,
+                  allocatedAmountMinor:
+                    customerCreditNoteAllocations.allocatedAmountMinor,
+                  invoiceReference: customerInvoices.internalReference,
+                })
+                .from(customerCreditNoteAllocations)
+                .innerJoin(
+                  customerInvoices,
+                  eq(
+                    customerInvoices.id,
+                    customerCreditNoteAllocations.invoiceId,
+                  ),
+                )
+                .where(
+                  inArray(
+                    customerCreditNoteAllocations.creditNoteId,
+                    creditNoteIds,
+                  ),
+                )
+            : [];
+        const allocationsByCreditNote = new Map<
+          string,
+          StatementAllocation[]
+        >();
+        for (const a of creditNoteAllocationRows) {
+          const list = allocationsByCreditNote.get(a.creditNoteId) ?? [];
+          list.push({
+            invoiceId: a.invoiceId,
+            invoiceReference: a.invoiceReference,
+            allocatedAmountMinor: a.allocatedAmountMinor,
+          });
+          allocationsByCreditNote.set(a.creditNoteId, list);
+        }
+
         interface Unsorted {
           sortDate: string;
           sortRef: string;
@@ -337,10 +410,34 @@ export class ArReportsService {
             },
           });
         }
+        for (const cn of creditNotes) {
+          unsorted.push({
+            sortDate: cn.creditNoteDate,
+            sortRef: cn.internalReference ?? "",
+            line: {
+              type: "CREDIT_NOTE",
+              date: cn.creditNoteDate,
+              reference: cn.internalReference,
+              // §9a.2: prefer the credit note's own `reason` field,
+              // falling back to a generic label — mirroring RECEIPT's
+              // `memo ?? reference ?? "Receipt"` fallback chain.
+              description: cn.reason ?? "Credit note",
+              // Signed the same direction as a receipt (negative — it
+              // reduces the customer's balance). A POSTED credit note is
+              // always fully allocated by invariant (proposal §9,
+              // full-allocation-required-to-post), so -totalMinor always
+              // equals -SUM(this credit note's own allocations).
+              amountMinor: -cn.totalMinor,
+              creditNoteId: cn.id,
+              allocations: allocationsByCreditNote.get(cn.id) ?? [],
+            },
+          });
+        }
         // Chronological order, tie-broken by internalReference — INV-/
-        // RCT- prefixes never collide, and each is zero-padded/
-        // fixed-width within its own series (AR-1b/1c's numbering
-        // convention), so lexicographic order matches numeric order —
+        // RCT-/CRN- prefixes never collide, and each is zero-padded/
+        // fixed-width within its own series (AR-1b/1c/Credit-Debit-Notes'
+        // numbering convention), so lexicographic order matches numeric
+        // order —
         // the identical reasoning AP-1d's own statement uses for its
         // BILL-/PAY- sort (proposal §7).
         unsorted.sort((a, b) => {
@@ -705,6 +802,16 @@ export class ArReportsService {
    * use for their own opening balance). `customerId: null` aggregates
    * across the whole legal entity (reconciliation's as-of mode).
    *
+   * §9a.1 (Credit/Debit Notes work item, CTO-approved) — `totalReceived`
+   * is now the SUM of two unioned subqueries: the pre-existing receipt-
+   * allocation subquery above, plus a second subquery over
+   * `customer_credit_note_allocations` joined to `customer_credit_notes`/
+   * `customer_invoices`, applying the identical predicate shape (the
+   * credit note's own `status = 'POSTED'` and `credit_note_date`
+   * qualifying against `cutoffDate` under the same `cmp`/`strict` flag,
+   * plus the same tenant/legal-entity/optional-customer filters). This
+   * is additive only — the receipt subquery itself is untouched.
+   *
    * Selected for ANY explicit `asOf` value the caller supplies —
    * whether before, equal to, or after today (§9.1's CTO correction).
    * This does NOT rely on `paid_minor`'s current value at all — that is
@@ -726,6 +833,13 @@ export class ArReportsService {
       : sql``;
     const receiptCustomerFilter = customerId
       ? sql`AND cr.customer_id = ${customerId}`
+      : sql``;
+    // §9a.1 (Credit/Debit Notes work item, CTO-approved) — same optional
+    // customer filter, applied to the credit note itself rather than the
+    // invoice it's allocated against, identical shape to
+    // receiptCustomerFilter above.
+    const creditNoteCustomerFilter = customerId
+      ? sql`AND ccn.customer_id = ${customerId}`
       : sql``;
 
     const rows = (await tx.execute(sql`
@@ -754,6 +868,23 @@ export class ArReportsService {
             AND ci2.status = 'POSTED'
             AND ci2.invoice_date ${cmp} ${cutoffDate}::date
             ${receiptCustomerFilter}
+        ), 0)
+        +
+        COALESCE((
+          SELECT SUM(ccna.allocated_amount_minor)
+          FROM customer_credit_note_allocations ccna
+          INNER JOIN customer_credit_notes ccn ON ccn.id = ccna.credit_note_id
+          INNER JOIN customer_invoices ci3 ON ci3.id = ccna.invoice_id
+          WHERE ccna.tenant_id = ${tenantId}
+            AND ccn.tenant_id = ${tenantId}
+            AND ccn.legal_entity_id = ${legalEntityId}
+            AND ccn.status = 'POSTED'
+            AND ccn.credit_note_date ${cmp} ${cutoffDate}::date
+            AND ci3.tenant_id = ${tenantId}
+            AND ci3.legal_entity_id = ${legalEntityId}
+            AND ci3.status = 'POSTED'
+            AND ci3.invoice_date ${cmp} ${cutoffDate}::date
+            ${creditNoteCustomerFilter}
         ), 0) AS total_received
     `)) as unknown as Array<{
       total_invoiced: unknown;

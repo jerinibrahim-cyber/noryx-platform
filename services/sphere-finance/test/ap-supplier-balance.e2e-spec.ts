@@ -99,6 +99,33 @@ describe("AP Reports — Supplier Balance (e2e)", () => {
     return posted.body.data.id;
   }
 
+  /** §9a.1 (Credit/Debit Notes work item, CTO-approved) — a debit note
+   * reduces totalPaid (and therefore outstanding) the same direction a
+   * payment does, so asOfTotals()'s new unioned subquery is exercised
+   * the same way createAndPostPayment exercises the pre-existing one. */
+  async function createAndPostDebitNote(
+    supplierId: string,
+    debitNoteDate: string,
+    amountMinor: number,
+    allocations: { billId: string; allocatedAmountMinor: number }[],
+  ): Promise<string> {
+    const created = await request(app.getHttpServer())
+      .post("/v1/finance/debit-notes")
+      .set("Authorization", `Bearer ${posterA1Token}`)
+      .send({
+        supplierId,
+        debitNoteDate,
+        lines: [{ accountId: expenseAccountA1Id, amountMinor }],
+        allocations,
+      })
+      .expect(201);
+    const posted = await request(app.getHttpServer())
+      .post(`/v1/finance/debit-notes/${created.body.data.id}/post`)
+      .set("Authorization", `Bearer ${posterA1Token}`)
+      .expect(200);
+    return posted.body.data.id;
+  }
+
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
       imports: [AppModule],
@@ -477,5 +504,93 @@ describe("AP Reports — Supplier Balance (e2e)", () => {
       .get(`/v1/finance/suppliers/${supplierAlphaId}/balance`)
       .set("Authorization", `Bearer ${viewerToken}`)
       .expect(200);
+  });
+
+  describe("Debit Notes work item (§9a, CTO-approved) — asOfTotals() extension", () => {
+    it("current mode (no asOf) — a posted debit note reduces outstanding the same as a payment would", async () => {
+      const supplier = await request(app.getHttpServer())
+        .post("/v1/finance/suppliers")
+        .set("Authorization", `Bearer ${adminA1Token}`)
+        .send({ code: `APBAL-DBN-CUR-${suffix}`, name: "Debit Note Current" })
+        .expect(201);
+      const supplierId = supplier.body.data.id;
+
+      const bill = await createAndPostBill(supplierId, "2026-09-01", 1000);
+      await createAndPostDebitNote(supplierId, "2026-09-05", 400, [
+        { billId: bill.id, allocatedAmountMinor: 400 },
+      ]);
+
+      const res = await request(app.getHttpServer())
+        .get(`/v1/finance/suppliers/${supplierId}/balance`)
+        .set("Authorization", `Bearer ${posterA1Token}`)
+        .expect(200);
+      expect(res.body.data.totalBilledMinor).toBe(1000);
+      expect(res.body.data.totalPaidMinor).toBe(400);
+      expect(res.body.data.totalOutstandingMinor).toBe(600);
+    });
+
+    it("historical as-of — a debit note dated after asOf does not reduce the as-of balance; before/on asOf it does", async () => {
+      const supplier = await request(app.getHttpServer())
+        .post("/v1/finance/suppliers")
+        .set("Authorization", `Bearer ${adminA1Token}`)
+        .send({ code: `APBAL-DBN-ASOF-${suffix}`, name: "Debit Note As-Of" })
+        .expect(201);
+      const supplierId = supplier.body.data.id;
+
+      const bill = await createAndPostBill(supplierId, "2026-10-01", 2000);
+      await createAndPostDebitNote(supplierId, "2026-10-20", 2000, [
+        { billId: bill.id, allocatedAmountMinor: 2000 },
+      ]);
+
+      // Between the bill and the debit note — billed but not yet debited
+      // as of this date, even though the debit note has since posted.
+      const between = await request(app.getHttpServer())
+        .get(`/v1/finance/suppliers/${supplierId}/balance?asOf=2026-10-10`)
+        .set("Authorization", `Bearer ${posterA1Token}`)
+        .expect(200);
+      expect(between.body.data.totalBilledMinor).toBe(2000);
+      expect(between.body.data.totalPaidMinor).toBe(0);
+      expect(between.body.data.totalOutstandingMinor).toBe(2000);
+
+      // On the debit note's own date — the `<=` cutoff includes it.
+      const onDate = await request(app.getHttpServer())
+        .get(`/v1/finance/suppliers/${supplierId}/balance?asOf=2026-10-20`)
+        .set("Authorization", `Bearer ${posterA1Token}`)
+        .expect(200);
+      expect(onDate.body.data.totalPaidMinor).toBe(2000);
+      expect(onDate.body.data.totalOutstandingMinor).toBe(0);
+
+      // After both — fully settled as of this date too.
+      const after = await request(app.getHttpServer())
+        .get(`/v1/finance/suppliers/${supplierId}/balance?asOf=2026-10-31`)
+        .set("Authorization", `Bearer ${posterA1Token}`)
+        .expect(200);
+      expect(after.body.data.totalPaidMinor).toBe(2000);
+      expect(after.body.data.totalOutstandingMinor).toBe(0);
+    });
+
+    it("a debit note and a payment against the same bill both contribute to totalPaid", async () => {
+      const supplier = await request(app.getHttpServer())
+        .post("/v1/finance/suppliers")
+        .set("Authorization", `Bearer ${adminA1Token}`)
+        .send({ code: `APBAL-DBN-MIX-${suffix}`, name: "Debit Note Mixed" })
+        .expect(201);
+      const supplierId = supplier.body.data.id;
+
+      const bill = await createAndPostBill(supplierId, "2026-11-01", 1000);
+      await createAndPostPayment(supplierId, "2026-11-05", 300, [
+        { billId: bill.id, allocatedAmountMinor: 300 },
+      ]);
+      await createAndPostDebitNote(supplierId, "2026-11-10", 700, [
+        { billId: bill.id, allocatedAmountMinor: 700 },
+      ]);
+
+      const res = await request(app.getHttpServer())
+        .get(`/v1/finance/suppliers/${supplierId}/balance`)
+        .set("Authorization", `Bearer ${posterA1Token}`)
+        .expect(200);
+      expect(res.body.data.totalPaidMinor).toBe(1000);
+      expect(res.body.data.totalOutstandingMinor).toBe(0);
+    });
   });
 });

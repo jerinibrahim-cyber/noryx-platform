@@ -6,6 +6,8 @@ import {
   supplierBills,
   supplierPayments,
   supplierPaymentAllocations,
+  supplierDebitNotes,
+  supplierDebitNoteAllocations,
   type ApSettings,
   type Supplier,
 } from "../../db/schema";
@@ -35,7 +37,7 @@ export interface StatementAllocation {
 }
 
 export interface StatementLine {
-  type: "BILL" | "PAYMENT";
+  type: "BILL" | "PAYMENT" | "DEBIT_NOTE";
   date: string;
   reference: string | null;
   description: string | null;
@@ -43,6 +45,7 @@ export interface StatementLine {
   runningBalanceMinor: number;
   billId?: string;
   paymentId?: string;
+  debitNoteId?: string;
   allocations?: StatementAllocation[];
 }
 
@@ -132,6 +135,14 @@ interface Totals {
  * No new tables, no new migration (proposal §3) — every number here is
  * derived from supplier_bills/supplier_payments/supplier_payment_
  * allocations/journal_lines, all already written correctly by AP-1a/1b/1c.
+ *
+ * Extended by the Credit/Debit Notes work item
+ * (docs/finance-work-item-credit-debit-notes-proposal.md §9a,
+ * CTO-approved): `asOfTotals()` additionally unions in
+ * `supplier_debit_note_allocations`/`supplier_debit_notes` (§9a.1), and
+ * `getSupplierStatement()` additionally emits `DEBIT_NOTE` rows (§9a.2).
+ * `currentTotals()`/`getApAgeing()`/`getApReconciliation()`'s
+ * current-mode path are deliberately untouched — see §9a.3.
  */
 @Injectable()
 export class ApReportsService {
@@ -281,6 +292,62 @@ export class ApReportsService {
           allocationsByPayment.set(a.paymentId, list);
         }
 
+        // §9a.2 (Credit/Debit Notes work item, CTO-approved) — structured
+        // identically to the PAYMENT block above: POSTED debit notes for
+        // this supplier dated within [dateFrom, dateTo], plus their
+        // allocations for the `allocations: StatementAllocation[]` field,
+        // reusing that existing interface unchanged.
+        const debitNoteConditions = [
+          eq(supplierDebitNotes.tenantId, tenantId),
+          eq(supplierDebitNotes.legalEntityId, legalEntityId),
+          eq(supplierDebitNotes.supplierId, supplierId),
+          eq(supplierDebitNotes.status, "POSTED"),
+          lte(supplierDebitNotes.debitNoteDate, dateTo),
+        ];
+        if (dateFrom) {
+          debitNoteConditions.push(
+            gte(supplierDebitNotes.debitNoteDate, dateFrom),
+          );
+        }
+        const debitNotes = await tx
+          .select()
+          .from(supplierDebitNotes)
+          .where(and(...debitNoteConditions));
+
+        const debitNoteIds = debitNotes.map((d) => d.id);
+        const debitNoteAllocationRows =
+          debitNoteIds.length > 0
+            ? await tx
+                .select({
+                  debitNoteId: supplierDebitNoteAllocations.debitNoteId,
+                  billId: supplierDebitNoteAllocations.billId,
+                  allocatedAmountMinor:
+                    supplierDebitNoteAllocations.allocatedAmountMinor,
+                  billReference: supplierBills.internalReference,
+                })
+                .from(supplierDebitNoteAllocations)
+                .innerJoin(
+                  supplierBills,
+                  eq(supplierBills.id, supplierDebitNoteAllocations.billId),
+                )
+                .where(
+                  inArray(
+                    supplierDebitNoteAllocations.debitNoteId,
+                    debitNoteIds,
+                  ),
+                )
+            : [];
+        const allocationsByDebitNote = new Map<string, StatementAllocation[]>();
+        for (const a of debitNoteAllocationRows) {
+          const list = allocationsByDebitNote.get(a.debitNoteId) ?? [];
+          list.push({
+            billId: a.billId,
+            billReference: a.billReference,
+            allocatedAmountMinor: a.allocatedAmountMinor,
+          });
+          allocationsByDebitNote.set(a.debitNoteId, list);
+        }
+
         interface Unsorted {
           sortDate: string;
           sortRef: string;
@@ -316,12 +383,36 @@ export class ApReportsService {
             },
           });
         }
+        for (const dn of debitNotes) {
+          unsorted.push({
+            sortDate: dn.debitNoteDate,
+            sortRef: dn.internalReference ?? "",
+            line: {
+              type: "DEBIT_NOTE",
+              date: dn.debitNoteDate,
+              reference: dn.internalReference,
+              // §9a.2: prefer the debit note's own `reason` field,
+              // falling back to a generic label — mirroring PAYMENT's
+              // `reference ?? "Payment"` fallback chain.
+              description: dn.reason ?? "Debit note",
+              // Signed the same direction as a payment (negative — it
+              // reduces the supplier's balance). A POSTED debit note is
+              // always fully allocated by invariant (proposal §9,
+              // full-allocation-required-to-post), so -totalMinor always
+              // equals -SUM(this debit note's own allocations).
+              amountMinor: -dn.totalMinor,
+              debitNoteId: dn.id,
+              allocations: allocationsByDebitNote.get(dn.id) ?? [],
+            },
+          });
+        }
         // Chronological order, tie-broken by internalReference — BILL-/
-        // PAY- prefixes never collide, and each is zero-padded/fixed-width
-        // within its own series (AP-1b/1c's numbering convention), so
-        // lexicographic order matches numeric order — the identical
-        // reasoning general-ledger.service.ts's doc comment gives for
-        // sorting journal_number as a string (proposal §6.2).
+        // PAY-/DBN- prefixes never collide, and each is zero-padded/
+        // fixed-width within its own series (AP-1b/1c/Credit-Debit-Notes'
+        // numbering convention), so lexicographic order matches numeric
+        // order — the identical reasoning general-ledger.service.ts's doc
+        // comment gives for sorting journal_number as a string (proposal
+        // §6.2).
         unsorted.sort((a, b) => {
           if (a.sortDate !== b.sortDate)
             return a.sortDate < b.sortDate ? -1 : 1;
@@ -659,7 +750,17 @@ export class ApReportsService {
    * balance semantics — strictly before the window starts, the same
    * convention GeneralLedgerService.getLedger uses for its own opening
    * balance). `supplierId: null` aggregates across the whole legal entity
-   * (reconciliation's as-of mode). */
+   * (reconciliation's as-of mode).
+   *
+   * §9a.1 (Credit/Debit Notes work item, CTO-approved) — `totalPaid` is
+   * now the SUM of two unioned subqueries: the pre-existing payment-
+   * allocation subquery above, plus a second subquery over
+   * `supplier_debit_note_allocations` joined to `supplier_debit_notes`/
+   * `supplier_bills`, applying the identical predicate shape (the debit
+   * note's own `status = 'POSTED'` and `debit_note_date` qualifying
+   * against `cutoffDate` under the same `cmp`/`strict` flag, plus the
+   * same tenant/legal-entity/optional-supplier filters). This is
+   * additive only — the payment subquery itself is untouched. */
   private async asOfTotals(
     tx: TxClient,
     tenantId: string,
@@ -674,6 +775,13 @@ export class ApReportsService {
       : sql``;
     const paymentSupplierFilter = supplierId
       ? sql`AND sp.supplier_id = ${supplierId}`
+      : sql``;
+    // §9a.1 (Credit/Debit Notes work item, CTO-approved) — same optional
+    // supplier filter, applied to the debit note itself rather than the
+    // bill it's allocated against, identical shape to
+    // paymentSupplierFilter above.
+    const debitNoteSupplierFilter = supplierId
+      ? sql`AND sdn.supplier_id = ${supplierId}`
       : sql``;
 
     const rows = (await tx.execute(sql`
@@ -702,6 +810,23 @@ export class ApReportsService {
             AND b2.status = 'POSTED'
             AND b2.bill_date ${cmp} ${cutoffDate}::date
             ${paymentSupplierFilter}
+        ), 0)
+        +
+        COALESCE((
+          SELECT SUM(sdna.allocated_amount_minor)
+          FROM supplier_debit_note_allocations sdna
+          INNER JOIN supplier_debit_notes sdn ON sdn.id = sdna.debit_note_id
+          INNER JOIN supplier_bills b3 ON b3.id = sdna.bill_id
+          WHERE sdna.tenant_id = ${tenantId}
+            AND sdn.tenant_id = ${tenantId}
+            AND sdn.legal_entity_id = ${legalEntityId}
+            AND sdn.status = 'POSTED'
+            AND sdn.debit_note_date ${cmp} ${cutoffDate}::date
+            AND b3.tenant_id = ${tenantId}
+            AND b3.legal_entity_id = ${legalEntityId}
+            AND b3.status = 'POSTED'
+            AND b3.bill_date ${cmp} ${cutoffDate}::date
+            ${debitNoteSupplierFilter}
         ), 0) AS total_paid
     `)) as unknown as Array<{ total_billed: unknown; total_paid: unknown }>;
     return {

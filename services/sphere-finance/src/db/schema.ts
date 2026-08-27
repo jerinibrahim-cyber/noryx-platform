@@ -1293,3 +1293,425 @@ export type CustomerReceiptAllocation =
   typeof customerReceiptAllocations.$inferSelect;
 export type NewCustomerReceiptAllocation =
   typeof customerReceiptAllocations.$inferInsert;
+
+// ---------------------------------------------------------------------------
+// AR — Customer Credit Notes.
+// docs/finance-work-item-credit-debit-notes-proposal.md §8, CTO-approved
+// (CTO approval — "PROCEED WITH IMPLEMENTATION").
+//
+// A credit note is a correction document against one or more already-
+// POSTED customer invoices — returns, pricing corrections, disputed-amount
+// write-downs, goodwill adjustments. It carries LINES (like an invoice,
+// distributing its subtotal across revenue/contra-revenue accounts) AND
+// ALLOCATIONS (like a receipt, settling part of its total against
+// specific invoices) — the two patterns this work item combines.
+//
+// Posting does NOT call JournalEntriesService, same architectural reasoning
+// as every other Finance write path (transaction-atomicity mismatch) — it
+// replicates the same direct journal_entries/journal_lines/
+// journal_number_counters insertion CustomerReceiptsService.post() uses,
+// drawing journal numbers from the SAME shared sequence. Accounting
+// polarity is the invoice's own polarity reversed: Dr each line's account
+// (+ Dr taxOutputAccountId if tax > 0) / Cr arControlAccountId — see
+// CustomerCreditNotesService.post().
+//
+// customer_credit_note_number_counters is a SEPARATE table from every
+// other number-counter table — a credit note must never contend with
+// invoices, receipts, bills, payments, debit notes, or hand-posted journal
+// entries for the same sequence, same reasoning as every prior per-
+// document-type counter in this file.
+//
+// Locked decision (CTO approval): credit-note allocations settle against
+// customer_invoices.paidMinor/paymentStatus directly — NO separate
+// creditedMinor column exists. A credit note cannot create negative
+// outstanding or "credit on account": allocation is validated against the
+// invoice's existing (totalMinor - paidMinor) outstanding amount, and
+// full-allocation-to-post is required (mirrors AR-1c's own "no receipt on
+// account" rule exactly) — see CustomerCreditNotesService.post().
+//
+// Same conventions as every table above: no Postgres FK to db-core's
+// tenants/legal_entities (cross-service boundary); real FKs to Finance's
+// own tables (customers, customer_invoices, chart_of_accounts,
+// journal_entries, accounting_periods — same migration lifecycle); RLS is
+// tenant_id-only, legal_entity_id isolation is an explicit service-layer
+// predicate on every query.
+// ---------------------------------------------------------------------------
+
+/// Race-free credit-note-numbering allocation, structurally identical to
+/// arReceiptNumberCounters but its OWN separate table/row.
+export const customerCreditNoteNumberCounters = pgTable(
+  "customer_credit_note_number_counters",
+  {
+    tenantId: uuid("tenant_id").notNull(),
+    legalEntityId: uuid("legal_entity_id").notNull(),
+    lastAssignedNumber: integer("last_assigned_number").notNull().default(0),
+  },
+  (t) => [primaryKey({ columns: [t.tenantId, t.legalEntityId] })],
+);
+
+export type CustomerCreditNoteNumberCounter =
+  typeof customerCreditNoteNumberCounters.$inferSelect;
+
+export const customerCreditNoteStatusEnum = pgEnum(
+  "customer_credit_note_status",
+  ["DRAFT", "POSTED"],
+);
+
+export const customerCreditNotes = pgTable(
+  "customer_credit_notes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id").notNull(),
+    legalEntityId: uuid("legal_entity_id").notNull(),
+    customerId: uuid("customer_id")
+      .notNull()
+      .references(() => customers.id),
+    /// Our own "CRN-000123" — null while DRAFT, assigned only at posting
+    /// time via customerCreditNoteNumberCounters. Same null-while-DRAFT/
+    /// immutable-after-POST shape as every other Finance document's own
+    /// number.
+    internalReference: varchar("internal_reference", { length: 20 }),
+    status: customerCreditNoteStatusEnum("status").notNull().default("DRAFT"),
+    creditNoteDate: date("credit_note_date").notNull(),
+    /// Resolved from the legal entity's functional currency at creation —
+    /// never client-supplied, identical to customerInvoices.currencyCode.
+    currencyCode: varchar("currency_code", { length: 3 }).notNull(),
+    /// Server-computed: SUM(line.amountMinor).
+    subtotalMinor: bigint("subtotal_minor", { mode: "number" }).notNull(),
+    /// Server-computed: SUM(line.taxAmountMinor).
+    taxMinor: bigint("tax_minor", { mode: "number" }).notNull().default(0),
+    /// Server-computed: subtotalMinor + taxMinor. Must equal
+    /// SUM(allocations.allocatedAmountMinor) to post — no "credit on
+    /// account" (proposal §9, CTO-approved).
+    totalMinor: bigint("total_minor", { mode: "number" }).notNull(),
+    /// Optional free-text reason ("Return", "Pricing correction",
+    /// "Goodwill") — proposal §8.
+    reason: varchar("reason", { length: 500 }),
+    memo: text("memo"),
+    /// Set exactly once, at posting. Real FK: journal_entries is
+    /// Finance's own table, same migration lifecycle.
+    journalEntryId: uuid("journal_entry_id").references(
+      () => journalEntries.id,
+    ),
+    /// Set exactly once, at posting. Real FK: accounting_periods is
+    /// Finance's own table, same migration lifecycle.
+    periodId: uuid("period_id").references(() => accountingPeriods.id),
+    createdBy: uuid("created_by"),
+    postedBy: uuid("posted_by"),
+    postedAt: timestamp("posted_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    unique("customer_credit_notes_tenant_entity_reference_unique").on(
+      t.tenantId,
+      t.legalEntityId,
+      t.internalReference,
+    ),
+    index("customer_credit_notes_tenant_entity_idx").on(
+      t.tenantId,
+      t.legalEntityId,
+    ),
+    index("customer_credit_notes_customer_idx").on(t.customerId),
+    check(
+      "customer_credit_notes_total_equals_subtotal_plus_tax",
+      sql`${t.totalMinor} = ${t.subtotalMinor} + ${t.taxMinor}`,
+    ),
+  ],
+);
+
+export type CustomerCreditNote = typeof customerCreditNotes.$inferSelect;
+export type NewCustomerCreditNote = typeof customerCreditNotes.$inferInsert;
+
+export const customerCreditNoteLines = pgTable(
+  "customer_credit_note_lines",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /// Denormalized from the parent credit note — required for this
+    /// table's own RLS policy, identical reasoning to
+    /// customerInvoiceLines.tenantId.
+    tenantId: uuid("tenant_id").notNull(),
+    creditNoteId: uuid("credit_note_id")
+      .notNull()
+      .references(() => customerCreditNotes.id, { onDelete: "cascade" }),
+    lineNumber: integer("line_number").notNull(),
+    /// The revenue/contra-revenue account this line's amount distributes
+    /// to. NO type restriction (any active in-scope account) — same
+    /// posture as customerInvoiceLines.accountId (proposal §8).
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => chartOfAccounts.id),
+    description: varchar("description", { length: 500 }),
+    amountMinor: bigint("amount_minor", { mode: "number" }).notNull(),
+    taxAmountMinor: bigint("tax_amount_minor", { mode: "number" })
+      .notNull()
+      .default(0),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    unique("customer_credit_note_lines_credit_note_line_number_unique").on(
+      t.creditNoteId,
+      t.lineNumber,
+    ),
+    index("customer_credit_note_lines_account_idx").on(t.accountId),
+    check(
+      "customer_credit_note_lines_amount_positive",
+      sql`${t.amountMinor} > 0`,
+    ),
+    check(
+      "customer_credit_note_lines_tax_amount_non_negative",
+      sql`${t.taxAmountMinor} >= 0`,
+    ),
+  ],
+);
+
+export type CustomerCreditNoteLine =
+  typeof customerCreditNoteLines.$inferSelect;
+export type NewCustomerCreditNoteLine =
+  typeof customerCreditNoteLines.$inferInsert;
+
+export const customerCreditNoteAllocations = pgTable(
+  "customer_credit_note_allocations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /// Denormalized from the parent credit note — required for this
+    /// table's own RLS policy, identical reasoning to
+    /// customerReceiptAllocations.tenantId.
+    tenantId: uuid("tenant_id").notNull(),
+    creditNoteId: uuid("credit_note_id")
+      .notNull()
+      .references(() => customerCreditNotes.id, { onDelete: "cascade" }),
+    /// No onDelete cascade from customer_invoices — an invoice is never
+    /// deleted once POSTED (immutable), and only a POSTED invoice may be
+    /// allocated against, so this FK never needs cascade behavior. Same
+    /// reasoning as customerReceiptAllocations.invoiceId.
+    invoiceId: uuid("invoice_id")
+      .notNull()
+      .references(() => customerInvoices.id),
+    allocatedAmountMinor: bigint("allocated_amount_minor", {
+      mode: "number",
+    }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    // At most one allocation row per (credit note, invoice) pair — same
+    // shape as customer_receipt_allocations_receipt_invoice_unique.
+    unique("customer_credit_note_allocations_note_invoice_unique").on(
+      t.creditNoteId,
+      t.invoiceId,
+    ),
+    index("customer_credit_note_allocations_invoice_idx").on(t.invoiceId),
+    check(
+      "customer_credit_note_allocations_amount_positive",
+      sql`${t.allocatedAmountMinor} > 0`,
+    ),
+  ],
+);
+
+export type CustomerCreditNoteAllocation =
+  typeof customerCreditNoteAllocations.$inferSelect;
+export type NewCustomerCreditNoteAllocation =
+  typeof customerCreditNoteAllocations.$inferInsert;
+
+// ---------------------------------------------------------------------------
+// AP — Supplier Debit Notes.
+// docs/finance-work-item-credit-debit-notes-proposal.md §8, CTO-approved
+// (CTO approval — "PROCEED WITH IMPLEMENTATION"). Exact structural mirror
+// of the AR Customer Credit Notes section above, applied to
+// suppliers/supplier_bills instead of customers/customer_invoices.
+// Accounting polarity is the bill's own polarity reversed: Dr
+// apControlAccountId / Cr each line's account (+ Cr taxInputAccountId if
+// tax > 0) — see SupplierDebitNotesService.post().
+//
+// Locked decision (CTO approval): debit-note allocations settle against
+// supplier_bills.paidMinor/paymentStatus directly — NO separate
+// debitedMinor column exists. Same "no debit on account", full-
+// allocation-to-post rule as the AR side.
+// ---------------------------------------------------------------------------
+
+/// Race-free debit-note-numbering allocation, structurally identical to
+/// apPaymentNumberCounters but its OWN separate table/row.
+export const supplierDebitNoteNumberCounters = pgTable(
+  "supplier_debit_note_number_counters",
+  {
+    tenantId: uuid("tenant_id").notNull(),
+    legalEntityId: uuid("legal_entity_id").notNull(),
+    lastAssignedNumber: integer("last_assigned_number").notNull().default(0),
+  },
+  (t) => [primaryKey({ columns: [t.tenantId, t.legalEntityId] })],
+);
+
+export type SupplierDebitNoteNumberCounter =
+  typeof supplierDebitNoteNumberCounters.$inferSelect;
+
+export const supplierDebitNoteStatusEnum = pgEnum(
+  "supplier_debit_note_status",
+  ["DRAFT", "POSTED"],
+);
+
+export const supplierDebitNotes = pgTable(
+  "supplier_debit_notes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id").notNull(),
+    legalEntityId: uuid("legal_entity_id").notNull(),
+    supplierId: uuid("supplier_id")
+      .notNull()
+      .references(() => suppliers.id),
+    /// Our own "DBN-000123" — null while DRAFT, assigned only at posting
+    /// time via supplierDebitNoteNumberCounters.
+    internalReference: varchar("internal_reference", { length: 20 }),
+    status: supplierDebitNoteStatusEnum("status").notNull().default("DRAFT"),
+    debitNoteDate: date("debit_note_date").notNull(),
+    /// Resolved from the legal entity's functional currency at creation —
+    /// never client-supplied, identical to supplierBills.currencyCode.
+    currencyCode: varchar("currency_code", { length: 3 }).notNull(),
+    /// Server-computed: SUM(line.amountMinor).
+    subtotalMinor: bigint("subtotal_minor", { mode: "number" }).notNull(),
+    /// Server-computed: SUM(line.taxAmountMinor).
+    taxMinor: bigint("tax_minor", { mode: "number" }).notNull().default(0),
+    /// Server-computed: subtotalMinor + taxMinor. Must equal
+    /// SUM(allocations.allocatedAmountMinor) to post — no "debit on
+    /// account" (proposal §9, CTO-approved).
+    totalMinor: bigint("total_minor", { mode: "number" }).notNull(),
+    /// Optional free-text reason ("Return", "Pricing correction",
+    /// "Goodwill") — mirrors customerCreditNotes.reason.
+    reason: varchar("reason", { length: 500 }),
+    memo: text("memo"),
+    /// Set exactly once, at posting. Real FK: journal_entries is
+    /// Finance's own table, same migration lifecycle.
+    journalEntryId: uuid("journal_entry_id").references(
+      () => journalEntries.id,
+    ),
+    /// Set exactly once, at posting. Real FK: accounting_periods is
+    /// Finance's own table, same migration lifecycle.
+    periodId: uuid("period_id").references(() => accountingPeriods.id),
+    createdBy: uuid("created_by"),
+    postedBy: uuid("posted_by"),
+    postedAt: timestamp("posted_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    unique("supplier_debit_notes_tenant_entity_reference_unique").on(
+      t.tenantId,
+      t.legalEntityId,
+      t.internalReference,
+    ),
+    index("supplier_debit_notes_tenant_entity_idx").on(
+      t.tenantId,
+      t.legalEntityId,
+    ),
+    index("supplier_debit_notes_supplier_idx").on(t.supplierId),
+    check(
+      "supplier_debit_notes_total_equals_subtotal_plus_tax",
+      sql`${t.totalMinor} = ${t.subtotalMinor} + ${t.taxMinor}`,
+    ),
+  ],
+);
+
+export type SupplierDebitNote = typeof supplierDebitNotes.$inferSelect;
+export type NewSupplierDebitNote = typeof supplierDebitNotes.$inferInsert;
+
+export const supplierDebitNoteLines = pgTable(
+  "supplier_debit_note_lines",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /// Denormalized from the parent debit note — required for this
+    /// table's own RLS policy, identical reasoning to
+    /// supplierBillLines.tenantId.
+    tenantId: uuid("tenant_id").notNull(),
+    debitNoteId: uuid("debit_note_id")
+      .notNull()
+      .references(() => supplierDebitNotes.id, { onDelete: "cascade" }),
+    lineNumber: integer("line_number").notNull(),
+    /// The expense/contra-expense account this line's amount distributes
+    /// to. NO type restriction (any active in-scope account) — same
+    /// posture as supplierBillLines.accountId.
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => chartOfAccounts.id),
+    description: varchar("description", { length: 500 }),
+    amountMinor: bigint("amount_minor", { mode: "number" }).notNull(),
+    taxAmountMinor: bigint("tax_amount_minor", { mode: "number" })
+      .notNull()
+      .default(0),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    unique("supplier_debit_note_lines_debit_note_line_number_unique").on(
+      t.debitNoteId,
+      t.lineNumber,
+    ),
+    index("supplier_debit_note_lines_account_idx").on(t.accountId),
+    check(
+      "supplier_debit_note_lines_amount_positive",
+      sql`${t.amountMinor} > 0`,
+    ),
+    check(
+      "supplier_debit_note_lines_tax_amount_non_negative",
+      sql`${t.taxAmountMinor} >= 0`,
+    ),
+  ],
+);
+
+export type SupplierDebitNoteLine = typeof supplierDebitNoteLines.$inferSelect;
+export type NewSupplierDebitNoteLine =
+  typeof supplierDebitNoteLines.$inferInsert;
+
+export const supplierDebitNoteAllocations = pgTable(
+  "supplier_debit_note_allocations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /// Denormalized from the parent debit note — required for this
+    /// table's own RLS policy, identical reasoning to
+    /// supplierPaymentAllocations.tenantId.
+    tenantId: uuid("tenant_id").notNull(),
+    debitNoteId: uuid("debit_note_id")
+      .notNull()
+      .references(() => supplierDebitNotes.id, { onDelete: "cascade" }),
+    /// No onDelete cascade from supplier_bills — a bill is never deleted
+    /// once POSTED (immutable), and only a POSTED bill may be allocated
+    /// against, so this FK never needs cascade behavior. Same reasoning
+    /// as supplierPaymentAllocations.billId.
+    billId: uuid("bill_id")
+      .notNull()
+      .references(() => supplierBills.id),
+    allocatedAmountMinor: bigint("allocated_amount_minor", {
+      mode: "number",
+    }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    unique("supplier_debit_note_allocations_note_bill_unique").on(
+      t.debitNoteId,
+      t.billId,
+    ),
+    index("supplier_debit_note_allocations_bill_idx").on(t.billId),
+    check(
+      "supplier_debit_note_allocations_amount_positive",
+      sql`${t.allocatedAmountMinor} > 0`,
+    ),
+  ],
+);
+
+export type SupplierDebitNoteAllocation =
+  typeof supplierDebitNoteAllocations.$inferSelect;
+export type NewSupplierDebitNoteAllocation =
+  typeof supplierDebitNoteAllocations.$inferInsert;

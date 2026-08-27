@@ -78,6 +78,13 @@
       "when": 1787755364077,
       "tag": "0010_closed_shard",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1787788251127,
+      "tag": "0011_real_abomination",
+      "breakpoints": true
     }
   ]
 }

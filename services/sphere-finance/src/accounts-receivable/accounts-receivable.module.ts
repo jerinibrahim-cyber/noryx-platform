@@ -4,6 +4,7 @@ import { ArSettingsModule } from "./ar-settings/ar-settings.module";
 import { CustomerInvoicesModule } from "./customer-invoices/customer-invoices.module";
 import { CustomerReceiptsModule } from "./customer-receipts/customer-receipts.module";
 import { ArReportsModule } from "./ar-reports/ar-reports.module";
+import { CustomerCreditNotesModule } from "./customer-credit-notes/customer-credit-notes.module";
 
 /**
  * AR Foundation's parent module. AR-1a wired Customer Master + AR
@@ -15,9 +16,13 @@ import { ArReportsModule } from "./ar-reports/ar-reports.module";
  * AR-1c added Customer Receipts & Settlement
  * (docs/finance-work-item-1c-customer-receipts-proposal.md), the same
  * way AP-1c extended AccountsPayableModule with SupplierPaymentsModule.
- * AR-1d adds AR Reporting below
+ * AR-1d added AR Reporting
  * (docs/finance-work-item-1d-ar-reports-proposal.md), the same way
- * AP-1d extended AccountsPayableModule with ApReportsModule.
+ * AP-1d extended AccountsPayableModule with ApReportsModule. The Credit/
+ * Debit Notes work item now adds Customer Credit Notes below
+ * (docs/finance-work-item-credit-debit-notes-proposal.md, CTO-approved)
+ * — a correction document against POSTED customer invoices, the AR
+ * mirror of AccountsPayableModule's SupplierDebitNotesModule.
  */
 @Module({
   imports: [
@@ -26,6 +31,7 @@ import { ArReportsModule } from "./ar-reports/ar-reports.module";
     CustomerInvoicesModule,
     CustomerReceiptsModule,
     ArReportsModule,
+    CustomerCreditNotesModule,
   ],
 })
 export class AccountsReceivableModule {}
