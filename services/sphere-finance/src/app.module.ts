@@ -10,6 +10,7 @@ import { AccountsPayableModule } from "./accounts-payable/accounts-payable.modul
 import { AccountsReceivableModule } from "./accounts-receivable/accounts-receivable.module";
 import { BankCashAccountsModule } from "./bank-cash-accounts/bank-cash-accounts.module";
 import { BankTransactionsModule } from "./bank-transactions/bank-transactions.module";
+import { BankReconciliationModule } from "./bank-reconciliation/bank-reconciliation.module";
 import { HealthController } from "./health/health.controller";
 import { TenantContextMiddleware } from "./tenant/tenant-context.middleware";
 
@@ -63,6 +64,21 @@ import { TenantContextMiddleware } from "./tenant/tenant-context.middleware";
     // posting sub-ledger already writes into; touches none of the
     // modules above.
     BankTransactionsModule,
+    // Banking-1c — Bank Statement Import & Bank Reconciliation.
+    // docs/finance-work-item-banking-1c-proposal.md §13/§20, CTO-approved
+    // (implementation-authorization turn, amended proposal, locked
+    // semantics). A top-level sibling of BankTransactionsModule, not
+    // nested inside it — reads Banking-1a/1b's tables (bank_cash_accounts,
+    // bank_transactions) and the shared journal_entries/journal_lines
+    // tables read-only for its BOOK BALANCE computation (§17), and calls
+    // BankTransactionsService.create() verbatim for the create-from-line
+    // convenience (§10, its own module registers a second DI instance of
+    // that dependency-free service rather than importing
+    // BankTransactionsModule — zero changes to any Banking-1b file).
+    // Reads/writes its own three new tables only
+    // (bank_statement_imports/bank_statement_lines/
+    // bank_reconciliation_matches); touches none of the modules above.
+    BankReconciliationModule,
     // Scoped registration so TenantContextMiddleware can inject JwtService
     // without importing AccountsModule's other providers — same pattern as
     // services/identity/src/app.module.ts.

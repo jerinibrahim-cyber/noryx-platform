@@ -9,6 +9,7 @@ import {
   date,
   bigint,
   integer,
+  jsonb,
   index,
   unique,
   check,
@@ -2005,3 +2006,262 @@ export const bankTransactions = pgTable(
 
 export type BankTransaction = typeof bankTransactions.$inferSelect;
 export type NewBankTransaction = typeof bankTransactions.$inferInsert;
+
+// ---------------------------------------------------------------------------
+// Banking-1c — Bank Statement Import & Bank Reconciliation.
+// docs/finance-work-item-banking-1c-proposal.md §6, CTO-APPROVED
+// (implementation-authorization turn, amended proposal, locked semantics).
+//
+// Three new tables. Zero changes to any existing table — bank_transactions
+// and bank_cash_accounts above are read-only dependencies of this layer
+// (§10, §20).
+//
+// BOOK BALANCE (the reconciliation completion gate, §9/§17) is NEVER
+// computed from these tables — it is the actual GL balance of
+// bank_cash_accounts.glAccountId, computed the same way
+// GeneralLedgerService.getBalance computes any account balance (duplicated
+// locally in BankReconciliationService per this codebase's established
+// cross-module-coupling convention — see financial-statements.service.ts's
+// own signFor/rawTotalsBefore duplication for precedent). These three
+// tables own only the MATCHING CANDIDATE UNIVERSE (bank_transactions-only
+// for MVP) and the reconciliation/matching state layered on top of it.
+//
+// Import status (bankStatementImportStatusEnum) and reconciliation status
+// (bankReconciliationStatusEnum) are two independent lifecycles on the
+// same header row — never conflated (§9, §14 auditability note).
+// ---------------------------------------------------------------------------
+
+export const bankStatementSourceFormatEnum = pgEnum(
+  "bank_statement_source_format",
+  ["CSV_GENERIC"], // OFX/CAMT053/MT940/QIF/BAI2 — future adapters, §7/§18.
+);
+
+export const bankStatementImportStatusEnum = pgEnum(
+  "bank_statement_import_status",
+  ["PENDING", "VALIDATED", "FAILED"],
+);
+// Import/parsing lifecycle ONLY — did the file read and validate cleanly.
+// PENDING = uploaded, not yet parsed; VALIDATED = parsed successfully, its
+// lines exist; FAILED = parsing/validation error, no lines were created.
+// Deliberately does NOT include a COMPLETED value — "completed" is a
+// RECONCILIATION concept (reconciliationStatus below), a genuinely
+// separate axis. A VALIDATED import can sit with reconciliationStatus =
+// OPEN indefinitely before a user completes its reconciliation.
+
+export const bankReconciliationStatusEnum = pgEnum(
+  "bank_reconciliation_status",
+  ["OPEN", "COMPLETED"],
+);
+// The ONLY place "COMPLETED" is used in this schema. §9 for the precise,
+// two-part definition of what must be true for reconciliation completion
+// (matching completeness AND balance equality) — never driven by import
+// parse status.
+
+export const bankStatementImports = pgTable(
+  "bank_statement_imports",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id").notNull(),
+    legalEntityId: uuid("legal_entity_id").notNull(),
+    bankCashAccountId: uuid("bank_cash_account_id")
+      .notNull()
+      .references(() => bankCashAccounts.id),
+    sourceFormat: bankStatementSourceFormatEnum("source_format").notNull(),
+    fileName: varchar("file_name", { length: 255 }).notNull(),
+    /// sha256 hex of the raw uploaded bytes — the raw bytes themselves are
+    /// never persisted (§5, no blob storage exists in this platform).
+    fileHash: varchar("file_hash", { length: 64 }).notNull(),
+    statementDateFrom: date("statement_date_from").notNull(),
+    statementDateTo: date("statement_date_to").notNull(),
+    /// Both nullable at import/parse time — CSV_GENERIC has no balance
+    /// fields, so a valid import may carry neither. openingBalanceMinor
+    /// MAY remain permanently null (best-effort validation only, §7).
+    /// closingBalanceMinor MAY be supplied/edited by the user after
+    /// import (a plain field edit, not a parse concern) — but §9/§15
+    /// enforce, at the SERVICE layer (not a DB NOT NULL constraint, since
+    /// it is legitimately null between import and user confirmation),
+    /// that reconciliation completion is rejected whenever
+    /// closingBalanceMinor IS NULL. Never treated as optional for the
+    /// purposes of completing a reconciliation — only for accepting an
+    /// import.
+    openingBalanceMinor: bigint("opening_balance_minor", { mode: "number" }),
+    closingBalanceMinor: bigint("closing_balance_minor", { mode: "number" }),
+    status: bankStatementImportStatusEnum("status")
+      .notNull()
+      .default("PENDING"),
+    reconciliationStatus: bankReconciliationStatusEnum("reconciliation_status")
+      .notNull()
+      .default("OPEN"),
+    /// Non-blocking parse warnings (duplicate-line-fingerprint matches,
+    /// opening+credits-debits!=closing internal-consistency mismatches,
+    /// §7/§12) — never a rejection reason, surfaced for user awareness.
+    parseWarnings: jsonb("parse_warnings"),
+    /// Per-line parse errors on a FAILED import (§20 acceptance criterion
+    /// 1) — null on a PENDING/VALIDATED import.
+    parseErrors: jsonb("parse_errors"),
+    importedBy: uuid("imported_by"),
+    importedAt: timestamp("imported_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    completedBy: uuid("completed_by"),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    /// File-level idempotency (§12, Decision 8) — a byte-identical
+    /// re-upload for the same account is rejected outright (409) before
+    /// parsing. Same "friendly check + DB constraint" pattern as
+    /// bank_cash_accounts_gl_account_unique.
+    unique("bank_statement_imports_account_file_hash_unique").on(
+      t.tenantId,
+      t.legalEntityId,
+      t.bankCashAccountId,
+      t.fileHash,
+    ),
+    index("bank_statement_imports_tenant_entity_idx").on(
+      t.tenantId,
+      t.legalEntityId,
+    ),
+    index("bank_statement_imports_bank_cash_account_idx").on(
+      t.bankCashAccountId,
+    ),
+  ],
+);
+
+export type BankStatementImport = typeof bankStatementImports.$inferSelect;
+export type NewBankStatementImport = typeof bankStatementImports.$inferInsert;
+
+export const bankStatementLineDirectionEnum = pgEnum(
+  "bank_statement_line_direction",
+  ["DEBIT", "CREDIT"], // From the bank's own perspective.
+);
+export const bankStatementLineMatchStatusEnum = pgEnum(
+  "bank_statement_line_match_status",
+  ["UNMATCHED", "PARTIALLY_MATCHED", "MATCHED", "IGNORED"],
+);
+
+export const bankStatementLines = pgTable(
+  "bank_statement_lines",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /// Denormalized — required for this table's own tenant_isolation RLS
+    /// policy (a policy is per-table; it cannot reach through a join to
+    /// bank_statement_imports), same reasoning as journal_lines.tenantId.
+    tenantId: uuid("tenant_id").notNull(),
+    legalEntityId: uuid("legal_entity_id").notNull(),
+    statementImportId: uuid("statement_import_id")
+      .notNull()
+      .references(() => bankStatementImports.id),
+    /// Denormalized from the parent import — avoids a join for the most
+    /// common matching-candidate query (§8).
+    bankCashAccountId: uuid("bank_cash_account_id")
+      .notNull()
+      .references(() => bankCashAccounts.id),
+    lineDate: date("line_date").notNull(),
+    valueDate: date("value_date"), // nullable — not every format provides one.
+    direction: bankStatementLineDirectionEnum("direction").notNull(),
+    amountMinor: bigint("amount_minor", { mode: "number" }).notNull(), // always positive.
+    currencyCode: varchar("currency_code", { length: 3 }).notNull(),
+    externalReference: varchar("external_reference", { length: 100 }),
+    rawDescription: text("raw_description"),
+    /// Hash of (bankCashAccountId, lineDate, direction, amountMinor,
+    /// externalReference-or-rawDescription) — duplicate-line detection
+    /// across DIFFERENT imports (§12). Never unique-constrained — two
+    /// genuinely distinct transactions can legitimately share every one
+    /// of those fields on the same day.
+    lineFingerprint: varchar("line_fingerprint", { length: 64 }).notNull(),
+    /// Denormalized cache — single source of truth is
+    /// bank_reconciliation_matches (§9); kept in sync by
+    /// BankReconciliationService inside the same transaction as every
+    /// match/undo/ignore write.
+    matchStatus: bankStatementLineMatchStatusEnum("match_status")
+      .notNull()
+      .default("UNMATCHED"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    check("bank_statement_lines_amount_positive", sql`${t.amountMinor} > 0`),
+    index("bank_statement_lines_import_idx").on(t.statementImportId),
+    index("bank_statement_lines_account_idx").on(t.bankCashAccountId),
+    index("bank_statement_lines_fingerprint_idx").on(
+      t.bankCashAccountId,
+      t.lineFingerprint,
+    ),
+  ],
+);
+
+export type BankStatementLine = typeof bankStatementLines.$inferSelect;
+export type NewBankStatementLine = typeof bankStatementLines.$inferInsert;
+
+export const bankReconciliationMatchTypeEnum = pgEnum(
+  "bank_reconciliation_match_type",
+  ["DETERMINISTIC_MATCH", "MANUAL"],
+  // NOT "EXACT" — the automatic tier allows a configurable date-tolerance
+  // window (§8), so "exact" would be technically misleading.
+  // "DETERMINISTIC_MATCH" names what is actually true of the tier:
+  // reproducible from the same inputs, never a guess. No AUTO_FUZZY value
+  // exists — no fuzzy/AI matching in MVP (§8).
+);
+export const bankReconciliationMatchStatusEnum = pgEnum(
+  "bank_reconciliation_match_status",
+  ["ACTIVE", "UNDONE"],
+);
+
+export const bankReconciliationMatches = pgTable(
+  "bank_reconciliation_matches",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id").notNull(),
+    legalEntityId: uuid("legal_entity_id").notNull(),
+    statementLineId: uuid("statement_line_id")
+      .notNull()
+      .references(() => bankStatementLines.id),
+    bankTransactionId: uuid("bank_transaction_id")
+      .notNull()
+      .references(() => bankTransactions.id), // deliberately NOT journal_entries/journal_lines — §8/§10.
+    /// Real, meaningful partial-matching support (§8/§9) — may be less
+    /// than either side's own amountMinor, but the SERVICE layer rejects
+    /// any insert that would push the sum of ACTIVE matches against
+    /// either the statement line OR the bank transaction above that
+    /// side's own amountMinor (over-allocation is a hard reject).
+    matchedAmountMinor: bigint("matched_amount_minor", {
+      mode: "number",
+    }).notNull(),
+    matchType: bankReconciliationMatchTypeEnum("match_type").notNull(),
+    status: bankReconciliationMatchStatusEnum("status")
+      .notNull()
+      .default("ACTIVE"),
+    matchedBy: uuid("matched_by"),
+    matchedAt: timestamp("matched_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    undoneBy: uuid("undone_by"),
+    undoneAt: timestamp("undone_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    check(
+      "bank_reconciliation_matches_amount_positive",
+      sql`${t.matchedAmountMinor} > 0`,
+    ),
+    index("bank_reconciliation_matches_line_idx").on(t.statementLineId),
+    index("bank_reconciliation_matches_bank_txn_idx").on(t.bankTransactionId),
+  ],
+);
+
+export type BankReconciliationMatch =
+  typeof bankReconciliationMatches.$inferSelect;
+export type NewBankReconciliationMatch =
+  typeof bankReconciliationMatches.$inferInsert;

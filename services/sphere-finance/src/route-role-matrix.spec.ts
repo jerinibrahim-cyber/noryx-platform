@@ -25,6 +25,7 @@ import { CustomerCreditNotesController } from "./accounts-receivable/customer-cr
 import { SupplierDebitNotesController } from "./accounts-payable/supplier-debit-notes/supplier-debit-notes.controller";
 import { BankCashAccountsController } from "./bank-cash-accounts/bank-cash-accounts.controller";
 import { BankTransactionsController } from "./bank-transactions/bank-transactions.controller";
+import { BankReconciliationController } from "./bank-reconciliation/bank-reconciliation.controller";
 
 /**
  * Milestone 3.2 — Route → Required-Role Matrix Hardening
@@ -53,10 +54,13 @@ import { BankTransactionsController } from "./bank-transactions/bank-transaction
  * CustomerCreditNotesController and SupplierDebitNotesController, and
  * for Banking-1a
  * (docs/finance-work-item-banking-cash-management-proposal.md §12/§20,
- * CTO-approved) to also discover BankCashAccountsController, and for
+ * CTO-approved) to also discover BankCashAccountsController, for
  * Banking-1b (docs/finance-work-item-banking-1b-proposal.md §11/§13,
- * CTO-approved) to also discover BankTransactionsController — this test
- * is repo-wide, not per-module, so a new controller must be added to
+ * CTO-approved) to also discover BankTransactionsController, and for
+ * Banking-1c (docs/finance-work-item-banking-1c-proposal.md §13,
+ * CTO-approved — implementation-authorization turn) to also discover
+ * BankReconciliationController — this test is repo-wide, not
+ * per-module, so a new controller must be added to
  * both the import list above and the `actual` array below, or its
  * routes simply go unverified.
  *
@@ -207,7 +211,11 @@ function role(
  * added per docs/finance-work-item-banking-cash-management-proposal.md
  * §12/§20, CTO-approved), plus Banking-1b's BankTransactionsController
  * (6 routes, added per docs/finance-work-item-banking-1b-proposal.md
- * §11/§13, CTO-approved), 90 routes total across 19 controllers.
+ * §11/§13, CTO-approved), plus Banking-1c's
+ * BankReconciliationController (13 routes, added per
+ * docs/finance-work-item-banking-1c-proposal.md §13, CTO-approved —
+ * implementation-authorization turn), 103 routes total across 20
+ * controllers.
  */
 const EXPECTED: DiscoveredRoute[] = [
   role("POST", "accounts", "AccountsController", ["finance.admin"]),
@@ -611,6 +619,82 @@ const EXPECTED: DiscoveredRoute[] = [
   role("POST", "bank-transactions/:id/post", "BankTransactionsController", [
     "finance.poster",
   ]),
+
+  // Banking-1c — docs/finance-work-item-banking-1c-proposal.md §13,
+  // CTO-approved (implementation-authorization turn). Same
+  // finance.poster-writes/any-role-reads split as
+  // BankTransactionsController/SupplierPaymentsController — a bank
+  // statement import is a transactional/posting-adjacent document (a
+  // PENDING->VALIDATED/FAILED import lifecycle plus a separate
+  // OPEN->COMPLETED reconciliation lifecycle), NOT master data like
+  // bank-cash-accounts itself.
+  role("POST", "bank-statement-imports", "BankReconciliationController", [
+    "finance.poster",
+  ]),
+  role("GET", "bank-statement-imports", "BankReconciliationController", [
+    "finance.viewer",
+    "finance.poster",
+    "finance.admin",
+  ]),
+  role("GET", "bank-statement-imports/:id", "BankReconciliationController", [
+    "finance.viewer",
+    "finance.poster",
+    "finance.admin",
+  ]),
+  role("PATCH", "bank-statement-imports/:id", "BankReconciliationController", [
+    "finance.poster",
+  ]),
+  role("DELETE", "bank-statement-imports/:id", "BankReconciliationController", [
+    "finance.poster",
+  ]),
+  role(
+    "POST",
+    "bank-statement-imports/:id/complete",
+    "BankReconciliationController",
+    ["finance.poster"],
+  ),
+  role(
+    "GET",
+    "bank-statement-imports/:id/lines",
+    "BankReconciliationController",
+    ["finance.viewer", "finance.poster", "finance.admin"],
+  ),
+  role(
+    "GET",
+    "bank-statement-imports/:id/lines/:lineId/suggestions",
+    "BankReconciliationController",
+    ["finance.viewer", "finance.poster", "finance.admin"],
+  ),
+  role(
+    "POST",
+    "bank-statement-imports/:id/lines/:lineId/ignore",
+    "BankReconciliationController",
+    ["finance.poster"],
+  ),
+  role(
+    "POST",
+    "bank-statement-imports/:id/lines/:lineId/create-bank-transaction",
+    "BankReconciliationController",
+    ["finance.poster"],
+  ),
+  role(
+    "GET",
+    "bank-statement-imports/:id/matches",
+    "BankReconciliationController",
+    ["finance.viewer", "finance.poster", "finance.admin"],
+  ),
+  role(
+    "POST",
+    "bank-statement-imports/:id/matches",
+    "BankReconciliationController",
+    ["finance.poster"],
+  ),
+  role(
+    "POST",
+    "bank-statement-imports/:id/matches/:matchId/undo",
+    "BankReconciliationController",
+    ["finance.poster"],
+  ),
 ];
 
 describe("Route → required-role matrix (sphere-finance)", () => {
@@ -634,11 +718,12 @@ describe("Route → required-role matrix (sphere-finance)", () => {
     ...discoverRoutes(SupplierDebitNotesController),
     ...discoverRoutes(BankCashAccountsController),
     ...discoverRoutes(BankTransactionsController),
+    ...discoverRoutes(BankReconciliationController),
   ];
   const actualByKey = new Map(actual.map((r) => [r.key, r]));
   const expectedByKey = new Map(EXPECTED.map((r) => [r.key, r]));
 
-  it("discovers exactly the expected number of routes across all nineteen controllers", () => {
+  it("discovers exactly the expected number of routes across all twenty controllers", () => {
     expect(actual).toHaveLength(EXPECTED.length);
   });
 
