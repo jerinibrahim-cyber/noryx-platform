@@ -1,7 +1,6 @@
 # Finance Work Item — Banking-1c: Bank Statement Import & Bank Reconciliation
 
-Status: **DISCOVERY / PROPOSAL — awaiting CTO approval. Nothing in this
-document has been implemented.**
+Status: **IMPLEMENTED — Banking-1c shipped in commit `0914de32033f6bc748688213edadda5a2f9b4378`. This document is retained as the approved design record for the implemented work item.**
 
 Baseline this proposal was written against: `HEAD` = `origin/main` =
 `6993993865352983fff2063d2d209a5f6916c9d0` (Banking-1b, merged/pushed).
@@ -1426,9 +1425,7 @@ later to add one.
 
 ## 20. Implementation Boundary
 
-**IN SCOPE** (subject to CTO approval and a subsequent, separate
-implementation-authorization turn — nothing here is authorized to be
-built yet):
+**IMPLEMENTED SCOPE** — the following scope was approved and shipped in Banking-1c commit `0914de32033f6bc748688213edadda5a2f9b4378`:
 
 - `bank_statement_imports`, `bank_statement_lines`,
   `bank_reconciliation_matches` tables, RLS, immutability triggers.
@@ -1590,10 +1587,7 @@ explicitly reserved, unimplemented roadmap scope this proposal's
 deterministic matching engine is a sound foundation for, not a
 prerequisite blocker.
 
-**Acceptance criteria** (illustrative, for whichever future turn
-receives implementation authorization — restated per CTO amendment to
-incorporate the corrected book-balance/matching-completeness/lifecycle
-semantics; supersedes the prior draft's list in full):
+**Acceptance criteria** — the following criteria define the implemented Banking-1c behavior and were verified during the shipped implementation:
 
 1. Importing a valid CSV file against a specific Bank/Cash Account
    creates exactly one `bank_statement_imports` header row and N
@@ -1665,9 +1659,8 @@ semantics; supersedes the prior draft's list in full):
     service-layer predicate (not RLS), consistent with the existing
     convention (§2, §13).
 
-**Implementation sequence** (for a future, separately-authorized
-implementation turn — not authorized by this document): schema +
-migration + RLS + immutability triggers → DTOs + DTO unit specs → CSV
+**Implementation sequence used for the shipped Banking-1c implementation:**
+schema + migration + RLS + immutability triggers → DTOs + DTO unit specs → CSV
 parse/validate service → matching-suggestion + confirm/undo service →
 create-from-line convenience → complete-reconciliation service →
 controller/module/AppModule wiring + route-role-matrix → e2e suite →
@@ -1677,18 +1670,34 @@ the identical sequence Banking-1a and Banking-1b both already followed.
 
 ---
 
-## STOP
+## Implementation Record
 
-This document is a proposal only. Per the discovery-gate instructions:
-no schema/migration/RLS/trigger file was created or modified; no source
-file under `src/` was created or modified; no test file was created or
-modified; `route-role-matrix.spec.ts` was not modified; no existing
-service was modified; `docs/roadmap.md` was not modified; nothing was
-committed; nothing was pushed. Verified via `git status` immediately
-below this document's completion — only this proposal document is
-new, and the two pre-existing standing hardening exceptions
-(`docs/finance-milestone-3.1-tenant-rls-hardening-proposal.md`,
-`docs/hardening/`) remain in their prior, unrelated state.
+This document is the approved design record for Banking-1c. The work item
+was subsequently implemented and shipped in commit
+`0914de32033f6bc748688213edadda5a2f9b4378`.
 
-Returning this proposal for CTO review. **Awaiting explicit approval
-before any Banking-1c implementation begins.**
+The implementation added the three statement/reconciliation tables,
+CSV_GENERIC import, deterministic and manual matching, partial matching,
+reconciliation completion gating, create-from-unmatched-line support,
+RLS, immutability triggers, RBAC routes, auditability, and the full
+Banking-1c e2e verification suite, while preserving the locked
+Banking-1a/1b architecture boundaries.
+
+Implementation verification recorded in the Banking-1c commit:
+
+- Unit suite: 464/464 passing.
+- Full e2e suite: 708/708 passing twice consecutively.
+- Route-role matrix: 108/108 passing.
+- Independent PostgreSQL verification of RLS, constraints,
+  immutability, and GL-derived book balance.
+- No changes to Banking-1a/1b posting paths, AP, AR, Journal Engine,
+  or GeneralLedgerService.
+
+The original proposal baseline of Banking-1b
+(`6993993865352983fff2063d2d209a5f6916c9d0`) is intentionally retained
+above as the historical design baseline. It is not the current repository
+HEAD.
+
+Any future changes to Banking-1c should be treated as a new change/review
+against the implemented architecture rather than as an unapproved
+proposal awaiting implementation.
