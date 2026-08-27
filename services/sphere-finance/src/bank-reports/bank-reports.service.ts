@@ -7,6 +7,8 @@ import {
   bankTransactions,
   chartOfAccounts,
   customerReceipts,
+  journalEntries,
+  journalLines,
   supplierPayments,
   type BankCashAccount,
   type ChartOfAccount,
@@ -39,8 +41,21 @@ export interface CashPositionResult {
   meta: CashPositionMeta;
 }
 
+/**
+ * `JOURNAL_ENTRY` — CTO correction (Banking-1d, post-implementation
+ * review): a POSTED journal entry that affects this account's GL balance
+ * but was not created by any of the three business documents above (not
+ * linked from a `bank_transactions`/`supplier_payments`/
+ * `customer_receipts` row). Most commonly a manual journal entry posted
+ * directly via the Journal Engine against the Bank/Cash GL account, but
+ * this file deliberately does not claim more provenance than that — see
+ * `getStatement`'s "other GL movements" section below for why.
+ */
 export type StatementLineType =
-  "BANK_TRANSACTION" | "SUPPLIER_PAYMENT" | "CUSTOMER_RECEIPT";
+  | "BANK_TRANSACTION"
+  | "SUPPLIER_PAYMENT"
+  | "CUSTOMER_RECEIPT"
+  | "JOURNAL_ENTRY";
 
 export interface BankStatementReportLine {
   type: StatementLineType;
@@ -52,6 +67,7 @@ export interface BankStatementReportLine {
   bankTransactionId?: string;
   supplierPaymentId?: string;
   customerReceiptId?: string;
+  journalEntryId?: string;
 }
 
 export interface BankCashAccountStatementMeta {
@@ -122,6 +138,25 @@ export interface UnreconciledTransactionsResult {
  * bank_reconciliation_matches/bank_statement_lines/supplier_payments/
  * customer_receipts/journal_lines, all already written correctly by
  * Banking-1a/1b/1c/AP/AR.
+ *
+ * STATEMENT GL-COMPLETENESS (CTO correction, post-implementation review):
+ * `getStatement`'s displayed movement universe was originally exactly
+ * Bank Transactions + Supplier Payments + Customer Receipts — but the
+ * Bank/Cash GL account can be affected by ANY POSTED journal entry,
+ * including one posted directly via the Journal Engine (a manual
+ * journal), which none of those three sources would ever surface. Left
+ * uncorrected, `openingBalanceMinor + Σ(displayed movements)` was not
+ * guaranteed to equal `closingBalanceMinor` (the account's true GL
+ * balance) whenever such an entry existed. The fix does NOT touch GL
+ * authority, does NOT add a posting path, and does NOT invent a fake
+ * bank transaction for a manual journal: it surfaces the remainder —
+ * every POSTED journal_lines row against this account's glAccountId, in
+ * range, not already linked from one of the three business documents —
+ * as its own `JOURNAL_ENTRY` line (see `StatementLineType` above). This
+ * restores the invariant by construction: the "other movements" query is
+ * defined as the exact complement, within the same universe
+ * `glBookBalance` sums, of what the three business sources already
+ * display.
  */
 @Injectable()
 export class BankReportsService {
@@ -227,6 +262,12 @@ export class BankReportsService {
         }
         const unsorted: Unsorted[] = [];
 
+        // Journal entries already represented by one of the three
+        // business sources below — populated as each source's loop
+        // builds its rows, consumed by the "other GL movements" section
+        // (JOURNAL_ENTRY rows, GL-completeness correction) after them.
+        const representedJournalEntryIds = new Set<string>();
+
         // Bank Transactions (Banking-1b) — either leg, POSTED only.
         // Direction per the schema's own documented convention:
         // DEPOSIT/INTEREST = inflow; WITHDRAWAL/FEE = outflow; TRANSFER =
@@ -250,6 +291,9 @@ export class BankReportsService {
           const isCounterpartyLeg =
             btx.counterpartyBankCashAccountId === bankCashAccountId;
           if (!isPrimaryLeg && !isCounterpartyLeg) continue;
+          if (btx.journalEntryId) {
+            representedJournalEntryIds.add(btx.journalEntryId);
+          }
 
           let amountMinor: number;
           if (btx.type === "TRANSFER") {
@@ -292,6 +336,9 @@ export class BankReportsService {
           .from(supplierPayments)
           .where(and(...paymentConditions));
         for (const p of payments) {
+          if (p.journalEntryId) {
+            representedJournalEntryIds.add(p.journalEntryId);
+          }
           unsorted.push({
             sortDate: p.paymentDate,
             sortRef: p.internalReference ?? "",
@@ -323,6 +370,9 @@ export class BankReportsService {
           .from(customerReceipts)
           .where(and(...receiptConditions));
         for (const r of receipts) {
+          if (r.journalEntryId) {
+            representedJournalEntryIds.add(r.journalEntryId);
+          }
           unsorted.push({
             sortDate: r.receiptDate,
             sortRef: r.internalReference ?? "",
@@ -337,12 +387,99 @@ export class BankReportsService {
           });
         }
 
+        // Other POSTED GL movements against this account (GL-completeness
+        // correction, class doc comment above) — every journal_lines row
+        // against account.glAccountId, POSTED, in range, whose parent
+        // journal entry is NOT already linked from one of the three
+        // business sources above. Grouped and net-summed per journal
+        // entry (a single manual entry may carry more than one line
+        // against this same account), so this section contributes
+        // exactly the complement `glBookBalance` would otherwise miss.
+        const glAccountType = await this.chartOfAccountType(
+          tx,
+          account.glAccountId,
+        );
+        const sign = this.signFor(glAccountType);
+        const journalConditions = [
+          eq(journalLines.tenantId, tenantId),
+          eq(journalLines.accountId, account.glAccountId),
+          eq(journalEntries.tenantId, tenantId),
+          eq(journalEntries.legalEntityId, legalEntityId),
+          eq(journalEntries.status, "POSTED"),
+          lte(journalEntries.transactionDate, dateTo),
+        ];
+        if (dateFrom) {
+          journalConditions.push(gte(journalEntries.transactionDate, dateFrom));
+        }
+        const otherJournalRows = await tx
+          .select({
+            journalEntryId: journalEntries.id,
+            journalNumber: journalEntries.journalNumber,
+            transactionDate: journalEntries.transactionDate,
+            memo: journalEntries.memo,
+            lineDescription: journalLines.description,
+            debitMinor: journalLines.debitMinor,
+            creditMinor: journalLines.creditMinor,
+          })
+          .from(journalLines)
+          .innerJoin(
+            journalEntries,
+            eq(journalLines.journalEntryId, journalEntries.id),
+          )
+          .where(and(...journalConditions));
+
+        interface OtherJournalAgg {
+          transactionDate: string;
+          journalNumber: string | null;
+          memo: string | null;
+          lineDescription: string | null;
+          netMinor: number;
+        }
+        const otherByEntry = new Map<string, OtherJournalAgg>();
+        for (const row of otherJournalRows) {
+          if (representedJournalEntryIds.has(row.journalEntryId)) continue;
+          const net = sign * (row.debitMinor - row.creditMinor);
+          const existing = otherByEntry.get(row.journalEntryId);
+          if (existing) {
+            existing.netMinor += net;
+          } else {
+            otherByEntry.set(row.journalEntryId, {
+              transactionDate: row.transactionDate,
+              journalNumber: row.journalNumber,
+              memo: row.memo,
+              lineDescription: row.lineDescription,
+              netMinor: net,
+            });
+          }
+        }
+        for (const [journalEntryId, agg] of otherByEntry) {
+          // A journal entry can legitimately net to zero against THIS
+          // account (e.g. two equal-and-opposite lines both hitting it) —
+          // nothing to display, and it correctly contributes nothing to
+          // the balance either way.
+          if (agg.netMinor === 0) continue;
+          unsorted.push({
+            sortDate: agg.transactionDate,
+            sortRef: agg.journalNumber ?? "",
+            line: {
+              type: "JOURNAL_ENTRY",
+              date: agg.transactionDate,
+              reference: agg.journalNumber,
+              description: agg.memo ?? agg.lineDescription ?? "Journal entry",
+              amountMinor: agg.netMinor,
+              journalEntryId,
+            },
+          });
+        }
+
         // Chronological order, tie-broken by reference — BTX-/PAY-/RCT-
         // prefixes never collide; within one prefix, fixed-width
         // zero-padded numbering (each document type's own numbering
         // convention) keeps lexicographic order equal to numeric order —
         // the same reasoning AR-1d/AP-1d's own statement sort already
-        // documents.
+        // documents. A JOURNAL_ENTRY row sorts by its own journalNumber
+        // (e.g. "JE-000123" or a manual-entry number), which never
+        // collides with the other three prefixes either.
         unsorted.sort((a, b) => {
           if (a.sortDate !== b.sortDate)
             return a.sortDate < b.sortDate ? -1 : 1;
@@ -607,14 +744,7 @@ export class BankReportsService {
     asOf: string,
     strict: boolean = false,
   ): Promise<number> {
-    const [account] = await tx
-      .select({ type: chartOfAccounts.type })
-      .from(chartOfAccounts)
-      .where(eq(chartOfAccounts.id, accountId))
-      .limit(1);
-    if (!account) {
-      throw new NotFoundException(`No GL account found with id ${accountId}.`);
-    }
+    const accountType = await this.chartOfAccountType(tx, accountId);
     const cmp = strict ? sql`<` : sql`<=`;
     const rows = (await tx.execute(sql`
       SELECT
@@ -631,8 +761,27 @@ export class BankReportsService {
     `)) as unknown as Array<{ raw_debit: unknown; raw_credit: unknown }>;
     const rawDebit = this.toNumber(rows[0]?.raw_debit);
     const rawCredit = this.toNumber(rows[0]?.raw_credit);
-    const sign = this.signFor(account.type);
+    const sign = this.signFor(accountType);
     return sign * (rawDebit - rawCredit);
+  }
+
+  /** A GL account's normal-balance type, looked up once. Shared by
+   * `glBookBalance` and `getStatement`'s "other GL movements" section —
+   * both need the same sign to turn a raw debit/credit into a signed
+   * balance movement. */
+  private async chartOfAccountType(
+    tx: TxClient,
+    accountId: string,
+  ): Promise<ChartOfAccount["type"]> {
+    const [account] = await tx
+      .select({ type: chartOfAccounts.type })
+      .from(chartOfAccounts)
+      .where(eq(chartOfAccounts.id, accountId))
+      .limit(1);
+    if (!account) {
+      throw new NotFoundException(`No GL account found with id ${accountId}.`);
+    }
+    return account.type;
   }
 
   /** Duplicated from GeneralLedgerService.signFor — see this file's top

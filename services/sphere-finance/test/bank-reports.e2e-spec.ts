@@ -34,7 +34,10 @@ import { AllExceptionsFilter } from "../src/common/filters/all-exceptions.filter
  * currency subtotaling, includeInactive filtering, the Statement's
  * three-source union (Bank Transactions + Supplier Payments + Customer
  * Receipts) with correct signs and a running balance that reconciles to
- * GL, TRANSFER double-leg signing, Unreconciled Transactions' leg-scoped
+ * GL, the GL-completeness correction (a manual Journal Entry surfaced as
+ * its own JOURNAL_ENTRY row so the invariant holds even when the GL
+ * account is touched outside all three business sources), TRANSFER
+ * double-leg signing, Unreconciled Transactions' leg-scoped
  * remaining-amount computation (including the TRANSFER double-leg case),
  * RBAC, and tenant/legal-entity isolation. Runs against a real Postgres
  * instance — no mocking of accounting behavior.
@@ -646,6 +649,101 @@ describe("Bank & Cash Reporting (e2e) — Banking-1d", () => {
         .expect(200);
       expect(toStmt.body.data).toHaveLength(1);
       expect(toStmt.body.data[0].amountMinor).toBe(300);
+    });
+
+    it("surfaces a manual Journal Entry (not created by any business document) as its own JOURNAL_ENTRY row, keeping the running/closing balance equal to the authoritative GL balance", async () => {
+      // CTO correction regression test (post-1D-implementation review):
+      // proves the GL-completeness invariant
+      //   opening GL balance + every displayed book-side movement = closing GL balance
+      // holds even when a POSTED journal entry affects this account's GL
+      // balance without going through bank_transactions/
+      // supplier_payments/customer_receipts at all.
+      const poster = tokenFor(tenantAId, legalEntityA1Id, ["finance.poster"]);
+      const account = await freshBankCashAccount(
+        tenantAId,
+        legalEntityA1Id,
+        "STMTJE",
+      );
+
+      // Opening balance (5000), dated BEFORE the requested window.
+      await postBankTransaction(poster, {
+        type: "DEPOSIT",
+        transactionDate: "2026-08-01",
+        amountMinor: 5000,
+        bankCashAccountId: account.id,
+        glAccountId: liabilityA1Id,
+      });
+
+      // Within the window: a normal Bank Transaction (+300)...
+      await postBankTransaction(poster, {
+        type: "DEPOSIT",
+        transactionDate: "2026-08-11",
+        amountMinor: 300,
+        bankCashAccountId: account.id,
+        glAccountId: liabilityA1Id,
+      });
+      // ...and a manual journal entry posted directly against the
+      // account's own GL account (-150), bypassing bank_transactions/
+      // supplier_payments/customer_receipts entirely — the exact failure
+      // scenario the CTO's finding described.
+      await postManualJournalBypassingBankTransactions(
+        tenantAId,
+        legalEntityA1Id,
+        openPeriodA1Id,
+        liabilityA1Id,
+        account.glAccountId,
+        150,
+        "2026-08-12",
+      );
+
+      const res = await request(app.getHttpServer())
+        .get(
+          `/v1/finance/bank-cash-accounts/${account.id}/statement?dateFrom=2026-08-10&dateTo=2026-08-31`,
+        )
+        .set("Authorization", `Bearer ${poster}`)
+        .expect(200);
+
+      const rows = res.body.data as Array<{
+        type: string;
+        amountMinor: number;
+        runningBalanceMinor: number;
+        reference: string | null;
+        description: string | null;
+        journalEntryId?: string;
+        bankTransactionId?: string;
+      }>;
+      expect(rows.map((r) => r.type)).toEqual([
+        "BANK_TRANSACTION",
+        "JOURNAL_ENTRY",
+      ]);
+      expect(rows[0]!.amountMinor).toBe(300);
+      expect(rows[1]!.amountMinor).toBe(-150);
+
+      // The manual journal is represented honestly — its own journal
+      // reference/memo, never a fabricated bank_transaction.
+      expect(rows[1]!.journalEntryId).toBeDefined();
+      expect(rows[1]!.bankTransactionId).toBeUndefined();
+      expect(rows[1]!.reference).toMatch(/^MANUAL-/);
+      expect(rows[1]!.description).toBe(
+        "AP/AR-bypass simulation (manual journal, no bank_transactions row)",
+      );
+
+      expect(res.body.meta.openingBalanceMinor).toBe(5000);
+      expect(rows[0]!.runningBalanceMinor).toBe(5300);
+      expect(rows[1]!.runningBalanceMinor).toBe(5150);
+      expect(res.body.meta.closingBalanceMinor).toBe(5150);
+
+      // Reconciles against the existing, unmodified GL balance endpoint —
+      // never a second authority.
+      const glBalance = await request(app.getHttpServer())
+        .get(
+          `/v1/finance/accounts/${account.glAccountId}/balance?asOf=2026-08-31`,
+        )
+        .set("Authorization", `Bearer ${poster}`)
+        .expect(200);
+      expect(res.body.meta.closingBalanceMinor).toBe(
+        glBalance.body.data.closingBalanceMinor,
+      );
     });
 
     it("404s for a Bank/Cash Account that does not exist in this legal entity", async () => {
