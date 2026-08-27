@@ -1715,3 +1715,116 @@ export type SupplierDebitNoteAllocation =
   typeof supplierDebitNoteAllocations.$inferSelect;
 export type NewSupplierDebitNoteAllocation =
   typeof supplierDebitNoteAllocations.$inferInsert;
+
+// ---------------------------------------------------------------------------
+// Banking-1a — Bank/Cash Account Master.
+// docs/finance-work-item-banking-cash-management-proposal.md §8.1,
+// CTO-approved (Banking-1a scope only — Banking-1b/1c are design-only in
+// that proposal, not implemented here).
+//
+// Bank/Cash Account is master data, the same kind as chart_of_accounts /
+// customers / suppliers / ap_settings / ar_settings — NOT a
+// DRAFT/POSTED-lifecycle document like invoices/bills/payments/receipts/
+// credit-debit notes. It has no immutability trigger (none of those five
+// master-data tables has one either) and no journalEntryId/periodId —
+// creating or editing a Bank/Cash Account never posts anything.
+//
+// The `bankCashAccountId` columns already on supplier_payments and
+// customer_receipts are untouched by this table and remain plain
+// chart_of_accounts references, exactly as before (proposal §9, §17 — no
+// ALTER of either table). A Bank/Cash Account is resolved for an existing
+// payment/receipt purely by joining on
+// bank_cash_accounts.glAccountId = supplier_payments.bankCashAccountId (or
+// customerReceipts' own column) — additive, no backfill, no schema change
+// to either table.
+//
+// Same conventions as every table above: no Postgres FK to db-core's
+// tenants/legal_entities (cross-service boundary); real FK to
+// chart_of_accounts (Finance's own table, same migration lifecycle); RLS
+// is tenant_id-only, legal_entity_id isolation is an explicit
+// service-layer predicate on every query (BankCashAccountsService).
+// ---------------------------------------------------------------------------
+
+export const bankCashAccountKindEnum = pgEnum("bank_cash_account_kind", [
+  "BANK",
+  "CASH",
+]);
+
+export const bankCashAccounts = pgTable(
+  "bank_cash_accounts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id").notNull(),
+    legalEntityId: uuid("legal_entity_id").notNull(),
+    /// Same short-internal-code convention as chart_of_accounts.code /
+    /// suppliers.code / customers.code — not editable after creation,
+    /// identical posture to suppliers.code.
+    code: varchar("code", { length: 32 }).notNull(),
+    name: varchar("name", { length: 255 }).notNull(),
+    /// BANK vs CASH — needed because a CASH account (petty cash, a
+    /// till) has no external bank statement to reconcile against, and
+    /// because the proposal's POS/UPI/card future-integration boundary
+    /// (§15) anticipates a payment-provider settlement account being
+    /// modeled as a BANK-kind row later, with no schema change. Not
+    /// otherwise consumed by any logic in Banking-1a itself.
+    kind: bankCashAccountKindEnum("kind").notNull(),
+    /// Exactly one GL account per Bank/Cash Account (proposal §9, "Q2"
+    /// and "Q3") — validated ACTIVE + type ASSET at create/edit time
+    /// only (BankCashAccountsService.validateGlAccountOrThrow). Reads
+    /// deliberately do NOT re-check the linked account's active state —
+    /// a historical Bank/Cash Account must stay readable/listable even
+    /// after its GL account is later deactivated (locked CTO
+    /// correction). Real FK: chart_of_accounts is Finance's own table,
+    /// same migration lifecycle.
+    glAccountId: uuid("gl_account_id")
+      .notNull()
+      .references(() => chartOfAccounts.id),
+    /// Resolved from the legal entity's functional currency at
+    /// creation — never client-supplied, identical posture to every
+    /// other currencyCode column in this schema (journal_entries,
+    /// customer_invoices, supplier_bills, customer_receipts, ...). No
+    /// FX/multi-currency (proposal §11) — a Bank/Cash Account's currency
+    /// can never differ from its legal entity's single functional
+    /// currency today.
+    currencyCode: varchar("currency_code", { length: 3 }).notNull(),
+    /// Free text, no format validation — same posture as
+    /// supplierBills.supplierBillNumber / customerReceipts.reference.
+    /// Only meaningful when kind = BANK; not DB-enforced (proposal §8.1
+    /// — no separate "financial institution" entity, no evidence for
+    /// one).
+    bankName: varchar("bank_name", { length: 255 }),
+    /// Free text, no format validation, no real account number stored
+    /// (e.g. last 4 digits / IBAN tail only) — same "no format
+    /// validation" posture as bankName above.
+    maskedAccountNumber: varchar("masked_account_number", { length: 50 }),
+    isActive: boolean("is_active").notNull().default(true),
+    createdBy: uuid("created_by"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    unique("bank_cash_accounts_tenant_entity_code_unique").on(
+      t.tenantId,
+      t.legalEntityId,
+      t.code,
+    ),
+    /// The one genuinely new invariant this work item introduces
+    /// (proposal §8.1, §9 "Q2"): a GL account may back at most one
+    /// Bank/Cash Account, enforced as a real DB constraint — the race
+    /// closer behind BankCashAccountsService's own friendly pre-check,
+    /// same "friendly check + DB constraint" pattern as
+    /// accounting_periods' own overlap-exclusion constraint.
+    unique("bank_cash_accounts_gl_account_unique").on(t.glAccountId),
+    index("bank_cash_accounts_tenant_entity_idx").on(
+      t.tenantId,
+      t.legalEntityId,
+    ),
+  ],
+);
+
+export type BankCashAccount = typeof bankCashAccounts.$inferSelect;
+export type NewBankCashAccount = typeof bankCashAccounts.$inferInsert;

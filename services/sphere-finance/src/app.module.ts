@@ -8,6 +8,7 @@ import { GeneralLedgerModule } from "./general-ledger/general-ledger.module";
 import { FinancialStatementsModule } from "./financial-statements/financial-statements.module";
 import { AccountsPayableModule } from "./accounts-payable/accounts-payable.module";
 import { AccountsReceivableModule } from "./accounts-receivable/accounts-receivable.module";
+import { BankCashAccountsModule } from "./bank-cash-accounts/bank-cash-accounts.module";
 import { HealthController } from "./health/health.controller";
 import { TenantContextMiddleware } from "./tenant/tenant-context.middleware";
 
@@ -39,6 +40,16 @@ import { TenantContextMiddleware } from "./tenant/tenant-context.middleware";
     // touches none of the modules above — sibling of AccountsPayableModule,
     // not nested inside it.
     AccountsReceivableModule,
+    // Banking-1a — Bank/Cash Account Master.
+    // docs/finance-work-item-banking-cash-management-proposal.md §13,
+    // CTO-approved (Banking-1a scope only). A top-level sibling of
+    // AccountsPayableModule/AccountsReceivableModule, NOT nested inside
+    // either — Banking is its own domain that both will eventually read
+    // from (a Bank/Cash Account is resolved for an existing payment/
+    // receipt via a read-side join, not a dependency in either
+    // direction). Reads/writes its own new table only; touches none of
+    // the modules above.
+    BankCashAccountsModule,
     // Scoped registration so TenantContextMiddleware can inject JwtService
     // without importing AccountsModule's other providers — same pattern as
     // services/identity/src/app.module.ts.

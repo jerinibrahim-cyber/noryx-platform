@@ -85,6 +85,13 @@
       "when": 1787788251127,
       "tag": "0011_real_abomination",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1787819967106,
+      "tag": "0012_sweet_maddog",
+      "breakpoints": true
     }
   ]
 }

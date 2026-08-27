@@ -23,6 +23,7 @@ import { CustomerReceiptsController } from "./accounts-receivable/customer-recei
 import { ArReportsController } from "./accounts-receivable/ar-reports/ar-reports.controller";
 import { CustomerCreditNotesController } from "./accounts-receivable/customer-credit-notes/customer-credit-notes.controller";
 import { SupplierDebitNotesController } from "./accounts-payable/supplier-debit-notes/supplier-debit-notes.controller";
+import { BankCashAccountsController } from "./bank-cash-accounts/bank-cash-accounts.controller";
 
 /**
  * Milestone 3.2 — Route → Required-Role Matrix Hardening
@@ -48,10 +49,13 @@ import { SupplierDebitNotesController } from "./accounts-payable/supplier-debit-
  * discover ArReportsController, and for the Credit/Debit Notes work
  * item (docs/finance-work-item-credit-debit-notes-proposal.md
  * §12/§13, CTO-approved) to also discover
- * CustomerCreditNotesController and SupplierDebitNotesController —
- * this test is repo-wide, not per-module, so a new controller must be
- * added to both the import list above and the `actual` array below,
- * or its routes simply go unverified.
+ * CustomerCreditNotesController and SupplierDebitNotesController, and
+ * for Banking-1a
+ * (docs/finance-work-item-banking-cash-management-proposal.md §12/§20,
+ * CTO-approved) to also discover BankCashAccountsController — this test
+ * is repo-wide, not per-module, so a new controller must be added to
+ * both the import list above and the `actual` array below, or its
+ * routes simply go unverified.
  *
  * Every route here is authenticated (JwtAuthGuard) AND role-restricted
  * (RolesGuard + a non-empty @Roles() list) — this service has no public
@@ -196,7 +200,9 @@ function role(
  * the Credit/Debit Notes work item's CustomerCreditNotesController and
  * SupplierDebitNotesController (6 routes each, added per
  * docs/finance-work-item-credit-debit-notes-proposal.md §12/§13,
- * CTO-approved), 78 routes total across 17 controllers.
+ * CTO-approved), plus Banking-1a's BankCashAccountsController (6 routes,
+ * added per docs/finance-work-item-banking-cash-management-proposal.md
+ * §12/§20, CTO-approved), 84 routes total across 18 controllers.
  */
 const EXPECTED: DiscoveredRoute[] = [
   role("POST", "accounts", "AccountsController", ["finance.admin"]),
@@ -532,6 +538,44 @@ const EXPECTED: DiscoveredRoute[] = [
   role("POST", "debit-notes/:id/post", "SupplierDebitNotesController", [
     "finance.poster",
   ]),
+
+  // Banking-1a — docs/finance-work-item-banking-cash-management-
+  // proposal.md §12/§20, CTO-approved. Same finance.admin-writes/
+  // any-role-reads split as SuppliersController/CustomersController —
+  // Bank/Cash Account is master data of the same kind (not a
+  // transactional/posting document like payments/receipts/credit-debit
+  // notes), and a finance.poster needs to read this list to select a
+  // Bank/Cash Account operationally, same as it already reads
+  // suppliers/customers. No DELETE route exists (master data with a
+  // create/read/update/deactivate/reactivate lifecycle only).
+  role("POST", "bank-cash-accounts", "BankCashAccountsController", [
+    "finance.admin",
+  ]),
+  role("GET", "bank-cash-accounts", "BankCashAccountsController", [
+    "finance.viewer",
+    "finance.poster",
+    "finance.admin",
+  ]),
+  role("GET", "bank-cash-accounts/:id", "BankCashAccountsController", [
+    "finance.viewer",
+    "finance.poster",
+    "finance.admin",
+  ]),
+  role("PATCH", "bank-cash-accounts/:id", "BankCashAccountsController", [
+    "finance.admin",
+  ]),
+  role(
+    "PATCH",
+    "bank-cash-accounts/:id/deactivate",
+    "BankCashAccountsController",
+    ["finance.admin"],
+  ),
+  role(
+    "PATCH",
+    "bank-cash-accounts/:id/reactivate",
+    "BankCashAccountsController",
+    ["finance.admin"],
+  ),
 ];
 
 describe("Route → required-role matrix (sphere-finance)", () => {
@@ -553,11 +597,12 @@ describe("Route → required-role matrix (sphere-finance)", () => {
     ...discoverRoutes(ArReportsController),
     ...discoverRoutes(CustomerCreditNotesController),
     ...discoverRoutes(SupplierDebitNotesController),
+    ...discoverRoutes(BankCashAccountsController),
   ];
   const actualByKey = new Map(actual.map((r) => [r.key, r]));
   const expectedByKey = new Map(EXPECTED.map((r) => [r.key, r]));
 
-  it("discovers exactly the expected number of routes across all seventeen controllers", () => {
+  it("discovers exactly the expected number of routes across all eighteen controllers", () => {
     expect(actual).toHaveLength(EXPECTED.length);
   });
 
