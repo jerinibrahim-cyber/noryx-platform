@@ -24,6 +24,7 @@ import { ArReportsController } from "./accounts-receivable/ar-reports/ar-reports
 import { CustomerCreditNotesController } from "./accounts-receivable/customer-credit-notes/customer-credit-notes.controller";
 import { SupplierDebitNotesController } from "./accounts-payable/supplier-debit-notes/supplier-debit-notes.controller";
 import { BankCashAccountsController } from "./bank-cash-accounts/bank-cash-accounts.controller";
+import { BankTransactionsController } from "./bank-transactions/bank-transactions.controller";
 
 /**
  * Milestone 3.2 — Route → Required-Role Matrix Hardening
@@ -52,7 +53,9 @@ import { BankCashAccountsController } from "./bank-cash-accounts/bank-cash-accou
  * CustomerCreditNotesController and SupplierDebitNotesController, and
  * for Banking-1a
  * (docs/finance-work-item-banking-cash-management-proposal.md §12/§20,
- * CTO-approved) to also discover BankCashAccountsController — this test
+ * CTO-approved) to also discover BankCashAccountsController, and for
+ * Banking-1b (docs/finance-work-item-banking-1b-proposal.md §11/§13,
+ * CTO-approved) to also discover BankTransactionsController — this test
  * is repo-wide, not per-module, so a new controller must be added to
  * both the import list above and the `actual` array below, or its
  * routes simply go unverified.
@@ -202,7 +205,9 @@ function role(
  * docs/finance-work-item-credit-debit-notes-proposal.md §12/§13,
  * CTO-approved), plus Banking-1a's BankCashAccountsController (6 routes,
  * added per docs/finance-work-item-banking-cash-management-proposal.md
- * §12/§20, CTO-approved), 84 routes total across 18 controllers.
+ * §12/§20, CTO-approved), plus Banking-1b's BankTransactionsController
+ * (6 routes, added per docs/finance-work-item-banking-1b-proposal.md
+ * §11/§13, CTO-approved), 90 routes total across 19 controllers.
  */
 const EXPECTED: DiscoveredRoute[] = [
   role("POST", "accounts", "AccountsController", ["finance.admin"]),
@@ -576,6 +581,36 @@ const EXPECTED: DiscoveredRoute[] = [
     "BankCashAccountsController",
     ["finance.admin"],
   ),
+
+  // Banking-1b — docs/finance-work-item-banking-1b-proposal.md §11/§13,
+  // CTO-approved. Same finance.poster-writes/any-role-reads split as
+  // SupplierPaymentsController/CustomerReceiptsController — Bank
+  // Transaction is a transactional/posting document (DRAFT->POSTED,
+  // posts a journal entry), NOT master data like bank-cash-accounts
+  // itself, so it does NOT mirror BankCashAccountsController's
+  // finance.admin-only-writes split.
+  role("POST", "bank-transactions", "BankTransactionsController", [
+    "finance.poster",
+  ]),
+  role("GET", "bank-transactions", "BankTransactionsController", [
+    "finance.viewer",
+    "finance.poster",
+    "finance.admin",
+  ]),
+  role("GET", "bank-transactions/:id", "BankTransactionsController", [
+    "finance.viewer",
+    "finance.poster",
+    "finance.admin",
+  ]),
+  role("PATCH", "bank-transactions/:id", "BankTransactionsController", [
+    "finance.poster",
+  ]),
+  role("DELETE", "bank-transactions/:id", "BankTransactionsController", [
+    "finance.poster",
+  ]),
+  role("POST", "bank-transactions/:id/post", "BankTransactionsController", [
+    "finance.poster",
+  ]),
 ];
 
 describe("Route → required-role matrix (sphere-finance)", () => {
@@ -598,11 +633,12 @@ describe("Route → required-role matrix (sphere-finance)", () => {
     ...discoverRoutes(CustomerCreditNotesController),
     ...discoverRoutes(SupplierDebitNotesController),
     ...discoverRoutes(BankCashAccountsController),
+    ...discoverRoutes(BankTransactionsController),
   ];
   const actualByKey = new Map(actual.map((r) => [r.key, r]));
   const expectedByKey = new Map(EXPECTED.map((r) => [r.key, r]));
 
-  it("discovers exactly the expected number of routes across all eighteen controllers", () => {
+  it("discovers exactly the expected number of routes across all nineteen controllers", () => {
     expect(actual).toHaveLength(EXPECTED.length);
   });
 

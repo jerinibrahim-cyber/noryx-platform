@@ -9,6 +9,7 @@ import { FinancialStatementsModule } from "./financial-statements/financial-stat
 import { AccountsPayableModule } from "./accounts-payable/accounts-payable.module";
 import { AccountsReceivableModule } from "./accounts-receivable/accounts-receivable.module";
 import { BankCashAccountsModule } from "./bank-cash-accounts/bank-cash-accounts.module";
+import { BankTransactionsModule } from "./bank-transactions/bank-transactions.module";
 import { HealthController } from "./health/health.controller";
 import { TenantContextMiddleware } from "./tenant/tenant-context.middleware";
 
@@ -50,6 +51,18 @@ import { TenantContextMiddleware } from "./tenant/tenant-context.middleware";
     // direction). Reads/writes its own new table only; touches none of
     // the modules above.
     BankCashAccountsModule,
+    // Banking-1b — Bank Transactions.
+    // docs/finance-work-item-banking-1b-proposal.md §13, CTO-approved
+    // (Banking-1b scope only — Banking-1c/statement import/reconciliation
+    // are not implemented here). A top-level sibling of
+    // BankCashAccountsModule, not nested inside it — mirrors how
+    // AccountsPayableModule/AccountsReceivableModule are siblings of the
+    // Accounting Core modules, not children of one another. Reads/writes
+    // its own new table only (bank_transactions), plus the shared
+    // journal_entries/journal_lines/journal_number_counters tables every
+    // posting sub-ledger already writes into; touches none of the
+    // modules above.
+    BankTransactionsModule,
     // Scoped registration so TenantContextMiddleware can inject JwtService
     // without importing AccountsModule's other providers — same pattern as
     // services/identity/src/app.module.ts.

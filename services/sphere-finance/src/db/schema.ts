@@ -1828,3 +1828,180 @@ export const bankCashAccounts = pgTable(
 
 export type BankCashAccount = typeof bankCashAccounts.$inferSelect;
 export type NewBankCashAccount = typeof bankCashAccounts.$inferInsert;
+
+// ---------------------------------------------------------------------------
+// Banking-1b — Bank Transactions.
+// docs/finance-work-item-banking-1b-proposal.md §6, CTO-approved
+// (Banking-1b scope only — Banking-1c/statement import/reconciliation are
+// not implemented here).
+//
+// Bank Transaction is a DOCUMENT — the exact DRAFT->POSTED lifecycle and
+// zero-exception immutability convention every other posted document in
+// this schema uses (supplier_payments, customer_receipts, ...), NOT
+// master data like bank_cash_accounts itself. Posting does NOT call
+// JournalEntriesService — it replicates the identical discipline every
+// sub-ledger already uses directly against journal_entries/journal_lines/
+// journal_number_counters, inside its own transaction (proposal §8).
+//
+// bankCashAccountId/counterpartyBankCashAccountId are real FKs to
+// bank_cash_accounts.id (NOT chart_of_accounts) — Banking-1b is the first
+// real consumer of Banking-1a's master entity, a brand-new table with no
+// historical-compatibility constraint (unlike supplier_payments/
+// customer_receipts, whose own bankCashAccountId->chart_of_accounts
+// relationship is deliberately left untouched, proposal §2.3/§19 item 5
+// of the original Banking proposal — carried forward unchanged here).
+//
+// Two CHECK constraints enforce the "don't conflate concepts merely
+// because they move money" shape (proposal §6.1): TRANSFER has exactly
+// two bank/cash legs and no external GL leg; every other type has exactly
+// one bank/cash leg and one external GL leg. glAccountId type validation
+// (FEE->EXPENSE, INTEREST->REVENUE, DEPOSIT/WITHDRAWAL->ASSET/LIABILITY/
+// EQUITY) is service-layer only (proposal §6.2, §19 item 5) — no DB CHECK
+// on chart_of_accounts.type from this table, matching how every other
+// GL-account-type validation in this codebase is service-layer, not DB
+// CHECK (e.g. supplierPayments/customerReceipts' own ASSET-type check).
+//
+// No bank_transaction_lines child table — a Bank Transaction is always
+// exactly a 2-line journal entry, same posture as supplier_payments/
+// customer_receipts (which also have no "lines" table).
+//
+// Same conventions as every table above: no Postgres FK to db-core's
+// tenants/legal_entities (cross-service boundary); real FKs to Finance's
+// own tables (bank_cash_accounts, chart_of_accounts, journal_entries,
+// accounting_periods — same migration lifecycle); RLS is tenant_id-only,
+// legal_entity_id isolation is an explicit service-layer predicate on
+// every query (BankTransactionsService).
+// ---------------------------------------------------------------------------
+
+/// Race-free transaction-numbering allocation, structurally identical to
+/// every other document's own {prefix}_number_counters table — a
+/// SEPARATE table from journal_number_counters and every other document
+/// type's counter (proposal §2.5/§15); bank transactions must never
+/// contend with bills/payments/invoices/receipts/credit-debit-notes for
+/// the same sequence, and their number format differs (BTX-NNNNNN).
+export const bankTransactionNumberCounters = pgTable(
+  "bank_transaction_number_counters",
+  {
+    tenantId: uuid("tenant_id").notNull(),
+    legalEntityId: uuid("legal_entity_id").notNull(),
+    lastAssignedNumber: integer("last_assigned_number").notNull().default(0),
+  },
+  (t) => [primaryKey({ columns: [t.tenantId, t.legalEntityId] })],
+);
+
+export type BankTransactionNumberCounter =
+  typeof bankTransactionNumberCounters.$inferSelect;
+
+export const bankTransactionTypeEnum = pgEnum("bank_transaction_type", [
+  "TRANSFER",
+  "DEPOSIT",
+  "WITHDRAWAL",
+  "FEE",
+  "INTEREST",
+]);
+
+export const bankTransactionStatusEnum = pgEnum("bank_transaction_status", [
+  "DRAFT",
+  "POSTED",
+]);
+
+export const bankTransactions = pgTable(
+  "bank_transactions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id").notNull(),
+    legalEntityId: uuid("legal_entity_id").notNull(),
+
+    /// Our own "BTX-000123" — null while DRAFT, assigned only at posting
+    /// time via bankTransactionNumberCounters, identical shape to every
+    /// other document's internalReference (proposal §6).
+    internalReference: varchar("internal_reference", { length: 20 }),
+    status: bankTransactionStatusEnum("status").notNull().default("DRAFT"),
+    type: bankTransactionTypeEnum("type").notNull(),
+    transactionDate: date("transaction_date").notNull(),
+
+    /// The primary leg — every Bank Transaction has exactly one.
+    /// Re-validated ACTIVE + own legal entity at create/edit/post time
+    /// (BankTransactionsService.validateBankCashAccountOrThrow). Reads
+    /// deliberately do NOT re-check the linked account's active state —
+    /// a historical Bank Transaction stays readable/listable even after
+    /// its Bank/Cash Account is later deactivated (same locked
+    /// historical-read correction Banking-1a itself established, applied
+    /// one layer up, proposal §10).
+    bankCashAccountId: uuid("bank_cash_account_id")
+      .notNull()
+      .references(() => bankCashAccounts.id),
+
+    /// Required for TRANSFER only (CHECK below); null for every other
+    /// type. Must resolve to a DISTINCT bank_cash_accounts row in the
+    /// same legal entity (proposal §6.1).
+    counterpartyBankCashAccountId: uuid(
+      "counterparty_bank_cash_account_id",
+    ).references(() => bankCashAccounts.id),
+
+    /// Required for DEPOSIT/WITHDRAWAL/FEE/INTEREST (CHECK below); null
+    /// for TRANSFER (both legs are bank/cash accounts, no external
+    /// account needed). Type-validated per proposal §6.2
+    /// (BankTransactionsService.validateOffsetAccountOrThrow).
+    glAccountId: uuid("gl_account_id").references(() => chartOfAccounts.id),
+
+    /// Resolved from the legal entity's functional currency at
+    /// creation — never client-supplied, identical posture to every
+    /// other currencyCode column in this schema. No FX.
+    currencyCode: varchar("currency_code", { length: 3 }).notNull(),
+
+    amountMinor: bigint("amount_minor", { mode: "number" }).notNull(),
+
+    /// Free-text external reference (bank reference number, cheque
+    /// number) — same posture as every other document's `reference`
+    /// column; no format validation.
+    reference: varchar("reference", { length: 100 }),
+    memo: text("memo"),
+
+    /// Set exactly once, at posting. Real FK: journal_entries is
+    /// Finance's own table, same migration lifecycle.
+    journalEntryId: uuid("journal_entry_id").references(
+      () => journalEntries.id,
+    ),
+    /// Set exactly once, at posting. Real FK: accounting_periods is
+    /// Finance's own table, same migration lifecycle.
+    periodId: uuid("period_id").references(() => accountingPeriods.id),
+
+    createdBy: uuid("created_by"),
+    postedBy: uuid("posted_by"),
+    postedAt: timestamp("posted_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    check("bank_transactions_amount_positive", sql`${t.amountMinor} > 0`),
+    /// The DB-level enforcement of "don't conflate concepts merely
+    /// because they move money" (proposal §6.1): TRANSFER is exactly
+    /// two bank/cash legs and nothing else; every other type is exactly
+    /// one bank/cash leg plus one external GL leg. A genuinely new
+    /// constraint shape for this codebase (proposal §18) — no existing
+    /// table has an app-defined "which columns must be null depending on
+    /// this row's own enum value" CHECK before this one.
+    check(
+      "bank_transactions_transfer_counterparty_shape",
+      sql`(${t.type} = 'TRANSFER' AND ${t.counterpartyBankCashAccountId} IS NOT NULL AND ${t.glAccountId} IS NULL)
+       OR (${t.type} != 'TRANSFER' AND ${t.counterpartyBankCashAccountId} IS NULL AND ${t.glAccountId} IS NOT NULL)`,
+    ),
+    check(
+      "bank_transactions_transfer_distinct_accounts",
+      sql`${t.counterpartyBankCashAccountId} IS NULL OR ${t.counterpartyBankCashAccountId} != ${t.bankCashAccountId}`,
+    ),
+    index("bank_transactions_tenant_entity_idx").on(
+      t.tenantId,
+      t.legalEntityId,
+    ),
+    index("bank_transactions_bank_cash_account_idx").on(t.bankCashAccountId),
+  ],
+);
+
+export type BankTransaction = typeof bankTransactions.$inferSelect;
+export type NewBankTransaction = typeof bankTransactions.$inferInsert;
