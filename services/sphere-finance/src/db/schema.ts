@@ -11,6 +11,7 @@ import {
   integer,
   jsonb,
   index,
+  uniqueIndex,
   unique,
   check,
   foreignKey,
@@ -2556,3 +2557,98 @@ export type PaymentSettlementMatch =
   typeof paymentSettlementMatches.$inferSelect;
 export type NewPaymentSettlementMatch =
   typeof paymentSettlementMatches.$inferInsert;
+
+/// Scheduled Reversal for Accruals and Other Timing Adjustments — Final
+/// Implementation Specification (Revision 2), §7/§11/§12. Orchestrates
+/// JournalEntriesService's existing, unmodified reversal logic on a
+/// future date; never a second posting engine. All four fields below are
+/// mutually exclusive per status, enforced by the CHECK constraint
+/// (§7) — not merely documented as a convention.
+export const scheduledReversalStatusEnum = pgEnum("scheduled_reversal_status", [
+  "SCHEDULED",
+  "EXECUTED",
+  "FAILED",
+  "CANCELLED",
+]);
+
+export const scheduledReversals = pgTable(
+  "scheduled_reversals",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id").notNull(),
+    legalEntityId: uuid("legal_entity_id").notNull(),
+    /// The entry to reverse. Locked and re-validated (POSTED, not
+    /// already reversed, not itself a reversal) at execution time via
+    /// JournalEntriesService.lockAndValidateOriginalForReversal — this
+    /// column only records the intent, never trusted alone (§12).
+    originalJournalEntryId: uuid("original_journal_entry_id")
+      .notNull()
+      .references(() => journalEntries.id),
+    /// Resolved lazily at execution time via the existing period-lookup
+    /// logic (§9/§13) — never a periodId, so a schedule may be created
+    /// before its target period exists.
+    targetDate: date("target_date").notNull(),
+    status: scheduledReversalStatusEnum("status")
+      .notNull()
+      .default("SCHEDULED"),
+    /// Populated only on EXECUTED — the audit-chain correlation to the
+    /// journal entry this schedule produced (§10/§14).
+    resultingReversalJournalEntryId: uuid(
+      "resulting_reversal_journal_entry_id",
+    ).references(() => journalEntries.id),
+    /// Populated only on FAILED — the one recognized terminal business
+    /// failure (closed target period), never a technical/retryable one
+    /// (§1's correction — a technical failure rolls back and leaves the
+    /// row SCHEDULED, writing nothing here).
+    failureReason: text("failure_reason"),
+    /// Terminal timestamp — populated for EXECUTED and FAILED alike.
+    executedAt: timestamp("executed_at", { withTimezone: true }),
+    /// The human actor if manually triggered; null for an
+    /// automated/external process-due caller (§14) — same nullable-actor
+    /// convention journal_entries.postedBy already uses.
+    executedBy: uuid("executed_by"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    createdBy: uuid("created_by"),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    /// Narrowly validated, not merely present (§7) — mirrors this
+    /// codebase's "friendly check + DB constraint" philosophy.
+    check(
+      "scheduled_reversals_terminal_fields_consistent",
+      sql`
+        (status = 'SCHEDULED' AND resulting_reversal_journal_entry_id IS NULL
+                               AND failure_reason IS NULL AND executed_at IS NULL)
+        OR (status = 'EXECUTED' AND resulting_reversal_journal_entry_id IS NOT NULL
+                                 AND failure_reason IS NULL AND executed_at IS NOT NULL)
+        OR (status = 'FAILED' AND resulting_reversal_journal_entry_id IS NULL
+                               AND failure_reason IS NOT NULL AND executed_at IS NOT NULL)
+        OR (status = 'CANCELLED' AND resulting_reversal_journal_entry_id IS NULL
+                                  AND executed_at IS NULL)
+      `,
+    ),
+    /// process-due's batch-candidate query (§10) — tenant/legal-entity
+    /// scoped, status+date ordered, partial so the index stays small as
+    /// most rows quickly leave SCHEDULED.
+    index("scheduled_reversals_due_lookup")
+      .on(t.tenantId, t.legalEntityId, t.status, t.targetDate, t.id)
+      .where(sql`${t.status} = 'SCHEDULED'`),
+    /// The schema-level backstop behind §11's concurrency proof — at
+    /// most one active schedule can ever target a given original, so
+    /// "two different schedule rows for the same original" cannot occur.
+    /// A partial UNIQUE INDEX (not a table-level UNIQUE constraint,
+    /// which cannot carry a WHERE clause in Postgres) — only rows still
+    /// SCHEDULED participate; a resolved (EXECUTED/FAILED/CANCELLED) row
+    /// never blocks a fresh schedule against the same original.
+    uniqueIndex("scheduled_reversals_one_active_per_original")
+      .on(t.originalJournalEntryId)
+      .where(sql`${t.status} = 'SCHEDULED'`),
+  ],
+);
+
+export type ScheduledReversal = typeof scheduledReversals.$inferSelect;
+export type NewScheduledReversal = typeof scheduledReversals.$inferInsert;

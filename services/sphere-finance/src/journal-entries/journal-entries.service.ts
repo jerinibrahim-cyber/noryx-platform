@@ -33,6 +33,17 @@ import type { ReverseJournalEntryDto } from "./dto/reverse-journal-entry.dto";
 
 export type JournalEntryWithLines = JournalEntry & { lines: JournalLine[] };
 
+/** Non-throwing period-resolution result — the basis both
+ * `resolveAndLockOpenPeriod()` (manual reverse()/post(), throws) and
+ * `ScheduledReversalsService` (branches on `.kind` without throwing,
+ * per the Scheduled Reversal spec §12) are built on. Introduced by the
+ * Scheduled Reversal for Accruals and Other Timing Adjustments work
+ * item — Final Implementation Specification (Revision 2), §12. */
+export type PeriodResolution =
+  | { kind: "OPEN"; period: AccountingPeriod }
+  | { kind: "CLOSED"; period: AccountingPeriod }
+  | { kind: "NOT_FOUND" };
+
 export interface ListJournalEntriesFilters {
   status?: "DRAFT" | "POSTED";
   periodId?: string;
@@ -401,7 +412,10 @@ export class JournalEntriesService {
    * `POST /journal-entries/:id/reverse` — creates and posts a new
    * journal entry that reverses `id`, and links the original to it.
    * Proposal §6, with the §0.3 item C period-lock correction applied at
-   * step 5. Steps 1-12 all commit atomically or none do.
+   * step 5. Public behavior, inputs, outputs, errors, and atomicity are
+   * byte-for-byte unchanged by the Scheduled Reversal work item's
+   * extraction below — this method is now a two-line wrapper around
+   * `reverseInTx()`, still opening its own transaction exactly as before.
    */
   async reverse(
     tenantId: string,
@@ -410,176 +424,256 @@ export class JournalEntriesService {
     id: string,
     dto: ReverseJournalEntryDto,
   ): Promise<JournalEntryWithLines> {
-    return withTenant(tenantId, async (tx: TxClient) => {
-      // Step 1: load + lock + scope the ORIGINAL — the only mechanism
-      // that satisfies "reversal target must be same tenant/entity"
-      // (§6.3/§7.3): there is no separate target-tenant/entity input.
-      const original = await this.findByIdInTx(
-        tx,
-        tenantId,
-        legalEntityId,
-        id,
-        { forUpdate: true },
+    return withTenant(tenantId, (tx: TxClient) =>
+      this.reverseInTx(tx, tenantId, legalEntityId, actorUserId, id, dto),
+    );
+  }
+
+  /**
+   * The body of `reverse()`, extracted to accept an already-open `tx`
+   * instead of opening its own — introduced by the Scheduled Reversal
+   * for Accruals and Other Timing Adjustments work item (Final
+   * Implementation Specification, Revision 2, §12) so that a scheduled
+   * execution's own `SCHEDULED -> EXECUTED` transition and the reversal
+   * journal entry's creation can commit atomically together, in one
+   * transaction, rather than two. Composes the same three phases in the
+   * same order `reverse()` always used — original-lock-and-validate,
+   * then period-resolve-and-lock, then build/post/link/audit — so this
+   * is a decomposition of the existing logic, not a rewrite of it.
+   */
+  private async reverseInTx(
+    tx: TxClient,
+    tenantId: string,
+    legalEntityId: string,
+    actorUserId: string | null,
+    id: string,
+    dto: ReverseJournalEntryDto,
+  ): Promise<JournalEntryWithLines> {
+    // Steps 1-4: load + lock + scope + validate the ORIGINAL.
+    const original = await this.lockAndValidateOriginalForReversal(
+      tx,
+      tenantId,
+      legalEntityId,
+      id,
+    );
+
+    const transactionDate =
+      dto.transactionDate ?? new Date().toISOString().slice(0, 10);
+    const memo = dto.memo ?? `Reversal of ${original.journalNumber}`;
+
+    // Step 5: resolve + lock the reversal's OWN covering OPEN period
+    // (§0.3 item C) — independent of the original's period/status.
+    const period = await this.resolveAndLockOpenPeriod(
+      tx,
+      tenantId,
+      legalEntityId,
+      transactionDate,
+    );
+
+    // Steps 6-12: build lines, insert, number, post, link, audit.
+    return this.completeReversalPosting(
+      tx,
+      tenantId,
+      legalEntityId,
+      actorUserId,
+      original,
+      period,
+      transactionDate,
+      memo,
+    );
+  }
+
+  /**
+   * Steps 1-4 of the original `reverse()`, extracted for reuse — locks
+   * and validates the entry to be reversed: exists, POSTED, not already
+   * reversed, not itself a reversal. The only mechanism that satisfies
+   * "reversal target must be same tenant/entity" (§6.3/§7.3 of the 2c
+   * proposal) — there is no separate target-tenant/entity input.
+   *
+   * Intentionally not `private`: `ScheduledReversalsService` calls this
+   * directly, as the FIRST step after claiming its own schedule row, so
+   * that the original-journal-entry lock is always acquired before any
+   * accounting-period lock on both the manual and scheduled paths alike
+   * — the lock-ordering requirement behind the Scheduled Reversal spec's
+   * Revision 2 concurrency correction (§10, §11, §12). Not exposed via
+   * any HTTP route; only reachable by another service in this module.
+   */
+  async lockAndValidateOriginalForReversal(
+    tx: TxClient,
+    tenantId: string,
+    legalEntityId: string,
+    id: string,
+  ): Promise<JournalEntryWithLines> {
+    const original = await this.findByIdInTx(tx, tenantId, legalEntityId, id, {
+      forUpdate: true,
+    });
+    if (!original) {
+      throw new NotFoundException(`No journal entry found with id ${id}.`);
+    }
+    if (original.status !== "POSTED") {
+      throw new UnprocessableEntityException(
+        "Only a posted entry can be reversed.",
       );
-      if (!original) {
-        throw new NotFoundException(`No journal entry found with id ${id}.`);
-      }
+    }
+    if (original.reversedByJournalEntryId !== null) {
+      throw new ConflictException("This entry has already been reversed.");
+    }
+    if (original.reversalOfJournalEntryId !== null) {
+      throw new UnprocessableEntityException(
+        "Cannot reverse a reversal; reversal-of-reversal requires a dedicated correction workflow, not yet built.",
+      );
+    }
+    return original;
+  }
 
-      // Step 2: only a POSTED entry can be reversed.
-      if (original.status !== "POSTED") {
-        throw new UnprocessableEntityException(
-          "Only a posted entry can be reversed.",
-        );
-      }
+  /**
+   * Steps 6-12 of the original `reverse()`, extracted for reuse: build
+   * the swapped-account reversal lines, insert and post the reversal
+   * entry, link the original (exactly one column — the posted-
+   * immutability trigger enforces this narrowly, drizzle/constraints/
+   * 003_...), and write the three audit rows. Takes an already-locked
+   * `original` and an already-resolved-OPEN `period` — never resolves
+   * either itself, so it can never be called out of the required lock
+   * order.
+   *
+   * Intentionally not `private` — called by `reverseInTx()` (manual
+   * path) and by `ScheduledReversalsService` (scheduled path, only once
+   * its own period resolution has confirmed OPEN) alike. This is the
+   * ONLY place a reversal is ever built or posted anywhere in this
+   * codebase — never duplicated, never a second posting engine.
+   */
+  async completeReversalPosting(
+    tx: TxClient,
+    tenantId: string,
+    legalEntityId: string,
+    actorUserId: string | null,
+    original: JournalEntryWithLines,
+    period: AccountingPeriod,
+    transactionDate: string,
+    memo: string,
+  ): Promise<JournalEntryWithLines> {
+    // Step 6: build reversal lines — same accounts/amounts, swapped
+    // debit/credit, fresh 1..N numbering independent of the original's.
+    const reversalLineInputs: CreateJournalLineDto[] = original.lines.map(
+      (l) => ({
+        accountId: l.accountId,
+        debitMinor: l.creditMinor,
+        creditMinor: l.debitMinor,
+        description: l.description ?? undefined,
+      }),
+    );
 
-      // Step 3: not already reversed.
-      if (original.reversedByJournalEntryId !== null) {
-        throw new ConflictException("This entry has already been reversed.");
-      }
-
-      // Step 4: reversal-of-reversal is rejected.
-      if (original.reversalOfJournalEntryId !== null) {
-        throw new UnprocessableEntityException(
-          "Cannot reverse a reversal; reversal-of-reversal requires a dedicated correction workflow, not yet built.",
-        );
-      }
-
-      const transactionDate =
-        dto.transactionDate ?? new Date().toISOString().slice(0, 10);
-      const memo = dto.memo ?? `Reversal of ${original.journalNumber}`;
-
-      // Step 5: resolve + lock the reversal's OWN covering OPEN period
-      // (§0.3 item C) — independent of the original's period/status.
-      const period = await this.resolveAndLockOpenPeriod(
-        tx,
+    // Step 7: insert the reversal's header.
+    const [reversalEntry] = await tx
+      .insert(journalEntries)
+      .values({
         tenantId,
         legalEntityId,
         transactionDate,
-      );
+        currencyCode: original.currencyCode,
+        memo,
+        reversalOfJournalEntryId: original.id,
+        createdBy: actorUserId ?? null,
+      })
+      .returning();
 
-      // Step 6: build reversal lines — same accounts/amounts, swapped
-      // debit/credit, fresh 1..N numbering independent of the original's.
-      const reversalLineInputs: CreateJournalLineDto[] = original.lines.map(
-        (l) => ({
-          accountId: l.accountId,
-          debitMinor: l.creditMinor,
-          creditMinor: l.debitMinor,
-          description: l.description ?? undefined,
-        }),
-      );
+    // Step 8: insert reversal lines.
+    const reversalLines = await this.insertLines(
+      tx,
+      tenantId,
+      reversalEntry!.id,
+      reversalLineInputs,
+    );
 
-      // Step 7: insert the reversal's header.
-      const [reversalEntry] = await tx
-        .insert(journalEntries)
-        .values({
-          tenantId,
-          legalEntityId,
-          transactionDate,
-          currencyCode: original.currencyCode,
-          memo,
-          reversalOfJournalEntryId: original.id,
-          createdBy: actorUserId ?? null,
-        })
-        .returning();
+    // Step 9: allocate the reversal's own journal number — a fresh
+    // draw from the same counter, never derived from the original's.
+    const journalNumber = await this.allocateJournalNumber(
+      tx,
+      tenantId,
+      legalEntityId,
+    );
 
-      // Step 8: insert reversal lines.
-      const reversalLines = await this.insertLines(
-        tx,
-        tenantId,
-        reversalEntry!.id,
-        reversalLineInputs,
-      );
+    // Step 10: post the reversal.
+    const [postedReversal] = await tx
+      .update(journalEntries)
+      .set({
+        status: "POSTED",
+        journalNumber,
+        periodId: period.id,
+        postedAt: new Date(),
+        postedBy: actorUserId ?? null,
+      })
+      .where(
+        and(
+          eq(journalEntries.id, reversalEntry!.id),
+          eq(journalEntries.tenantId, tenantId),
+          eq(journalEntries.legalEntityId, legalEntityId),
+        ),
+      )
+      .returning();
 
-      // Step 9: allocate the reversal's own journal number — a fresh
-      // draw from the same counter, never derived from the original's.
-      const journalNumber = await this.allocateJournalNumber(
-        tx,
+    // Step 11: link the original — exactly one column, nothing else.
+    // The posted-immutability trigger enforces this narrowly (schema.ts
+    // doc comment, drizzle/constraints/003_...); any attempt to also
+    // touch updated_at or any other column here would be rejected by
+    // the trigger, which is the intended enforcement.
+    const [linkedOriginal] = await tx
+      .update(journalEntries)
+      .set({ reversedByJournalEntryId: postedReversal!.id })
+      .where(
+        and(
+          eq(journalEntries.id, original.id),
+          eq(journalEntries.tenantId, tenantId),
+          eq(journalEntries.legalEntityId, legalEntityId),
+        ),
+      )
+      .returning();
+
+    const reversalFull: JournalEntryWithLines = {
+      ...postedReversal!,
+      lines: reversalLines,
+    };
+
+    // Step 12: audit — REVERSE against the original (the linkage
+    // event), plus the reversal's own CREATE and POST rows, all in
+    // the same transaction (§9, §6 step 12).
+    await tx.insert(auditLogs).values([
+      {
         tenantId,
         legalEntityId,
-      );
+        actorUserId: actorUserId ?? undefined,
+        action: "REVERSE",
+        entityType: "journal_entry",
+        entityId: original.id,
+        beforeState: original as unknown as Record<string, unknown>,
+        afterState: linkedOriginal as unknown as Record<string, unknown>,
+      },
+      {
+        tenantId,
+        legalEntityId,
+        actorUserId: actorUserId ?? undefined,
+        action: "CREATE",
+        entityType: "journal_entry",
+        entityId: reversalEntry!.id,
+        beforeState: null,
+        afterState: {
+          ...reversalEntry!,
+          lines: reversalLines,
+        } as unknown as Record<string, unknown>,
+      },
+      {
+        tenantId,
+        legalEntityId,
+        actorUserId: actorUserId ?? undefined,
+        action: "POST",
+        entityType: "journal_entry",
+        entityId: reversalEntry!.id,
+        beforeState: null,
+        afterState: reversalFull as unknown as Record<string, unknown>,
+      },
+    ]);
 
-      // Step 10: post the reversal.
-      const [postedReversal] = await tx
-        .update(journalEntries)
-        .set({
-          status: "POSTED",
-          journalNumber,
-          periodId: period.id,
-          postedAt: new Date(),
-          postedBy: actorUserId ?? null,
-        })
-        .where(
-          and(
-            eq(journalEntries.id, reversalEntry!.id),
-            eq(journalEntries.tenantId, tenantId),
-            eq(journalEntries.legalEntityId, legalEntityId),
-          ),
-        )
-        .returning();
-
-      // Step 11: link the original — exactly one column, nothing else.
-      // The posted-immutability trigger enforces this narrowly (schema.ts
-      // doc comment, drizzle/constraints/003_...); any attempt to also
-      // touch updated_at or any other column here would be rejected by
-      // the trigger, which is the intended enforcement.
-      const [linkedOriginal] = await tx
-        .update(journalEntries)
-        .set({ reversedByJournalEntryId: postedReversal!.id })
-        .where(
-          and(
-            eq(journalEntries.id, original.id),
-            eq(journalEntries.tenantId, tenantId),
-            eq(journalEntries.legalEntityId, legalEntityId),
-          ),
-        )
-        .returning();
-
-      const reversalFull: JournalEntryWithLines = {
-        ...postedReversal!,
-        lines: reversalLines,
-      };
-
-      // Step 12: audit — REVERSE against the original (the linkage
-      // event), plus the reversal's own CREATE and POST rows, all in
-      // the same transaction (§9, §6 step 12).
-      await tx.insert(auditLogs).values([
-        {
-          tenantId,
-          legalEntityId,
-          actorUserId: actorUserId ?? undefined,
-          action: "REVERSE",
-          entityType: "journal_entry",
-          entityId: original.id,
-          beforeState: original as unknown as Record<string, unknown>,
-          afterState: linkedOriginal as unknown as Record<string, unknown>,
-        },
-        {
-          tenantId,
-          legalEntityId,
-          actorUserId: actorUserId ?? undefined,
-          action: "CREATE",
-          entityType: "journal_entry",
-          entityId: reversalEntry!.id,
-          beforeState: null,
-          afterState: {
-            ...reversalEntry!,
-            lines: reversalLines,
-          } as unknown as Record<string, unknown>,
-        },
-        {
-          tenantId,
-          legalEntityId,
-          actorUserId: actorUserId ?? undefined,
-          action: "POST",
-          entityType: "journal_entry",
-          entityId: reversalEntry!.id,
-          beforeState: null,
-          afterState: reversalFull as unknown as Record<string, unknown>,
-        },
-      ]);
-
-      return reversalFull;
-    });
+    return reversalFull;
   }
 
   /** Resolves the caller's legal entity's functional currency
@@ -695,21 +789,28 @@ export class JournalEntriesService {
 
   /** Resolves the accounting period covering `transactionDate` for
    * (tenantId, legalEntityId), and locks that row via
-   * `SELECT ... FOR UPDATE` as part of the same posting/reversal
-   * transaction (§0.3 item C) — required so a concurrent
-   * `AccountingPeriodsService.close()` cannot complete between this
-   * resolution and the posting commit. Whichever period covers the date
-   * is locked regardless of its current status, so "no such period" and
-   * "period is closed" can still be reported precisely, and a
-   * concurrent close() attempt blocks on this row until the current
-   * transaction commits or rolls back rather than racing it. Used
-   * identically by post() and reverse(). */
-  private async resolveAndLockOpenPeriod(
+   * `SELECT ... FOR UPDATE` — a non-throwing, discriminated result
+   * (§12 of the Scheduled Reversal spec, Revision 2) rather than an
+   * exception, so a caller can branch on "closed" vs. "not found"
+   * without try/catch. Whichever period covers the date is locked
+   * regardless of its current status, so both outcomes can still be
+   * reported precisely, and a concurrent `AccountingPeriodsService.
+   * close()` attempt blocks on this row until the current transaction
+   * commits or rolls back rather than racing it.
+   *
+   * Intentionally not `private` — `ScheduledReversalsService` calls
+   * this directly, as the SECOND step after locking the original
+   * journal entry (never before it — the Revision 2 lock-ordering
+   * requirement), to decide FAILED/leave-SCHEDULED/proceed without an
+   * exception-driven control flow. `resolveAndLockOpenPeriod()` below
+   * is now a thin, throwing wrapper over this for post()/reverse()'s
+   * unchanged behavior. */
+  async resolvePeriodForDate(
     tx: TxClient,
     tenantId: string,
     legalEntityId: string,
     transactionDate: string,
-  ): Promise<AccountingPeriod> {
+  ): Promise<PeriodResolution> {
     const [period] = await tx
       .select()
       .from(accountingPeriods)
@@ -724,16 +825,41 @@ export class JournalEntriesService {
       .for("update")
       .limit(1);
     if (!period) {
+      return { kind: "NOT_FOUND" };
+    }
+    if (period.status !== "OPEN") {
+      return { kind: "CLOSED", period };
+    }
+    return { kind: "OPEN", period };
+  }
+
+  /** Thin, throwing wrapper over `resolvePeriodForDate()`, preserving
+   * `post()`/`reverse()`'s exact pre-existing behavior, error types,
+   * and messages — used identically by both, unchanged by the
+   * Scheduled Reversal work item in any way a caller could observe. */
+  private async resolveAndLockOpenPeriod(
+    tx: TxClient,
+    tenantId: string,
+    legalEntityId: string,
+    transactionDate: string,
+  ): Promise<AccountingPeriod> {
+    const resolution = await this.resolvePeriodForDate(
+      tx,
+      tenantId,
+      legalEntityId,
+      transactionDate,
+    );
+    if (resolution.kind === "NOT_FOUND") {
       throw new UnprocessableEntityException(
         `No accounting period covers transaction date ${transactionDate} for this legal entity.`,
       );
     }
-    if (period.status !== "OPEN") {
+    if (resolution.kind === "CLOSED") {
       throw new UnprocessableEntityException(
-        `Accounting period "${period.code}" covering ${transactionDate} is closed.`,
+        `Accounting period "${resolution.period.code}" covering ${transactionDate} is closed.`,
       );
     }
-    return period;
+    return resolution.period;
   }
 
   /** Race-free journal-number allocation via the counter table's atomic

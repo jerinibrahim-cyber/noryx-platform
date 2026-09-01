@@ -28,6 +28,7 @@ import { BankTransactionsController } from "./bank-transactions/bank-transaction
 import { BankReconciliationController } from "./bank-reconciliation/bank-reconciliation.controller";
 import { BankReportsController } from "./bank-reports/bank-reports.controller";
 import { PaymentProviderSettlementsController } from "./payment-provider-settlements/payment-provider-settlements.controller";
+import { ScheduledReversalsController } from "./scheduled-reversals/scheduled-reversals.controller";
 
 /**
  * Milestone 3.2 — Route → Required-Role Matrix Hardening
@@ -279,6 +280,37 @@ const EXPECTED: DiscoveredRoute[] = [
   role("POST", "journal-entries/:id/reverse", "JournalEntriesController", [
     "finance.poster",
   ]),
+
+  // Scheduled Reversal for Accruals and Other Timing Adjustments —
+  // Final Implementation Specification (Revision 2), §8. Writes carry
+  // finance.poster, identical to journal-entries' own /reverse — a
+  // scheduled reversal's process-due ultimately posts a journal entry
+  // via the exact same posting path.
+  role("POST", "scheduled-reversals", "ScheduledReversalsController", [
+    "finance.poster",
+  ]),
+  role("GET", "scheduled-reversals", "ScheduledReversalsController", [
+    "finance.viewer",
+    "finance.poster",
+    "finance.admin",
+  ]),
+  role("GET", "scheduled-reversals/:id", "ScheduledReversalsController", [
+    "finance.viewer",
+    "finance.poster",
+    "finance.admin",
+  ]),
+  role(
+    "POST",
+    "scheduled-reversals/:id/cancel",
+    "ScheduledReversalsController",
+    ["finance.poster"],
+  ),
+  role(
+    "POST",
+    "scheduled-reversals/process-due",
+    "ScheduledReversalsController",
+    ["finance.poster"],
+  ),
 
   role("GET", "accounts/:id/ledger", "GeneralLedgerController", [
     "finance.viewer",
@@ -835,11 +867,12 @@ describe("Route → required-role matrix (sphere-finance)", () => {
     ...discoverRoutes(BankReconciliationController),
     ...discoverRoutes(BankReportsController),
     ...discoverRoutes(PaymentProviderSettlementsController),
+    ...discoverRoutes(ScheduledReversalsController),
   ];
   const actualByKey = new Map(actual.map((r) => [r.key, r]));
   const expectedByKey = new Map(EXPECTED.map((r) => [r.key, r]));
 
-  it("discovers exactly the expected number of routes across all twenty-two controllers", () => {
+  it("discovers exactly the expected number of routes across all twenty-three controllers", () => {
     expect(actual).toHaveLength(EXPECTED.length);
   });
 

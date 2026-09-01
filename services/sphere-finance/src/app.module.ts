@@ -13,6 +13,7 @@ import { BankTransactionsModule } from "./bank-transactions/bank-transactions.mo
 import { BankReconciliationModule } from "./bank-reconciliation/bank-reconciliation.module";
 import { BankReportsModule } from "./bank-reports/bank-reports.module";
 import { PaymentProviderSettlementsModule } from "./payment-provider-settlements/payment-provider-settlements.module";
+import { ScheduledReversalsModule } from "./scheduled-reversals/scheduled-reversals.module";
 import { HealthController } from "./health/health.controller";
 import { TenantContextMiddleware } from "./tenant/tenant-context.middleware";
 
@@ -108,6 +109,20 @@ import { TenantContextMiddleware } from "./tenant/tenant-context.middleware";
     // (payment_provider_settlement_imports/payment_provider_settlements/
     // payment_settlement_matches); touches none of the modules above.
     PaymentProviderSettlementsModule,
+    // Scheduled Reversal for Accruals and Other Timing Adjustments —
+    // Final Implementation Specification (Revision 2), CTO-approved
+    // implementation authorization. A top-level sibling of
+    // PaymentProviderSettlementsModule, not nested inside it — reads/
+    // writes its own single new table (scheduled_reversals) and calls
+    // JournalEntriesService's existing, unmodified
+    // lockAndValidateOriginalForReversal()/resolvePeriodForDate()/
+    // completeReversalPosting() methods verbatim (its own module
+    // registers a second DI instance of that dependency-free service
+    // rather than importing JournalEntriesModule — zero changes to any
+    // journal-entries.module.ts file, identical pattern to
+    // BankReconciliationModule/PaymentProviderSettlementsModule).
+    // Touches none of the modules above.
+    ScheduledReversalsModule,
     // Scoped registration so TenantContextMiddleware can inject JwtService
     // without importing AccountsModule's other providers — same pattern as
     // services/identity/src/app.module.ts.
