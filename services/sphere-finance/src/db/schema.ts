@@ -1751,6 +1751,24 @@ export const bankCashAccountKindEnum = pgEnum("bank_cash_account_kind", [
   "CASH",
 ]);
 
+// Banking-1e (docs/finance-work-item-banking-1e-proposal.md §7, CTO
+// architecture-gate decision 1) — orthogonal to `kind` above, NOT a
+// replacement for it. `kind` answers "BANK or CASH" (does an external
+// settlement feed exist to reconcile against at all); `purpose` answers
+// "OPERATING or CLEARING" (is this account's balance genuinely
+// available cash, or a third party's transient holding). A
+// payment-provider clearing account is `kind = BANK, purpose =
+// CLEARING`. Additive column, NOT NULL DEFAULT 'OPERATING' — every
+// pre-Banking-1e row is correctly OPERATING (no Clearing Account existed
+// before this work item). Zero existing consumer of bank_cash_accounts
+// branches on any column by value except `kind` (verified by repo-wide
+// grep, §7), so this column carries no risk of interacting with
+// existing BankTransactionsService/BankReportsService behavior.
+export const bankCashAccountPurposeEnum = pgEnum("bank_cash_account_purpose", [
+  "OPERATING",
+  "CLEARING",
+]);
+
 export const bankCashAccounts = pgTable(
   "bank_cash_accounts",
   {
@@ -1769,6 +1787,12 @@ export const bankCashAccounts = pgTable(
     /// modeled as a BANK-kind row later, with no schema change. Not
     /// otherwise consumed by any logic in Banking-1a itself.
     kind: bankCashAccountKindEnum("kind").notNull(),
+    /// Banking-1e (§7) — orthogonal to `kind`, see bankCashAccountPurposeEnum
+    /// above for the full explanation. Not otherwise consumed by any logic
+    /// in Banking-1a/1b/1c/1d themselves.
+    purpose: bankCashAccountPurposeEnum("purpose")
+      .notNull()
+      .default("OPERATING"),
     /// Exactly one GL account per Bank/Cash Account (proposal §9, "Q2"
     /// and "Q3") — validated ACTIVE + type ASSET at create/edit time
     /// only (BankCashAccountsService.validateGlAccountOrThrow). Reads
@@ -2265,3 +2289,270 @@ export type BankReconciliationMatch =
   typeof bankReconciliationMatches.$inferSelect;
 export type NewBankReconciliationMatch =
   typeof bankReconciliationMatches.$inferInsert;
+
+// ---------------------------------------------------------------------------
+// Banking-1e — Payment Gateway / Card / UPI Settlement Reconciliation.
+// docs/finance-work-item-banking-1e-proposal.md, CTO-approved
+// (implementation-authorization turn).
+//
+// A first-class Payment Provider Settlement domain, modeled the same
+// shape Banking-1c already established for bank statements (import
+// header -> normalized records -> matches), explicitly distinct from —
+// and related to, not merged with — both the Banking Ledger
+// (bank_transactions) and the bank statement (bank_statement_lines).
+// GL remains exclusively authoritative (§6, §13): this domain never
+// posts journal_entries/journal_lines directly, and never calls
+// JournalEntriesService. Its one write against bank_transactions is via
+// the existing, unmodified BankTransactionsService.create() (§19,
+// create-settlement-transactions) — DRAFT only, never auto-posted.
+//
+// Three independent lifecycles, never conflated (§18): A. import status
+// (paymentProviderSettlementImportStatusEnum, parsing-lifecycle-only,
+// deliberately no COMPLETED value) — B. reconciliation status
+// (paymentSettlementReconciliationStatusEnum, the ONLY place COMPLETED
+// is used in this domain, on the same header row as A) — C. accounting
+// status, NOT a field on any table here at all; it lives entirely on
+// bank_transactions.status/journal_entries.status via the optional
+// create-settlement-transactions convenience.
+// ---------------------------------------------------------------------------
+
+export const paymentProviderSettlementFormatEnum = pgEnum(
+  "payment_provider_settlement_format",
+  ["GENERIC_SETTLEMENT_CSV"], // §8/§14 — vendor-neutral MVP seam, exactly
+  // as extensible as bankStatementSourceFormatEnum. No Razorpay-/
+  // Cashfree-/PayU-specific adapter exists or is proposed; a
+  // vendor-specific format is a later, evidence-driven addition to this
+  // same enum, never a rewrite.
+);
+
+export const paymentProviderSettlementImportStatusEnum = pgEnum(
+  "payment_provider_settlement_import_status",
+  ["PENDING", "VALIDATED", "FAILED"],
+  // Import/parsing lifecycle ONLY (§18.A) — mirrors
+  // bankStatementImportStatusEnum exactly. Deliberately no COMPLETED
+  // value here either — "completed" is a RECONCILIATION concept below,
+  // a genuinely separate axis.
+);
+
+export const paymentSettlementReconciliationStatusEnum = pgEnum(
+  "payment_settlement_reconciliation_status",
+  ["OPEN", "COMPLETED"],
+  // §18.B — the ONLY place COMPLETED is used in this domain. Completion
+  // requires BOTH, independently (§18, identical shape to
+  // bankReconciliationStatusEnum's own completion gate): (A) matching
+  // completeness — every payment_provider_settlements row for this
+  // import is MATCHED or IGNORED; (B) balance reconciliation — the
+  // period's differenceMinor is 0 against the Clearing Account's real
+  // GL balance.
+);
+
+export const paymentProviderSettlementImports = pgTable(
+  "payment_provider_settlement_imports",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id").notNull(),
+    legalEntityId: uuid("legal_entity_id").notNull(),
+    // The Clearing Account this settlement batch belongs to — an
+    // ordinary bank_cash_accounts row, kind = BANK, purpose = CLEARING
+    // (§7). Real FK: same migration lifecycle, Finance's own table.
+    // Deliberately NOT constrained to purpose = CLEARING at the DB
+    // level (no CHECK can reach across tables) — the SERVICE layer
+    // validates this at import time (§7's "validate/require
+    // purpose = 'CLEARING'" answer).
+    bankCashAccountId: uuid("bank_cash_account_id")
+      .notNull()
+      .references(() => bankCashAccounts.id),
+    providerFormat:
+      paymentProviderSettlementFormatEnum("provider_format").notNull(),
+    fileName: varchar("file_name", { length: 255 }).notNull(),
+    /// sha256 hex of the raw uploaded bytes — the raw bytes themselves
+    /// are never persisted, same posture as bank_statement_imports.fileHash.
+    fileHash: varchar("file_hash", { length: 64 }).notNull(),
+    status: paymentProviderSettlementImportStatusEnum("status")
+      .notNull()
+      .default("PENDING"),
+    reconciliationStatus: paymentSettlementReconciliationStatusEnum(
+      "reconciliation_status",
+    )
+      .notNull()
+      .default("OPEN"),
+    parseWarnings: jsonb("parse_warnings"), // non-blocking, §16 item 1.
+    parseErrors: jsonb("parse_errors"), // present only on a FAILED import.
+    importedBy: uuid("imported_by"),
+    importedAt: timestamp("imported_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    completedBy: uuid("completed_by"),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    /// File-level idempotency (§15) — identical shape to
+    /// bank_statement_imports_account_file_hash_unique.
+    unique("ppsi_account_file_hash_unique").on(
+      t.tenantId,
+      t.legalEntityId,
+      t.bankCashAccountId,
+      t.fileHash,
+    ),
+    index("ppsi_tenant_entity_idx").on(t.tenantId, t.legalEntityId),
+    index("ppsi_bank_cash_account_idx").on(t.bankCashAccountId),
+  ],
+);
+
+export type PaymentProviderSettlementImport =
+  typeof paymentProviderSettlementImports.$inferSelect;
+export type NewPaymentProviderSettlementImport =
+  typeof paymentProviderSettlementImports.$inferInsert;
+
+export const paymentSettlementMatchStatusEnum = pgEnum(
+  "payment_settlement_match_status",
+  ["UNMATCHED", "PARTIALLY_MATCHED", "MATCHED", "IGNORED"],
+  // Identical semantics to bankStatementLineMatchStatusEnum — §16 item 2.
+);
+
+export const paymentProviderSettlements = pgTable(
+  "payment_provider_settlements",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /// Denormalized — required for this table's own tenant_isolation RLS
+    /// policy, same reasoning as journal_lines.tenantId/
+    /// bank_statement_lines.tenantId.
+    tenantId: uuid("tenant_id").notNull(),
+    legalEntityId: uuid("legal_entity_id").notNull(),
+    settlementImportId: uuid("settlement_import_id")
+      .notNull()
+      .references(() => paymentProviderSettlementImports.id),
+    bankCashAccountId: uuid("bank_cash_account_id") // denormalized from the parent import.
+      .notNull()
+      .references(() => bankCashAccounts.id),
+    /// The provider's own settlement/batch identifier — §15's identity
+    /// key. Free text, no format validation (same posture as every
+    /// other external-reference column in this schema).
+    providerSettlementId: varchar("provider_settlement_id", {
+      length: 100,
+    }).notNull(),
+    settlementDate: date("settlement_date").notNull(),
+    currencyCode: varchar("currency_code", { length: 3 }).notNull(),
+    grossAmountMinor: bigint("gross_amount_minor", {
+      mode: "number",
+    }).notNull(),
+    feeAmountMinor: bigint("fee_amount_minor", { mode: "number" })
+      .notNull()
+      .default(0),
+    /// Signed — a positive adjustment increases net, a negative one
+    /// decreases it (§9 — one net figure in MVP, not itemized).
+    adjustmentAmountMinor: bigint("adjustment_amount_minor", {
+      mode: "number",
+    })
+      .notNull()
+      .default(0),
+    netAmountMinor: bigint("net_amount_minor", { mode: "number" }).notNull(),
+    rawDescription: text("raw_description"),
+    /// Denormalized cache — single source of truth is
+    /// payment_settlement_matches (§18), kept in sync by
+    /// PaymentProviderSettlementsService inside the same transaction as
+    /// every match/undo write.
+    matchStatus: paymentSettlementMatchStatusEnum("match_status")
+      .notNull()
+      .default("UNMATCHED"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    /// §17's arithmetic identity, enforced at the database level in
+    /// addition to parse-time validation (§14) — the "friendly check +
+    /// DB constraint" pattern every other invariant in this codebase
+    /// already uses.
+    check(
+      "payment_provider_settlements_arithmetic",
+      sql`${t.grossAmountMinor} - ${t.feeAmountMinor} + ${t.adjustmentAmountMinor} = ${t.netAmountMinor}`,
+    ),
+    check(
+      "payment_provider_settlements_gross_positive",
+      sql`${t.grossAmountMinor} > 0`,
+    ),
+    /// §15 — the deterministic identity key: the same provider
+    /// settlement ID can never be recorded twice for the same Clearing
+    /// account. This is the finer-grained idempotency check file-hash
+    /// alone would miss (a settlement ID repeated across two different
+    /// files).
+    unique("pps_account_provider_settlement_id_unique").on(
+      t.tenantId,
+      t.legalEntityId,
+      t.bankCashAccountId,
+      t.providerSettlementId,
+    ),
+    index("pps_import_idx").on(t.settlementImportId),
+    index("pps_account_idx").on(t.bankCashAccountId),
+  ],
+);
+
+export type PaymentProviderSettlement =
+  typeof paymentProviderSettlements.$inferSelect;
+export type NewPaymentProviderSettlement =
+  typeof paymentProviderSettlements.$inferInsert;
+
+export const paymentSettlementMatchTypeEnum = pgEnum(
+  "payment_settlement_match_type",
+  ["DETERMINISTIC_MATCH", "MANUAL"], // identical semantics to Banking-1c's own.
+);
+export const paymentSettlementMatchStateEnum = pgEnum(
+  "payment_settlement_match_state",
+  ["ACTIVE", "UNDONE"],
+);
+
+export const paymentSettlementMatches = pgTable(
+  "payment_settlement_matches",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id").notNull(),
+    legalEntityId: uuid("legal_entity_id").notNull(),
+    paymentProviderSettlementId: uuid("payment_provider_settlement_id")
+      .notNull()
+      .references(() => paymentProviderSettlements.id),
+    // References Banking-1c's EXISTING table — the one cross-boundary
+    // touch (§11), additive, no change to bank_statement_lines itself.
+    bankStatementLineId: uuid("bank_statement_line_id")
+      .notNull()
+      .references(() => bankStatementLines.id),
+    matchedAmountMinor: bigint("matched_amount_minor", {
+      mode: "number",
+    }).notNull(), // partial-matching-capable, identical to bank_reconciliation_matches.
+    matchType: paymentSettlementMatchTypeEnum("match_type").notNull(),
+    status: paymentSettlementMatchStateEnum("status")
+      .notNull()
+      .default("ACTIVE"),
+    matchedBy: uuid("matched_by"),
+    matchedAt: timestamp("matched_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    undoneBy: uuid("undone_by"),
+    undoneAt: timestamp("undone_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    check(
+      "payment_settlement_matches_amount_positive",
+      sql`${t.matchedAmountMinor} > 0`,
+    ),
+    index("psm_settlement_idx").on(t.paymentProviderSettlementId),
+    index("psm_bank_line_idx").on(t.bankStatementLineId),
+  ],
+);
+
+export type PaymentSettlementMatch =
+  typeof paymentSettlementMatches.$inferSelect;
+export type NewPaymentSettlementMatch =
+  typeof paymentSettlementMatches.$inferInsert;

@@ -88,6 +88,7 @@ export class BankCashAccountsService {
             code: dto.code,
             name: dto.name,
             kind: dto.kind,
+            purpose: dto.purpose ?? "OPERATING",
             glAccountId: dto.glAccountId,
             currencyCode,
             bankName: dto.bankName ?? null,
@@ -202,6 +203,7 @@ export class BankCashAccountsService {
           .set({
             name: dto.name ?? before.name,
             kind: dto.kind ?? before.kind,
+            purpose: dto.purpose ?? before.purpose,
             glAccountId: dto.glAccountId ?? before.glAccountId,
             bankName:
               dto.bankName !== undefined ? dto.bankName : before.bankName,

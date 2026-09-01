@@ -12,6 +12,7 @@ import { BankCashAccountsModule } from "./bank-cash-accounts/bank-cash-accounts.
 import { BankTransactionsModule } from "./bank-transactions/bank-transactions.module";
 import { BankReconciliationModule } from "./bank-reconciliation/bank-reconciliation.module";
 import { BankReportsModule } from "./bank-reports/bank-reports.module";
+import { PaymentProviderSettlementsModule } from "./payment-provider-settlements/payment-provider-settlements.module";
 import { HealthController } from "./health/health.controller";
 import { TenantContextMiddleware } from "./tenant/tenant-context.middleware";
 
@@ -89,6 +90,24 @@ import { TenantContextMiddleware } from "./tenant/tenant-context.middleware";
     // journal_lines, all owned by other modules; writes nothing and
     // touches none of the modules above. No new table, no migration.
     BankReportsModule,
+    // Banking-1e — Payment Provider Settlement Import & Reconciliation.
+    // docs/finance-work-item-banking-1e-proposal.md, CTO-approved
+    // (implementation-authorization turn). A top-level sibling of
+    // BankReportsModule, not nested inside it — reads Banking-1a's
+    // bank_cash_accounts (the new `purpose = CLEARING` classification,
+    // §7) and the shared journal_entries/journal_lines tables read-only
+    // for its own Clearing Account GL MOVEMENT computation (§20), reads/
+    // writes an additive-only FK into Banking-1c's existing
+    // bank_statement_lines (payment_settlement_matches, §10), and calls
+    // BankTransactionsService.create() verbatim for the
+    // create-settlement-transactions convenience (§19, its own module
+    // registers a second DI instance of that dependency-free service
+    // rather than importing BankTransactionsModule — zero changes to any
+    // Banking-1b file, identical pattern to BankReconciliationModule).
+    // Reads/writes its own three new tables only
+    // (payment_provider_settlement_imports/payment_provider_settlements/
+    // payment_settlement_matches); touches none of the modules above.
+    PaymentProviderSettlementsModule,
     // Scoped registration so TenantContextMiddleware can inject JwtService
     // without importing AccountsModule's other providers — same pattern as
     // services/identity/src/app.module.ts.

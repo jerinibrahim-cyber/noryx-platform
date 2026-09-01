@@ -14,6 +14,14 @@ import {
 export const BANK_CASH_ACCOUNT_KINDS = ["BANK", "CASH"] as const;
 export type BankCashAccountKind = (typeof BANK_CASH_ACCOUNT_KINDS)[number];
 
+/// Banking-1e (docs/finance-work-item-banking-1e-proposal.md §7) —
+/// mirrors bankCashAccountPurposeEnum. Optional, defaults server-side to
+/// OPERATING when omitted (BankCashAccountsService.create) — every
+/// existing caller/test that does not pass `purpose` is unaffected.
+export const BANK_CASH_ACCOUNT_PURPOSES = ["OPERATING", "CLEARING"] as const;
+export type BankCashAccountPurpose =
+  (typeof BANK_CASH_ACCOUNT_PURPOSES)[number];
+
 /// Same code shape/validation as CreateSupplierDto/CreateAccountDto — the
 /// established "safe identifier" convention, not a new one.
 export class CreateBankCashAccountDto {
@@ -32,6 +40,10 @@ export class CreateBankCashAccountDto {
 
   @IsEnum(BANK_CASH_ACCOUNT_KINDS)
   kind!: BankCashAccountKind;
+
+  @IsOptional()
+  @IsEnum(BANK_CASH_ACCOUNT_PURPOSES)
+  purpose?: BankCashAccountPurpose; // defaults to OPERATING (§7).
 
   /// Validated by BankCashAccountsService at write time: must exist, be
   /// ACTIVE, be of type ASSET, belong to the caller's own legal entity,

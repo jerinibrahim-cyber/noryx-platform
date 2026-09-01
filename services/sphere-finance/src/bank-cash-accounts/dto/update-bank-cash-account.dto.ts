@@ -9,6 +9,8 @@ import {
 import {
   BANK_CASH_ACCOUNT_KINDS,
   type BankCashAccountKind,
+  BANK_CASH_ACCOUNT_PURPOSES,
+  type BankCashAccountPurpose,
 } from "./create-bank-cash-account.dto";
 
 /// `code` is deliberately not editable here — same posture as
@@ -31,6 +33,14 @@ export class UpdateBankCashAccountDto {
   @IsOptional()
   @IsEnum(BANK_CASH_ACCOUNT_KINDS)
   kind?: BankCashAccountKind;
+
+  /// Banking-1e (§7) — lets an existing account be reclassified
+  /// OPERATING<->CLEARING (e.g. designating an already-created account
+  /// as a payment-provider Clearing Account after the fact), same
+  /// posture as `kind` above.
+  @IsOptional()
+  @IsEnum(BANK_CASH_ACCOUNT_PURPOSES)
+  purpose?: BankCashAccountPurpose;
 
   @IsOptional()
   @IsUUID()

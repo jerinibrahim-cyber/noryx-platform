@@ -106,6 +106,13 @@
       "when": 1787844968323,
       "tag": "0014_banking_1c_statement_import_reconciliation",
       "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1788268227290,
+      "tag": "0015_banking_1e_payment_provider_settlements",
+      "breakpoints": true
     }
   ]
 }
