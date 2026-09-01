@@ -1,7 +1,6 @@
 # Finance Work Item — Banking-1e: Payment Gateway / Card / UPI Settlement Reconciliation
 
-**Status: DISCOVERY / PROPOSAL — awaiting CTO approval. Nothing in this
-document has been implemented.** This is a full rewrite of the prior
+**Status: IMPLEMENTED — Banking-1e was implemented on `main` in commit `f7fd9ad`.** This is a full rewrite of the prior
 Banking-1e proposal, per CTO architecture-gate review: the prior version
 was too implementation-centric ("add another CSV parser") and
 insufficiently rigorous about settlement accounting semantics. This
@@ -10,9 +9,9 @@ repository and models Payment Activity, Payment Provider Settlement, and
 Bank Activity as three explicit, distinct universes, per the CTO's
 explicit instruction.
 
-Banking-1a, Banking-1b, Banking-1c, and Banking-1d are **IMPLEMENTED** and
-on `main`. Only Banking-1e is proposal-only; nothing below authorizes
-touching any of their files.
+Banking-1a, Banking-1b, Banking-1c, Banking-1d, and Banking-1e are **IMPLEMENTED**
+on `main`. This document is retained as the architecture/design record for
+Banking-1e; implementation is complete and no approval is pending.
 
 **Amendment (this turn, CTO Architecture Gate follow-up)**: this document
 is amended in place, not rewritten. Two sections are corrected: §7
@@ -34,10 +33,11 @@ summary:
 
 ```
 $ git rev-parse HEAD
-9fd9198e19d92b6b723f6f967862b9612698373a
+f7fd9adbf28709492a05bbc4c895cc63736e4784
 $ git rev-parse origin/main
-9fd9198e19d92b6b723f6f967862b9612698373a
-$ git log --oneline -6
+f7fd9adbf28709492a05bbc4c895cc63736e4784
+$ git log --oneline -7
+f7fd9ad Banking-1e: Payment Provider Settlement Import & Reconciliation
 9fd9198 docs(finance): mark Banking-1c proposal as implemented
 c6ed76f fix(finance): complete bank account statement GL movements
 91a9770 Banking-1d: Cash Position, Bank/Cash Account Statement, Unreconciled Transactions
@@ -57,13 +57,13 @@ was checked against this exact commit, not an assumption carried forward.
 `services/sphere-finance/src/db/schema.ts` and the corresponding service
 files:**
 
-| Item                                                            | Status              | Tables / key files                                                              |
-| --------------------------------------------------------------- | ------------------- | ------------------------------------------------------------------------------- |
-| Banking-1a — Bank/Cash Accounts                                 | Implemented         | `bank_cash_accounts`                                                            |
-| Banking-1b — Bank Transactions                                  | Implemented         | `bank_transactions`, `bank_transaction_number_counters`                         |
-| Banking-1c — Statement Import & Reconciliation                  | Implemented         | `bank_statement_imports`, `bank_statement_lines`, `bank_reconciliation_matches` |
-| Banking-1d — Bank/Cash Reporting                                | Implemented         | `bank-reports.service.ts` (Cash Position, Statement, Unreconciled Transactions) |
-| Banking-1e — Payment Gateway/Card/UPI Settlement Reconciliation | **NOT implemented** | none — this document only                                                       |
+| Item                                                            | Status          | Tables / key files                                                                                  |
+| --------------------------------------------------------------- | --------------- | --------------------------------------------------------------------------------------------------- |
+| Banking-1a — Bank/Cash Accounts                                 | Implemented     | `bank_cash_accounts`                                                                                |
+| Banking-1b — Bank Transactions                                  | Implemented     | `bank_transactions`, `bank_transaction_number_counters`                                             |
+| Banking-1c — Statement Import & Reconciliation                  | Implemented     | `bank_statement_imports`, `bank_statement_lines`, `bank_reconciliation_matches`                     |
+| Banking-1d — Bank/Cash Reporting                                | Implemented     | `bank-reports.service.ts` (Cash Position, Statement, Unreconciled Transactions)                     |
+| Banking-1e — Payment Gateway/Card/UPI Settlement Reconciliation | **Implemented** | `payment_provider_settlement_imports`, `payment_provider_settlements`, `payment_settlement_matches` |
 
 **A discrepancy noted, not corrected (out of this turn's scope, which is
 this document only):** commit `9fd9198`'s message states Banking-1c's
@@ -556,8 +556,9 @@ adapter is an **additional parser targeting the same normalized schema**
 — an enum value plus a parser function, exactly the shape Banking-1c's
 own `sourceFormat` seam already established (`bankStatementSourceFormatEnum`,
 `schema.ts:2034-2037`). No adapter is implemented in this proposal beyond
-the one generic MVP contract (§14) — this is a proposal-only document;
-even the MVP adapter is not authorized to be built by this document.
+the one generic MVP contract (§14) — this document is the architecture/design
+record for the implemented Banking-1e capability; the implementation is
+recorded in commit `f7fd9ad`.
 
 ---
 
@@ -1689,5 +1690,5 @@ pushed. Only this document,
 `docs/finance-work-item-banking-1e-proposal.md`, was rewritten in place —
 no second proposal file was created.
 
-Returning this proposal for CTO review. **Awaiting explicit approval
-before any Banking-1e implementation begins.**
+Returning this proposal for CTO review. **Implementation is complete on `main` at `f7fd9ad`. This document remains the
+architecture/design record and should be read alongside the implementation commit.**

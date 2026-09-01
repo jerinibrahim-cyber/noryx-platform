@@ -164,7 +164,7 @@ completeness statement for Sphere Finance as a product.
 
 **Invoicing / Billing** — [ ] Customer invoicing, [ ] Supplier billing, [ ] Credit/debit notes, [ ] Invoice lifecycle, [ ] Invoice-to-accounting integration.
 
-**Banking & Cash** — [ ] Bank accounts, [ ] Bank transactions, [ ] Bank reconciliation, [ ] UPI/card/bank payment reconciliation where applicable, [ ] Cash management, [ ] Cash receipts, [ ] Cash payments, [ ] Bank transfers, [ ] Cash position.
+**Banking & Cash** — [x] Bank accounts, [x] Bank transactions, [x] Bank reconciliation, [x] UPI/card/bank payment reconciliation where applicable, [x] Cash management, [x] Cash receipts, [x] Cash payments, [x] Bank transfers, [x] Cash position.
 
 **Expense Management** — [ ] Expense claims, [ ] Expense approvals, [ ] Reimbursements, [ ] Expense accounting, [ ] Policy/limit controls where appropriate.
 
