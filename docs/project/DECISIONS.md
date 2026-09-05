@@ -96,7 +96,7 @@ Any material deviation from the approved artifact discovered during implementati
 
 - No changes to `.github/CODEOWNERS`.
 - No changes to `.github/workflows/` or any other CI configuration — CI wiring to run the validator against real PRs remains a separate, later, independently-reviewed gate, not covered by this authorization.
-- No changes to `apps/`, `services/`, `infra/`, `docker-compose.yml`, `.env` files, or `pnpm-lock.yaml`.
+- No changes to `apps/`, `services/`, `infra/`, `docker-compose.yml`, or `.env` files. `pnpm-lock.yaml` MAY change only as the deterministic consequence of adding the explicitly approved dependency/dependencies required by `packages/orchestrator-validator` — no unrelated dependency upgrades, additions, removals, or lockfile churn are authorized.
 - No dependency installation beyond what the approved artifact's own scope requires within `packages/orchestrator-validator` itself.
 - n8n, RAG, autonomous agent loops, automatic task selection, automatic merges, and any application/product behavior change remain explicitly out of scope.
 - This authorization does not itself constitute or include a `VERIFICATION_RESULT`, `CODE_REVIEW_RESULT`, or `CTO_FINAL_APPROVAL` decision for the resulting implementation PR — those remain separate, later gates per the approved decision-semantics model.
