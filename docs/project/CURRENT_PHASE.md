@@ -3,37 +3,37 @@
 **Phase:** Stage 1A — Project Memory Foundation  
 **Orchestrator:** NOAH  
 **Workstream:** AI Engineering Orchestrator  
-**Status:** Implementation / validation
+**Status:** COMPLETED
 
 ## Objective
 Create a small, durable, version-controlled memory layer that lets a fresh engineering-agent session reconstruct the current project state, operating rules, decisions, and immediate handoff without relying on prior chat context.
 
-## In scope
+## Delivered
 1. `CLAUDE.md` — Claude operating contract and role boundaries.
 2. `docs/project/PROJECT_STATE.md` — factual current-state snapshot.
 3. `docs/project/CURRENT_PHASE.md` — current phase and constraints.
 4. `docs/project/NEXT_TASK.md` — explicit current handoff contract.
 5. `docs/project/DECISIONS.md` — append-oriented institutional decisions.
 
-## Out of scope
-- RAG or vector database implementation.
-- Autonomous agent loops or runtime orchestration.
-- Automatic task selection.
-- Application feature changes.
-- Automatic merges or direct main pushes.
-- Reconstructing an unverified Finance roadmap choice.
+## Validation
+A fresh Claude session validated the Stage 1A repository-memory foundation and returned **PASS**. Validation confirmed project identity, current implementation state, role separation, approval boundaries, source-of-truth rules, secret boundaries, prohibitions, and the stale/ambiguous Finance roadmap condition without inventing a next feature.
+
+## Completion
+Stage 1A was merged to `main` as `733c30706a2c0c1baf2e4abdd29824739df26dd8`. Local `main` was subsequently fast-forwarded to that commit and verified clean. Stage 1A introduced no application behavior changes.
+
+## Next stage boundary
+Stage 1B is the next orchestrator workstream, but it is **not yet implementation-approved**. NOAH must first define the Stage 1B objective and scope, then Claude performs repository discovery and writes the technical proposal. Substantive implementation begins only after CTO approval.
 
 ## Locked workflow
 YOU → NOAH decides WHAT → Claude discovers HOW + writes proposal → NOAH CTO approval → Claude implementation → Antigravity verification → Claude review when warranted → NOAH final review → Git verification/state update → next task.
 
-## Current repository context
-`main` is at `e04dd5887f057ff730045dacfacc6c936a106f18`, implementing Scheduled Reversal for Accruals and Other Timing Adjustments (Revision 2). Claude's fresh-session validation found substantial existing engineering documentation but no authoritative next Finance feature and a stale roadmap/checklist relative to the current implementation.
-
-## Acceptance criteria
-- A fresh Claude session can identify Noryx, the current repository state, the NOAH/Claude/Antigravity role separation, the current phase, the immediate task, source-of-truth rules, prohibitions, and approval gates from repository files alone.
-- No secrets are stored.
-- Stage 1A introduces no application behavior changes.
-- Ambiguous/stale Finance roadmap information is explicitly surfaced rather than guessed.
+## Constraints carried forward
+- RAG or vector database implementation is not part of Stage 1A.
+- Autonomous agent loops or runtime orchestration are not part of Stage 1A.
+- Automatic task selection is not part of Stage 1A.
+- Application feature changes are not part of Stage 1A.
+- Automatic merges or direct main pushes remain prohibited.
+- No unverified Finance roadmap choice may be inferred from stale documentation.
 
 ## Approval
-Stage 1A is a locked orchestrator-foundation task. Substantive product/runtime work continues through the proposal → CTO approval → implementation → verification → final-review workflow.
+Stage 1A is **COMPLETED**. The repository memory foundation is now the authoritative baseline for subsequent NOAH orchestration work.
