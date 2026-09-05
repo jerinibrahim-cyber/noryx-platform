@@ -1,46 +1,40 @@
 # Next Task
 
-**Task ID:** ORCH-1B-DESIGN  
-**Status:** DISCOVERY_REQUIRED  
-**Role:** NOAH / CTO + Product Owner  
+**Task ID:** ORCH-1B-IMPLEMENTATION-AUTHORIZATION  
+**Status:** SOURCE_OF_TRUTH_RATIFIED — AWAITING_CTO_IMPLEMENTATION_AUTHORIZATION  
+**Role:** NOAH / CTO  
 **Workstream:** AI Engineering Orchestrator — Stage 1B
 
 ## Objective
-Define the next safe, deterministic increment of the NOAH orchestration foundation without prematurely introducing RAG, autonomous agent loops, or broad application changes.
+
+Record NOAH/CTO's explicit `IMPLEMENTATION_AUTHORIZATION` decision for Stage 1B's implementation plan, citing the exact commit SHA of the now-ratified proposal artifact, before any implementation of `packages/orchestrator-validator` or any `docs/orchestrator/tasks/` record begins.
 
 ## Read first
+
 1. `CLAUDE.md`
 2. `docs/project/PROJECT_STATE.md`
 3. `docs/project/CURRENT_PHASE.md`
-4. `docs/project/NEXT_TASK.md`
-5. `docs/project/DECISIONS.md`
-6. Relevant existing architecture, roadmap, and proposal documents only as needed.
+4. `docs/project/NEXT_TASK.md` (this file)
+5. `docs/project/DECISIONS.md` — see DEC-007
+6. `docs/orchestrator/proposals/1B-implementation-plan.md` — the approved proposal artifact
 
-## Current task
-NOAH must first determine the precise Stage 1B objective and scope. Once the objective is defined, Claude performs repository discovery against the actual codebase and produces a technical proposal describing the smallest high-quality implementation boundary, affected files/components, interfaces/data contracts, security implications, deterministic verification, rollback considerations, and unresolved risks.
+## Current state — what is and is not true right now
 
-NOAH then reviews the proposal as CTO. No substantive Stage 1B implementation begins until CTO approval is explicit.
+- Stage 1B Revision 1 and its Implementation Plan (V2) are **approved** (DEC-007), and the approved artifact is committed at `docs/orchestrator/proposals/1B-implementation-plan.md` (commit `ef9b95049e5ac2cca8946870eeefc4b84c84b0d9`).
+- **Implementation has NOT begun.** No file exists yet under `packages/orchestrator-validator/` or `docs/orchestrator/tasks/`. `docs/orchestrator/README.md` and `docs/orchestrator/SCHEMA.md` do not exist yet either.
+- **Implementation is NOT yet authorized.** No `IMPLEMENTATION_AUTHORIZATION` decision has been recorded anywhere in this repository. Proposal approval and implementation authorization are deliberately distinct decisions (per the approved design's own approval-semantics model) — approving the design does not itself authorize building it.
 
-## Stage 1B boundary
-Stage 1B may establish deterministic orchestration/control primitives if discovery supports them, such as task/workflow state, handoff contracts, approval records, or related repository-backed control artifacts. The exact scope is **not predetermined** and must not be invented before discovery.
+## Next gate (Step B, per the approved implementation plan §12)
 
-The following are not automatically included:
-- RAG or vector database implementation.
-- Autonomous agent loops.
-- Automatic task selection.
-- Automatic merges or direct main pushes.
-- Broad application feature changes.
-- Choosing the next Finance feature from stale roadmap documentation.
+A small, separate, docs-only change — not inferred or assumed by any future session — must explicitly record `IMPLEMENTATION_AUTHORIZATION: AUTHORIZED`, citing commit `ef9b95049e5ac2cca8946870eeefc4b84c84b0d9` (or this ratification's own merge commit, whichever NOAH specifies) as the artifact being authorized. Only once that record exists in `main`'s history may an implementation PR (Step C) branch from `main` and begin implementing `packages/orchestrator-validator` and the Stage 1B task record — this ordering exists specifically so an approved artifact's SHA is always an ancestor of the implementation PR that relies on it.
 
-## Required workflow
-YOU → NOAH defines Stage 1B objective → Claude repository discovery → Claude technical proposal → NOAH CTO review/approval → implementation → deterministic QA/verification → code review when warranted → NOAH final review → Git verification/state update.
+## Explicitly not done by this task
 
-## Success conditions
-- Stage 1B has a clearly bounded, repository-grounded objective before implementation.
-- Claude's proposal is based on actual current repository structure and code, not assumptions.
-- Critical architecture, database/schema, security, auth/authz, tenant/RLS, production-impacting, breaking-API, scope, roadmap, and deviation decisions receive the required approval.
-- No secrets are captured in project memory.
-- No unapproved application behavior or runtime automation is introduced.
+- Does not implement `packages/orchestrator-validator`.
+- Does not create any file under `docs/orchestrator/tasks/`.
+- Does not modify CI or CODEOWNERS.
+- Does not touch any application/product code.
 
 ## Blocker rule
-If repository state, architecture, roadmap authority, or Stage 1B scope is ambiguous, stop and surface the ambiguity to NOAH rather than inventing a decision.
+
+If repository state or approval status is ambiguous, stop and surface the ambiguity to NOAH rather than inventing a decision — unchanged from Stage 1A/1B's standing rule.
