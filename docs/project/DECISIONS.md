@@ -72,3 +72,31 @@ NOAH/CTO approved Stage 1B Revision 1 (the technical proposal correcting the sta
 - Explicitly out of scope: n8n (in any role beyond a possible future external-automation boundary — never as the control plane or source of truth), RAG, autonomous agent loops, automatic task selection, automatic merges, and any application/product behavior change.
 
 **Explicit distinction — proposal approval vs. implementation authorization:** this decision records that the design/content above is approved. It does **not** authorize implementation of `packages/orchestrator-validator` or any task record. Per the approved design's own approval-semantics model, `IMPLEMENTATION_AUTHORIZATION` is a separate, later decision, to be recorded only once this proposal-approval commit already exists in `main`'s history — deliberately not recorded here or anywhere yet.
+
+## DEC-008 — Stage 1B Implementation Authorized
+
+**Status:** LOCKED
+**Date:** 2026-09-05
+
+NOAH/CTO authorizes implementation of the Stage 1B orchestration foundation described in the approved proposal artifact. This decision is the separate, later `IMPLEMENTATION_AUTHORIZATION` referenced in DEC-007's own text, and is recorded only now that the proposal-approval commit already exists in `main`'s history, per the approved artifact's own approval-semantics model (a `PROPOSAL_REVIEW` approval and an `IMPLEMENTATION_AUTHORIZATION` are distinct decision types and are never conflated).
+
+**Decision:** IMPLEMENTATION IS AUTHORIZED.
+
+**Approved artifact this authorization covers:** `docs/orchestrator/proposals/1B-implementation-plan.md`, originally committed at `ef9b95049e5ac2cca8946870eeefc4b84c84b0d9` and ratified into `main` via PR #23, merge commit `878da4c2f4c945c1d44cad385f6965c309e41c81` (referenced here as the real, verified Gate A merge SHA — no placeholder).
+
+**Authorized scope:** implementation of exactly what the approved artifact specifies, and nothing beyond it:
+
+- `packages/orchestrator-validator` (the validator library/tooling package, modeled structurally on `packages/event-bus-client`), including `state-machine.ts` (`STATES`, `TRANSITIONS`, derived `TERMINAL_STATES`, `isTerminal()`, `deriveStatus()`) as the single authoritative representation of the state/transition/decision-gate logic, plus its accompanying unit tests (`*.test.ts`, including the negative cases and the `STATES.length === 14` safeguard the approved artifact specifies).
+- `docs/orchestrator/README.md` and `docs/orchestrator/SCHEMA.md`.
+- The illustrative example task record described in the approved artifact's §9, under `docs/orchestrator/tasks/`.
+
+Any material deviation from the approved artifact discovered during implementation requires a new proposal revision and separate approval — not a silent change under this authorization.
+
+**Exclusions preserved (all exclusions from the approved plan remain in force, unchanged by this authorization):**
+
+- No changes to `.github/CODEOWNERS`.
+- No changes to `.github/workflows/` or any other CI configuration — CI wiring to run the validator against real PRs remains a separate, later, independently-reviewed gate, not covered by this authorization.
+- No changes to `apps/`, `services/`, `infra/`, `docker-compose.yml`, `.env` files, or `pnpm-lock.yaml`.
+- No dependency installation beyond what the approved artifact's own scope requires within `packages/orchestrator-validator` itself.
+- n8n, RAG, autonomous agent loops, automatic task selection, automatic merges, and any application/product behavior change remain explicitly out of scope.
+- This authorization does not itself constitute or include a `VERIFICATION_RESULT`, `CODE_REVIEW_RESULT`, or `CTO_FINAL_APPROVAL` decision for the resulting implementation PR — those remain separate, later gates per the approved decision-semantics model.
