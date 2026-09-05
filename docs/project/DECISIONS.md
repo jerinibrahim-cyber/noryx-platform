@@ -36,3 +36,9 @@ Noryx remains Finance-first. The current repository contains a newer Scheduled R
 **Date:** 2026-09-05
 
 Establish repository project memory and operating contracts before implementing RAG, an autonomous orchestrator runtime, or agent loops. Stage 1A must not change application behavior.
+
+## DEC-006 — Stage 1A Completion and Stage 1B Gate
+**Status:** LOCKED  
+**Date:** 2026-09-05
+
+Stage 1A is complete after fresh-session validation passed, the documentation-only changes were merged to `main` as `733c30706a2c0c1baf2e4abdd29824739df26dd8`, and local `main` was fast-forwarded and verified clean. Stage 1B begins as a design/discovery task only. Its implementation scope must be established from the actual repository and approved by NOAH/CTO before substantive engineering work begins.
