@@ -554,3 +554,253 @@ describe("malformed records", () => {
     expect(report.issues.some((i) => i.code === "UNKNOWN_FIELD")).toBe(true);
   });
 });
+
+// NOAH CTO code review — PR #25, PRIMARY REQUIRED FIX: schema.ts previously
+// validated presence and some enums but did not constrain several known
+// fields to their declared types. These tests prove the validator now
+// fails closed on malformed *known* fields (not merely unknown ones), for
+// every field named in the review.
+describe("malformed field types (schema strictness — fail closed on known fields)", () => {
+  // Values a nullable-string or plain-string field must reject outright.
+  const nonStringScalars: unknown[] = [{ nested: true }, ["x"], true, 42];
+  // Values a "non-negative integer" field must reject outright.
+  const nonNonNegativeIntScalars: unknown[] = ["1", -1, 1.5, true, {}];
+
+  it("rejects retry_of when set to an object, array, boolean, or number", async () => {
+    for (const value of nonStringScalars) {
+      const head: any = baseFixture();
+      head.retry_of = value;
+      const report = await validateTaskRecordChange({
+        path: "t.md",
+        baseContent: undefined,
+        headContent: fileFor(head),
+        isAncestorOrEqual: alwaysAncestor,
+        resolveReferencedTask: noReferencedTask,
+      });
+      expect(report.valid).toBe(false);
+      expect(report.issues.some((i) => i.code === "SCHEMA_VIOLATION")).toBe(
+        true,
+      );
+    }
+  });
+
+  it("rejects resumes_cancelled when set to an object, array, boolean, or number", async () => {
+    for (const value of nonStringScalars) {
+      const head: any = baseFixture();
+      head.resumes_cancelled = value;
+      const report = await validateTaskRecordChange({
+        path: "t.md",
+        baseContent: undefined,
+        headContent: fileFor(head),
+        isAncestorOrEqual: alwaysAncestor,
+        resolveReferencedTask: noReferencedTask,
+      });
+      expect(report.valid).toBe(false);
+      expect(report.issues.some((i) => i.code === "SCHEMA_VIOLATION")).toBe(
+        true,
+      );
+    }
+  });
+
+  it("rejects artifact_ref.path when set to an object, array, boolean, or number", async () => {
+    for (const value of nonStringScalars) {
+      const head: any = baseFixture();
+      head.history[1].artifact_ref.path = value;
+      const report = await validateTaskRecordChange({
+        path: "t.md",
+        baseContent: undefined,
+        headContent: fileFor(head),
+        isAncestorOrEqual: alwaysAncestor,
+        resolveReferencedTask: noReferencedTask,
+      });
+      expect(report.valid).toBe(false);
+      expect(
+        report.issues.some((i) => i.code === "ARTIFACT_REF_INVALID_PATH"),
+      ).toBe(true);
+    }
+  });
+
+  it("rejects artifact_ref.commit_sha when set to an object, array, boolean, or number", async () => {
+    for (const value of nonStringScalars) {
+      const head: any = baseFixture();
+      head.history[1].artifact_ref.commit_sha = value;
+      const report = await validateTaskRecordChange({
+        path: "t.md",
+        baseContent: undefined,
+        headContent: fileFor(head),
+        isAncestorOrEqual: alwaysAncestor,
+        resolveReferencedTask: noReferencedTask,
+      });
+      expect(report.valid).toBe(false);
+      expect(
+        report.issues.some((i) => i.code === "ARTIFACT_REF_INVALID_COMMIT_SHA"),
+      ).toBe(true);
+    }
+  });
+
+  it("rejects artifact_ref.revision when not a non-negative integer", async () => {
+    for (const value of nonNonNegativeIntScalars) {
+      const head: any = baseFixture();
+      head.history[1].artifact_ref.revision = value;
+      const report = await validateTaskRecordChange({
+        path: "t.md",
+        baseContent: undefined,
+        headContent: fileFor(head),
+        isAncestorOrEqual: alwaysAncestor,
+        resolveReferencedTask: noReferencedTask,
+      });
+      expect(report.valid).toBe(false);
+      expect(
+        report.issues.some((i) => i.code === "ARTIFACT_REF_INVALID_REVISION"),
+      ).toBe(true);
+    }
+  });
+
+  it("rejects artifact_ref.pr_url when set to an object, array, boolean, or number", async () => {
+    for (const value of nonStringScalars) {
+      const head: any = baseFixture();
+      head.history[1].artifact_ref.pr_url = value;
+      const report = await validateTaskRecordChange({
+        path: "t.md",
+        baseContent: undefined,
+        headContent: fileFor(head),
+        isAncestorOrEqual: alwaysAncestor,
+        resolveReferencedTask: noReferencedTask,
+      });
+      expect(report.valid).toBe(false);
+      expect(
+        report.issues.some((i) => i.code === "ARTIFACT_REF_INVALID_PR_URL"),
+      ).toBe(true);
+    }
+  });
+
+  it("rejects artifact_ref.ci_run_ref when set to an object, array, boolean, or number", async () => {
+    for (const value of nonStringScalars) {
+      const head: any = baseFixture();
+      head.history[1].artifact_ref.ci_run_ref = value;
+      const report = await validateTaskRecordChange({
+        path: "t.md",
+        baseContent: undefined,
+        headContent: fileFor(head),
+        isAncestorOrEqual: alwaysAncestor,
+        resolveReferencedTask: noReferencedTask,
+      });
+      expect(report.valid).toBe(false);
+      expect(
+        report.issues.some((i) => i.code === "ARTIFACT_REF_INVALID_CI_RUN_REF"),
+      ).toBe(true);
+    }
+  });
+
+  it("rejects artifact_ref.checks when not an array of strings", async () => {
+    const malformedChecks: unknown[] = ["not-an-array", 1, true, {}, ["ok", 2]];
+    for (const value of malformedChecks) {
+      const head: any = baseFixture();
+      head.history[1].artifact_ref.checks = value;
+      const report = await validateTaskRecordChange({
+        path: "t.md",
+        baseContent: undefined,
+        headContent: fileFor(head),
+        isAncestorOrEqual: alwaysAncestor,
+        resolveReferencedTask: noReferencedTask,
+      });
+      expect(report.valid).toBe(false);
+      expect(
+        report.issues.some((i) => i.code === "ARTIFACT_REF_INVALID_CHECKS"),
+      ).toBe(true);
+    }
+  });
+
+  it("rejects artifact_ref.note when not a string", async () => {
+    const malformedNotes: unknown[] = [1, true, {}, ["x"]];
+    for (const value of malformedNotes) {
+      const head: any = baseFixture();
+      head.history[1].artifact_ref.note = value;
+      const report = await validateTaskRecordChange({
+        path: "t.md",
+        baseContent: undefined,
+        headContent: fileFor(head),
+        isAncestorOrEqual: alwaysAncestor,
+        resolveReferencedTask: noReferencedTask,
+      });
+      expect(report.valid).toBe(false);
+      expect(
+        report.issues.some((i) => i.code === "ARTIFACT_REF_INVALID_NOTE"),
+      ).toBe(true);
+    }
+  });
+
+  it("rejects a plain history entry's revision when not a non-negative integer", async () => {
+    for (const value of nonNonNegativeIntScalars) {
+      const head: any = baseFixture();
+      head.history[1].revision = value;
+      const report = await validateTaskRecordChange({
+        path: "t.md",
+        baseContent: undefined,
+        headContent: fileFor(head),
+        isAncestorOrEqual: alwaysAncestor,
+        resolveReferencedTask: noReferencedTask,
+      });
+      expect(report.valid).toBe(false);
+      expect(report.issues.some((i) => i.code === "INVALID_REVISION")).toBe(
+        true,
+      );
+    }
+  });
+
+  it("rejects reviewed_revision when not a non-negative integer", async () => {
+    for (const value of nonNonNegativeIntScalars) {
+      const head: any = baseFixture();
+      head.status = "APPROVED";
+      head.history.push({
+        type: "PROPOSAL_REVIEW",
+        actor: "NOAH",
+        decision: "APPROVED",
+        reviewed_revision: value,
+        artifact_ref: { path: "x", commit_sha: REAL_SHA },
+        scope: "approved despite malformed reviewed_revision",
+        timestamp: "2026-09-06T00:03:00Z",
+      });
+      const report = await validateTaskRecordChange({
+        path: "t.md",
+        baseContent: undefined,
+        headContent: fileFor(head),
+        isAncestorOrEqual: alwaysAncestor,
+        resolveReferencedTask: noReferencedTask,
+      });
+      expect(report.valid).toBe(false);
+      expect(
+        report.issues.some((i) => i.code === "INVALID_REVIEWED_REVISION"),
+      ).toBe(true);
+    }
+  });
+
+  it("rejects supersedes when neither null nor a non-negative integer index", async () => {
+    const malformedSupersedes: unknown[] = ["1", -1, 1.5, true, {}, ["x"]];
+    for (const value of malformedSupersedes) {
+      const head: any = baseFixture();
+      head.status = "APPROVED";
+      head.history.push({
+        type: "PROPOSAL_REVIEW",
+        actor: "NOAH",
+        decision: "APPROVED",
+        reviewed_revision: 1,
+        artifact_ref: { path: "x", commit_sha: REAL_SHA },
+        scope: "approved despite malformed supersedes",
+        timestamp: "2026-09-06T00:03:00Z",
+        supersedes: value,
+      });
+      const report = await validateTaskRecordChange({
+        path: "t.md",
+        baseContent: undefined,
+        headContent: fileFor(head),
+        isAncestorOrEqual: alwaysAncestor,
+        resolveReferencedTask: noReferencedTask,
+      });
+      expect(report.valid).toBe(false);
+      expect(report.issues.some((i) => i.code === "INVALID_SUPERSEDES")).toBe(
+        true,
+      );
+    }
+  });
+});

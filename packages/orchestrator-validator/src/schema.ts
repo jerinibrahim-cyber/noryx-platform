@@ -67,11 +67,17 @@ class TaskRecordFrontMatterDto {
   @Min(0)
   revision!: number;
 
+  // @IsOptional() treats both `undefined` (key absent) and `null` as
+  // "skip further validators" — combined with @IsString() that gives
+  // exactly the declared `string | null` type: present-and-non-null
+  // must be a string, so an object/array/boolean/number is rejected.
   @IsOptional()
+  @IsString()
   @Transform(({ value }) => value ?? null)
   retry_of!: string | null;
 
   @IsOptional()
+  @IsString()
   @Transform(({ value }) => value ?? null)
   resumes_cancelled!: string | null;
 
@@ -213,6 +219,20 @@ const ALLOWED_ARTIFACT_REF_KEYS = new Set([
 
 const GENERIC_SCOPE_VALUES = new Set(["", "all", "everything", "task"]);
 
+/** `string | null` — rejects objects, arrays, booleans, and numbers. */
+function isNullableString(value: unknown): value is string | null {
+  return value === null || typeof value === "string";
+}
+
+/** Non-negative integer — rejects floats, strings, booleans, negatives. */
+function isNonNegativeInt(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((v) => typeof v === "string");
+}
+
 function validateArtifactRef(
   ref: unknown,
   entryIndex: number,
@@ -240,6 +260,52 @@ function validateArtifactRef(
       message: `Entry ${entryIndex}: artifact_ref requires "path" and "commit_sha" (nullable).`,
     });
   }
+
+  // Strict per-field type constraints — fail closed on malformed known
+  // fields, not merely on unknown ones.
+  if ("path" in obj && !isNullableString(obj.path)) {
+    issues.push({
+      code: "ARTIFACT_REF_INVALID_PATH",
+      message: `Entry ${entryIndex}: artifact_ref.path must be a string or null (got ${describeType(obj.path)}).`,
+    });
+  }
+  if ("commit_sha" in obj && !isNullableString(obj.commit_sha)) {
+    issues.push({
+      code: "ARTIFACT_REF_INVALID_COMMIT_SHA",
+      message: `Entry ${entryIndex}: artifact_ref.commit_sha must be a string or null (got ${describeType(obj.commit_sha)}).`,
+    });
+  }
+  if (obj.revision !== undefined && !isNonNegativeInt(obj.revision)) {
+    issues.push({
+      code: "ARTIFACT_REF_INVALID_REVISION",
+      message: `Entry ${entryIndex}: artifact_ref.revision must be a non-negative integer when present (got ${describeType(obj.revision)}).`,
+    });
+  }
+  if (obj.pr_url !== undefined && !isNullableString(obj.pr_url)) {
+    issues.push({
+      code: "ARTIFACT_REF_INVALID_PR_URL",
+      message: `Entry ${entryIndex}: artifact_ref.pr_url must be a string or null when present (got ${describeType(obj.pr_url)}).`,
+    });
+  }
+  if (obj.ci_run_ref !== undefined && !isNullableString(obj.ci_run_ref)) {
+    issues.push({
+      code: "ARTIFACT_REF_INVALID_CI_RUN_REF",
+      message: `Entry ${entryIndex}: artifact_ref.ci_run_ref must be a string or null when present (got ${describeType(obj.ci_run_ref)}).`,
+    });
+  }
+  if (obj.checks !== undefined && !isStringArray(obj.checks)) {
+    issues.push({
+      code: "ARTIFACT_REF_INVALID_CHECKS",
+      message: `Entry ${entryIndex}: artifact_ref.checks must be an array of strings when present (got ${describeType(obj.checks)}).`,
+    });
+  }
+  if (obj.note !== undefined && typeof obj.note !== "string") {
+    issues.push({
+      code: "ARTIFACT_REF_INVALID_NOTE",
+      message: `Entry ${entryIndex}: artifact_ref.note must be a string when present (got ${describeType(obj.note)}).`,
+    });
+  }
+
   const commitSha = obj.commit_sha as ArtifactRef["commit_sha"];
   if ((commitSha === null || commitSha === undefined) && !obj.note) {
     issues.push({
@@ -248,6 +314,13 @@ function validateArtifactRef(
     });
   }
   return issues;
+}
+
+/** Short, human-readable type label for error messages (never the value itself — avoids echoing secrets). */
+function describeType(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  return typeof value;
 }
 
 export function validateHistoryEntries(history: unknown[]): ValidationIssue[] {
@@ -334,6 +407,12 @@ export function validateHistoryEntries(history: unknown[]): ValidationIssue[] {
           issues.push(...validateArtifactRef(entry.artifact_ref, i));
         }
       }
+      if (entry.revision !== undefined && !isNonNegativeInt(entry.revision)) {
+        issues.push({
+          code: "INVALID_REVISION",
+          message: `Entry ${i}: "revision" must be a non-negative integer when present (got ${describeType(entry.revision)}).`,
+        });
+      }
     }
 
     if (isDecision) {
@@ -356,13 +435,18 @@ export function validateHistoryEntries(history: unknown[]): ValidationIssue[] {
           message: `Entry ${i} (${type}) has invalid decision "${String(entry.decision)}"; allowed: ${allowedValues.join(", ")}.`,
         });
       }
-      if (
-        type === "PROPOSAL_REVIEW" &&
-        typeof entry.reviewed_revision !== "number"
-      ) {
+      if (type === "PROPOSAL_REVIEW" && entry.reviewed_revision === undefined) {
         issues.push({
           code: "MISSING_REVIEWED_REVISION",
           message: `Entry ${i} (PROPOSAL_REVIEW) requires "reviewed_revision".`,
+        });
+      } else if (
+        entry.reviewed_revision !== undefined &&
+        !isNonNegativeInt(entry.reviewed_revision)
+      ) {
+        issues.push({
+          code: "INVALID_REVIEWED_REVISION",
+          message: `Entry ${i}: "reviewed_revision" must be a non-negative integer when present (got ${describeType(entry.reviewed_revision)}).`,
         });
       }
       if (!entry.artifact_ref) {
@@ -392,11 +476,11 @@ export function validateHistoryEntries(history: unknown[]): ValidationIssue[] {
       if (
         entry.supersedes !== undefined &&
         entry.supersedes !== null &&
-        typeof entry.supersedes !== "number"
+        !isNonNegativeInt(entry.supersedes)
       ) {
         issues.push({
           code: "INVALID_SUPERSEDES",
-          message: `Entry ${i} supersedes must be null or an index (number).`,
+          message: `Entry ${i}: "supersedes" must be null or a non-negative integer index when present (got ${describeType(entry.supersedes)}).`,
         });
       }
     }

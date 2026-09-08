@@ -25,28 +25,18 @@ export interface TransitionRule {
   requiredDecision?: { type: DecisionType; decision: string };
 }
 
-const NON_TERMINAL_FOR_CANCEL: State[] = [
-  "DEFINED",
-  "DISCOVERY",
-  "PROPOSED",
-  "APPROVED",
-  "AUTHORIZED",
-  "IN_PROGRESS",
-  "VERIFICATION",
-  "CODE_REVIEW",
-  "FINAL_REVIEW",
-  "BLOCKED",
-  "DEFERRED",
-];
-
 /**
  * THE single, authoritative transition table — every row from §5.2, and
- * nowhere else. A small number of rows fill gaps the approved plan left
- * open (an unnamed plain-entry type, or a decision value with no
- * explicitly stated destination) — each such row is commented with the
- * gap it fills; see docs/orchestrator/SCHEMA.md for the full rationale.
+ * nowhere else, EXCEPT the "(any non-terminal) -> CANCELLED" rows, which
+ * are appended below and derived from this array itself rather than from
+ * a second, independently maintained state list (§6 item 2 / NOAH PR #25
+ * code review — "SINGLE SOURCE OF TRUTH"). A small number of rows fill
+ * gaps the approved plan left open (an unnamed plain-entry type, or a
+ * decision value with no explicitly stated destination) — each such row
+ * is commented with the gap it fills; see docs/orchestrator/SCHEMA.md for
+ * the full rationale.
  */
-export const TRANSITIONS: TransitionRule[] = [
+const CORE_TRANSITIONS: TransitionRule[] = [
   // DEFINED -> DISCOVERY
   { from: "DEFINED", to: "DISCOVERY", entryType: "DISCOVERY_STARTED" },
 
@@ -201,9 +191,30 @@ export const TRANSITIONS: TransitionRule[] = [
   // DEFERRED -> RESUMED back to each state that can reach DEFERRED directly
   { from: "DEFERRED", to: "APPROVED", entryType: "RESUMED" },
   { from: "DEFERRED", to: "IN_PROGRESS", entryType: "RESUMED" },
+];
 
+/**
+ * The states eligible for "(any non-terminal) -> CANCELLED, with reason"
+ * are DERIVED from CORE_TRANSITIONS by the exact same "has at least one
+ * outgoing row" rule used below to derive TERMINAL_STATES — applied here
+ * to the pre-cancellation table, so DONE/FAILED/CANCELLED (which have no
+ * outgoing rows in CORE_TRANSITIONS either) are naturally excluded without
+ * a second, independently maintained list of non-terminal states.
+ */
+const CANCEL_ELIGIBLE_STATES: readonly State[] = STATES.filter((s) =>
+  CORE_TRANSITIONS.some((t) => t.from === s),
+);
+
+/**
+ * THE single, authoritative transition table: CORE_TRANSITIONS plus the
+ * derived cancellation rows. Nothing else in this module (or outside it)
+ * independently encodes a transition, a decision gate, or a terminal- or
+ * cancel-eligible-state list.
+ */
+export const TRANSITIONS: TransitionRule[] = [
+  ...CORE_TRANSITIONS,
   // (any non-terminal) -> CANCELLED, with reason (plain entry)
-  ...NON_TERMINAL_FOR_CANCEL.map((from): TransitionRule => ({
+  ...CANCEL_ELIGIBLE_STATES.map((from): TransitionRule => ({
     from,
     to: "CANCELLED",
     entryType: "CANCELLED",
