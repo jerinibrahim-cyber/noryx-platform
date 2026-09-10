@@ -17,7 +17,7 @@ history:
     revision: 1
     artifact_ref:
       path: "docs/orchestrator/proposals/1B-implementation-plan.md"
-      commit_sha: "ef9b95049e5ac2cca8946870eeefc4b84c84b0d9"
+      commit_sha: "878da4c2f4c945c1d44cad385f6965c309e41c81"
       revision: 1
     timestamp: "2026-09-05T09:30:00Z"
   - type: PROPOSAL_REVIEW
@@ -26,7 +26,7 @@ history:
     reviewed_revision: 1
     artifact_ref:
       path: "docs/orchestrator/proposals/1B-implementation-plan.md"
-      commit_sha: "ef9b95049e5ac2cca8946870eeefc4b84c84b0d9"
+      commit_sha: "878da4c2f4c945c1d44cad385f6965c309e41c81"
       revision: 1
     scope: "Option A, docs/orchestrator/, packages/orchestrator-validator, Markdown+YAML+history format, js-yaml/JSON_SCHEMA — implementation plan approved per DEC-007"
     timestamp: "2026-09-05T10:00:00Z"
@@ -52,6 +52,6 @@ exists to validate it against. It documents this very implementation
 task: the schema, the validator package, and this directory's docs.
 
 Every `artifact_ref.commit_sha` above is a real commit already on `main`
-at the time this file was authored — the proposal's own commit
-(`ef9b9504...`, Gate A) and the implementation-authorization decision's
+at the time this file was authored — the proposal-ratification merge commit
+(`878da4c...`, Gate A) and the implementation-authorization decision's
 merge commit (`563046eb...`, Gate B) — never a placeholder.
