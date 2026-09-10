@@ -29,6 +29,7 @@ import { BankReconciliationController } from "./bank-reconciliation/bank-reconci
 import { BankReportsController } from "./bank-reports/bank-reports.controller";
 import { PaymentProviderSettlementsController } from "./payment-provider-settlements/payment-provider-settlements.controller";
 import { ScheduledReversalsController } from "./scheduled-reversals/scheduled-reversals.controller";
+import { TaxCodesController } from "./tax-configuration/tax-codes.controller";
 
 /**
  * Milestone 3.2 — Route → Required-Role Matrix Hardening
@@ -226,7 +227,11 @@ function role(
  * combined discovery/implementation turn), plus Banking-1e's
  * PaymentProviderSettlementsController (12 routes, added per
  * docs/finance-work-item-banking-1e-proposal.md §21/§23, CTO-approved —
- * implementation-authorization turn), 118 routes total across 22
+ * implementation-authorization turn), and Tax/VAT MVP Phase 1's
+ * TaxCodesController (7 routes: Tax Code CRUD-minus-delete plus nested
+ * Tax Rate create/list, CTO-approved architecture proposal + CTO
+ * decision turn, Phase 1 implementation authorization only — no AP/AR
+ * wiring or VAT report routes exist yet), 125 routes total across 24
  * controllers.
  */
 const EXPECTED: DiscoveredRoute[] = [
@@ -311,6 +316,41 @@ const EXPECTED: DiscoveredRoute[] = [
     "ScheduledReversalsController",
     ["finance.poster"],
   ),
+
+  // Tax / VAT MVP — Phase 1: Tax Configuration Foundation
+  // (CTO-approved architecture proposal §11, CTO decision turn). Same
+  // read/write RBAC split as SuppliersController (master data). Tax
+  // Rate routes nest under the tax code they belong to
+  // (":taxCodeId/rates") and carry the same finance.admin-write /
+  // finance.viewer+poster+admin-read split as the parent Tax Code
+  // routes — rates are create-only master data, not a posting action,
+  // so finance.poster is not given rate-write access the way it is for
+  // scheduled-reversals' posting-adjacent routes above.
+  role("POST", "tax-codes", "TaxCodesController", ["finance.admin"]),
+  role("GET", "tax-codes", "TaxCodesController", [
+    "finance.viewer",
+    "finance.poster",
+    "finance.admin",
+  ]),
+  role("GET", "tax-codes/:id", "TaxCodesController", [
+    "finance.viewer",
+    "finance.poster",
+    "finance.admin",
+  ]),
+  role("PATCH", "tax-codes/:id/deactivate", "TaxCodesController", [
+    "finance.admin",
+  ]),
+  role("PATCH", "tax-codes/:id/reactivate", "TaxCodesController", [
+    "finance.admin",
+  ]),
+  role("POST", "tax-codes/:taxCodeId/rates", "TaxCodesController", [
+    "finance.admin",
+  ]),
+  role("GET", "tax-codes/:taxCodeId/rates", "TaxCodesController", [
+    "finance.viewer",
+    "finance.poster",
+    "finance.admin",
+  ]),
 
   role("GET", "accounts/:id/ledger", "GeneralLedgerController", [
     "finance.viewer",
@@ -868,11 +908,12 @@ describe("Route → required-role matrix (sphere-finance)", () => {
     ...discoverRoutes(BankReportsController),
     ...discoverRoutes(PaymentProviderSettlementsController),
     ...discoverRoutes(ScheduledReversalsController),
+    ...discoverRoutes(TaxCodesController),
   ];
   const actualByKey = new Map(actual.map((r) => [r.key, r]));
   const expectedByKey = new Map(EXPECTED.map((r) => [r.key, r]));
 
-  it("discovers exactly the expected number of routes across all twenty-three controllers", () => {
+  it("discovers exactly the expected number of routes across all twenty-four controllers", () => {
     expect(actual).toHaveLength(EXPECTED.length);
   });
 

@@ -14,6 +14,7 @@ import { BankReconciliationModule } from "./bank-reconciliation/bank-reconciliat
 import { BankReportsModule } from "./bank-reports/bank-reports.module";
 import { PaymentProviderSettlementsModule } from "./payment-provider-settlements/payment-provider-settlements.module";
 import { ScheduledReversalsModule } from "./scheduled-reversals/scheduled-reversals.module";
+import { TaxConfigurationModule } from "./tax-configuration/tax-configuration.module";
 import { HealthController } from "./health/health.controller";
 import { TenantContextMiddleware } from "./tenant/tenant-context.middleware";
 
@@ -123,6 +124,18 @@ import { TenantContextMiddleware } from "./tenant/tenant-context.middleware";
     // BankReconciliationModule/PaymentProviderSettlementsModule).
     // Touches none of the modules above.
     ScheduledReversalsModule,
+    // Tax / VAT MVP — Phase 1: Tax Configuration Foundation
+    // (CTO-approved architecture proposal, CTO decision turn, Phase 1
+    // implementation authorization). A top-level sibling of
+    // ScheduledReversalsModule, not nested inside
+    // AccountsPayableModule/AccountsReceivableModule — tax codes/rates
+    // are shared configuration both AP and AR will reference in a
+    // later phase, not owned by either sub-ledger. Reads/writes its own
+    // two new tables only (tax_codes, tax_rates); touches none of the
+    // modules above. Phase 1 only: no AP/AR wiring, no calculation, no
+    // credit/debit note inheritance, no VAT report — all explicitly
+    // deferred to a later, separately-authorized phase.
+    TaxConfigurationModule,
     // Scoped registration so TenantContextMiddleware can inject JwtService
     // without importing AccountsModule's other providers — same pattern as
     // services/identity/src/app.module.ts.

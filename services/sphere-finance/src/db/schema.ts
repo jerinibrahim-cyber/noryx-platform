@@ -2652,3 +2652,125 @@ export const scheduledReversals = pgTable(
 
 export type ScheduledReversal = typeof scheduledReversals.$inferSelect;
 export type NewScheduledReversal = typeof scheduledReversals.$inferInsert;
+
+/**
+ * Tax / VAT MVP — Phase 1: Tax Configuration Foundation
+ * (CTO-approved architecture proposal + CTO decision turn). This phase
+ * implements ONLY tax_codes and tax_rates — no AP/AR wiring, no
+ * calculation, no credit/debit note inheritance, no VAT report (all
+ * explicitly deferred to Phase 2+, per the CTO's phase-by-phase
+ * authorization).
+ *
+ * No reverse-charge treatment in MVP — nothing in this codebase or in
+ * verified UAE test data (countryCode: "AE" everywhere) requires it,
+ * and reverse-charge changes the posting shape, which is out of scope.
+ */
+export const taxTreatmentEnum = pgEnum("tax_treatment", [
+  "STANDARD",
+  "ZERO_RATED",
+  "EXEMPT",
+]);
+
+/**
+ * Tax Code master data — one row per code per legal entity, following
+ * the exact `suppliers` master-data-list pattern (NOT the
+ * ap_settings/ar_settings singleton-upsert pattern: a legal entity has
+ * many tax codes, not one). No hard delete — deactivate/reactivate only
+ * (SuppliersController's convention), so a code referenced by a
+ * historical document can never disappear out from under it.
+ *
+ * `isActive` governs future selectability only (Decision, CTO
+ * DECISION — TAX/VAT MVP turn, item 3's surrounding reasoning): it is
+ * NOT retroactive and does not affect resolution for documents already
+ * dated within a still-valid tax_rates window. Phase 1 implements no
+ * resolution logic yet (that is Phase 2/3), so this is a forward
+ * statement of intent for later phases, not something enforced by code
+ * in this phase.
+ */
+export const taxCodes = pgTable(
+  "tax_codes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id").notNull(),
+    legalEntityId: uuid("legal_entity_id").notNull(),
+    code: varchar("code", { length: 32 }).notNull(),
+    name: varchar("name", { length: 255 }).notNull(),
+    treatment: taxTreatmentEnum("treatment").notNull(),
+    isActive: boolean("is_active").notNull().default(true),
+    createdBy: uuid("created_by"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    unique("tax_codes_tenant_entity_code_unique").on(
+      t.tenantId,
+      t.legalEntityId,
+      t.code,
+    ),
+    index("tax_codes_tenant_entity_idx").on(t.tenantId, t.legalEntityId),
+  ],
+);
+
+export type TaxCode = typeof taxCodes.$inferSelect;
+export type NewTaxCode = typeof taxCodes.$inferInsert;
+
+/**
+ * Tax Rate — effective-dated, immutable, create-only (no PATCH/DELETE
+ * route exists at all — corrections are new rows, same posture as
+ * posted financial documents; enforced at the API layer since there is
+ * no UPDATE/DELETE route to guard, mirroring how accounting_periods has
+ * no reopen route). `rateBasisPoints` is an integer (e.g. 500 = 5.00%),
+ * consistent with the all-integer minor-unit convention used everywhere
+ * else in this schema — never floating/numeric.
+ *
+ * Non-overlap (no two rates for the same tenant+legal entity+tax code
+ * may cover the same date) requires a real GiST EXCLUDE constraint,
+ * which drizzle-orm's schema DSL has no builder for — added as raw SQL
+ * in drizzle/constraints/025_tax_rates_no_overlap_exclusion.sql, applied
+ * by apply-db-constraints.ts. Identical mechanism to
+ * accounting_periods' 001_period_overlap_exclusion.sql — see that
+ * file's comment for the btree_gist reasoning, unchanged here.
+ */
+export const taxRates = pgTable(
+  "tax_rates",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id").notNull(),
+    legalEntityId: uuid("legal_entity_id").notNull(),
+    /// Real FK: tax_codes is Finance's own table, same migration
+    /// lifecycle (same reasoning as apSettings.apControlAccountId ->
+    /// chartOfAccounts).
+    taxCodeId: uuid("tax_code_id")
+      .notNull()
+      .references(() => taxCodes.id),
+    rateBasisPoints: integer("rate_basis_points").notNull(),
+    effectiveFrom: date("effective_from").notNull(),
+    /// Nullable — open-ended when null (still-current rate).
+    effectiveTo: date("effective_to"),
+    createdBy: uuid("created_by"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    index("tax_rates_tenant_entity_code_idx").on(
+      t.tenantId,
+      t.legalEntityId,
+      t.taxCodeId,
+    ),
+    check("tax_rates_rate_non_negative", sql`${t.rateBasisPoints} >= 0`),
+    check(
+      "tax_rates_end_after_start",
+      sql`${t.effectiveTo} IS NULL OR ${t.effectiveTo} > ${t.effectiveFrom}`,
+    ),
+    // Overlap prevention is a GiST EXCLUDE constraint — see
+    // drizzle/constraints/025_tax_rates_no_overlap_exclusion.sql.
+  ],
+);
+
+export type TaxRate = typeof taxRates.$inferSelect;
+export type NewTaxRate = typeof taxRates.$inferInsert;

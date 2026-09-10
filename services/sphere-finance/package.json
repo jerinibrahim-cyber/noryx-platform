@@ -13,8 +13,8 @@
     "test": "jest",
     "test:e2e": "jest --config jest-e2e.config.js",
     "generate": "drizzle-kit generate",
-    "migrate": "drizzle-kit migrate && ts-node src/db/apply-rls.ts",
-    "migrate:dev": "drizzle-kit push && ts-node src/db/apply-rls.ts"
+    "migrate": "drizzle-kit migrate && ts-node src/db/apply-rls.ts && ts-node src/db/apply-db-constraints.ts",
+    "migrate:dev": "drizzle-kit push && ts-node src/db/apply-rls.ts && ts-node src/db/apply-db-constraints.ts"
   },
   "dependencies": {
     "@nestjs/common": "^10.4.0",
