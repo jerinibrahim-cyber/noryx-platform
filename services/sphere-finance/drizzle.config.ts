@@ -7,6 +7,10 @@ export default defineConfig({
   schema: "./src/db/schema.ts",
   out: "./drizzle/migrations",
   dialect: "postgresql",
+  migrations: {
+    table: "__drizzle_migrations_sphere_finance",
+    schema: "drizzle",
+  },
   dbCredentials: {
     url:
       process.env.DATABASE_URL ??
