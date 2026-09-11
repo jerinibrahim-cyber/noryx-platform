@@ -1136,9 +1136,44 @@ export const customerInvoiceLines = pgTable(
       .references(() => chartOfAccounts.id),
     description: varchar("description", { length: 500 }),
     amountMinor: bigint("amount_minor", { mode: "number" }).notNull(),
+    /// The single authoritative tax amount for this line — unchanged in
+    /// meaning by Tax/VAT Phase 3 (docs/finance-work-item-tax-vat-
+    /// phase-3-discovery.md §7, reusing Phase 2's Decision 4 verbatim).
+    /// When taxCodeId is null this is the legacy manually-entered value,
+    /// exactly as before Phase 3. When taxCodeId is set, this is either
+    /// the calculated amount (no override) or the caller's explicit
+    /// override value — taxAmountCalculatedMinor below retains the
+    /// calculated figure in the override case so nothing is silently
+    /// discarded. Identical shape to supplierBillLines.taxAmountMinor.
     taxAmountMinor: bigint("tax_amount_minor", { mode: "number" })
       .notNull()
       .default(0),
+    /// Tax/VAT Phase 3 — optional resolved tax code for this line. Null
+    /// preserves 100% of pre-Phase-3 behavior (manual taxAmountMinor).
+    /// Real FK: tax_codes is Finance's own table, same migration
+    /// lifecycle. No onDelete behavior needed — tax_codes has no hard
+    /// delete (deactivate/reactivate only, Phase 1). Identical shape to
+    /// supplierBillLines.taxCodeId.
+    taxCodeId: uuid("tax_code_id").references(() => taxCodes.id),
+    /// Tax/VAT Phase 3 — the specific tax_rates row resolved for this
+    /// line at write time, by the document's own transaction date
+    /// (invoiceDate — discovery §4/§7). tax_rates is create-only/
+    /// immutable (Phase 1), so this FK is a safe, permanent point-in-time
+    /// snapshot. Identical shape to supplierBillLines.taxRateId.
+    taxRateId: uuid("tax_rate_id").references(() => taxRates.id),
+    /// Tax/VAT Phase 3 — the calculated amount, always populated when
+    /// taxCodeId is set (even when overridden). Null when taxCodeId is
+    /// null. Identical shape to supplierBillLines.taxAmountCalculatedMinor.
+    taxAmountCalculatedMinor: bigint("tax_amount_calculated_minor", {
+      mode: "number",
+    }),
+    /// Tax/VAT Phase 3 — true only when both taxCodeId AND an explicit
+    /// taxAmountMinor were supplied together. Server-computed, never
+    /// client-supplied. Identical shape to
+    /// supplierBillLines.taxAmountOverridden.
+    taxAmountOverridden: boolean("tax_amount_overridden")
+      .notNull()
+      .default(false),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -1153,6 +1188,18 @@ export const customerInvoiceLines = pgTable(
     check(
       "customer_invoice_lines_tax_amount_non_negative",
       sql`${t.taxAmountMinor} >= 0`,
+    ),
+    // Tax/VAT Phase 3 (discovery §5) — defense-in-depth mirrors of the
+    // service-layer invariants, identical to supplier_bill_lines': an
+    // override requires a resolved code, and a resolved rate implies a
+    // resolved code.
+    check(
+      "customer_invoice_lines_tax_overridden_requires_code",
+      sql`${t.taxAmountOverridden} = false OR ${t.taxCodeId} IS NOT NULL`,
+    ),
+    check(
+      "customer_invoice_lines_tax_rate_requires_code",
+      sql`${t.taxRateId} IS NULL OR ${t.taxCodeId} IS NOT NULL`,
     ),
   ],
 );
@@ -1495,9 +1542,42 @@ export const customerCreditNoteLines = pgTable(
       .references(() => chartOfAccounts.id),
     description: varchar("description", { length: 500 }),
     amountMinor: bigint("amount_minor", { mode: "number" }).notNull(),
+    /// Tax/VAT Phase 3 (docs/finance-work-item-tax-vat-phase-3-
+    /// discovery.md §7/§8) — identical shape to
+    /// customerInvoiceLines.taxAmountMinor. Resolved/calculated
+    /// independently of any allocated invoice's own tax data — see
+    /// taxCodeId's comment and CustomerCreditNotesService.resolveLineTax().
     taxAmountMinor: bigint("tax_amount_minor", { mode: "number" })
       .notNull()
       .default(0),
+    /// Tax/VAT Phase 3 — optional resolved tax code for this line. Null
+    /// preserves 100% of pre-Phase-3 behavior. Identical shape to
+    /// customerInvoiceLines.taxCodeId. Deliberately NOT inherited from
+    /// any customer_invoice_lines row this credit note allocates
+    /// against — customer_credit_note_allocations is a header-level
+    /// many-to-many mapping (creditNoteId, invoiceId) with no line-level
+    /// linkage to any invoice line, the exact same data-model shape
+    /// Phase 2 confirmed for supplier_debit_note_allocations (discovery
+    /// §8, the CTO-confirmed correction to the originally-proposed
+    /// Decision 1 carried forward here by direct structural analogy).
+    taxCodeId: uuid("tax_code_id").references(() => taxCodes.id),
+    /// Tax/VAT Phase 3 — the specific tax_rates row resolved for this
+    /// line at write time, by the credit note's OWN creditNoteDate —
+    /// never a settled invoice's date. Identical shape to
+    /// customerInvoiceLines.taxRateId.
+    taxRateId: uuid("tax_rate_id").references(() => taxRates.id),
+    /// Tax/VAT Phase 3 — the calculated amount, always populated when
+    /// taxCodeId is set (even when overridden). Identical shape to
+    /// customerInvoiceLines.taxAmountCalculatedMinor.
+    taxAmountCalculatedMinor: bigint("tax_amount_calculated_minor", {
+      mode: "number",
+    }),
+    /// Tax/VAT Phase 3 — true only when both taxCodeId AND an explicit
+    /// taxAmountMinor were supplied together. Identical shape to
+    /// customerInvoiceLines.taxAmountOverridden.
+    taxAmountOverridden: boolean("tax_amount_overridden")
+      .notNull()
+      .default(false),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -1515,6 +1595,16 @@ export const customerCreditNoteLines = pgTable(
     check(
       "customer_credit_note_lines_tax_amount_non_negative",
       sql`${t.taxAmountMinor} >= 0`,
+    ),
+    // Tax/VAT Phase 3 (discovery §5) — defense-in-depth mirrors of the
+    // service-layer invariants, identical to customer_invoice_lines'.
+    check(
+      "customer_credit_note_lines_tax_overridden_requires_code",
+      sql`${t.taxAmountOverridden} = false OR ${t.taxCodeId} IS NOT NULL`,
+    ),
+    check(
+      "customer_credit_note_lines_tax_rate_requires_code",
+      sql`${t.taxRateId} IS NULL OR ${t.taxCodeId} IS NOT NULL`,
     ),
   ],
 );

@@ -15,6 +15,14 @@ import {
  *
  * No lineNumber field, deliberately — CustomerCreditNotesService assigns
  * 1..N from array order, same convention as CustomerInvoicesService.
+ *
+ * taxCodeId — Tax/VAT Phase 3
+ * (docs/finance-work-item-tax-vat-phase-3-discovery.md §6/§8). Optional,
+ * same semantics as CreateCustomerInvoiceLineDto.taxCodeId. Resolved
+ * independently per line by the credit note's OWN creditNoteDate —
+ * CustomerCreditNotesService.resolveLineTax() never reads this DTO's
+ * sibling allocations array, mirroring CreateSupplierDebitNoteLineDto's
+ * identical no-inheritance posture from Phase 2.
  */
 export class CreateCustomerCreditNoteLineDto {
   @IsUUID()
@@ -35,4 +43,8 @@ export class CreateCustomerCreditNoteLineDto {
   @IsInt()
   @Min(0)
   taxAmountMinor?: number;
+
+  @IsOptional()
+  @IsUUID()
+  taxCodeId?: string;
 }

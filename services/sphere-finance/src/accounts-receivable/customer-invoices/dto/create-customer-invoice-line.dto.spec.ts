@@ -74,4 +74,32 @@ describe("CreateCustomerInvoiceLineDto", () => {
     });
     expect(errors).toHaveLength(0);
   });
+
+  it("accepts a well-formed taxCodeId", async () => {
+    const errors = await validateDto({
+      accountId: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      amountMinor: 1000,
+      taxCodeId: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+    });
+    expect(errors).toHaveLength(0);
+  });
+
+  it("rejects a non-UUID taxCodeId", async () => {
+    const errors = await validateDto({
+      accountId: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      amountMinor: 1000,
+      taxCodeId: "not-a-uuid",
+    });
+    expect(errors.some((e) => e.property === "taxCodeId")).toBe(true);
+  });
+
+  it("accepts taxCodeId together with an explicit taxAmountMinor (override shape)", async () => {
+    const errors = await validateDto({
+      accountId: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      amountMinor: 1000,
+      taxCodeId: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      taxAmountMinor: 75,
+    });
+    expect(errors).toHaveLength(0);
+  });
 });

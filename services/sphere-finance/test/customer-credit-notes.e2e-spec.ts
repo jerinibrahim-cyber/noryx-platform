@@ -12,6 +12,7 @@ import {
   auditLogs,
   and,
   eq,
+  sql,
 } from "@noryx/db-core";
 import {
   closeDb as closeFinanceDb,
@@ -1633,6 +1634,376 @@ describe("Customer Credit Notes (e2e) — draft CRUD, lines, allocation, posting
           ),
         );
       expect(deleteRows).toHaveLength(1);
+    });
+  });
+
+  /**
+   * Tax/VAT Phase 3 — AR Tax Calculation
+   * (docs/finance-work-item-tax-vat-phase-3-discovery.md §8, §11-§13).
+   * Mirrors supplier-debit-notes.e2e-spec.ts's "Tax calculation —
+   * Tax/VAT Phase 2" block exactly (same 9 cases), adapted for AR
+   * routes/fields/polarity. The "resolves independently across two
+   * allocated invoices" case is the primary proof obligation for the
+   * confirmed no-inheritance architecture decision: neither allocated
+   * invoice carries any tax at all, so if credit-note lines ever
+   * "inherited" from an allocated invoice there would be nothing to
+   * inherit — each line resolves its own taxCodeId against its own
+   * creditNoteDate regardless of which invoice(s) it is allocated to.
+   */
+  describe("Tax calculation — Tax/VAT Phase 3", () => {
+    let taxCodeCalcId: string; // STANDARD, 500bp, open-ended from 2020-01-01
+    let taxCodeSecondId: string; // STANDARD, 1000bp, open-ended from 2020-01-01
+    let taxCodeNoRateId: string; // STANDARD, no rate ever created
+    let taxCodeInactiveId: string; // STANDARD, one rate, then deactivated
+    let taxCodeA2Id: string; // created in legalEntityA2Id — cross-entity case
+
+    beforeAll(async () => {
+      const adminToken = tokenFor(tenantAId, legalEntityA1Id, [
+        "finance.admin",
+      ]);
+
+      async function createTaxCode(code: string) {
+        const res = await request(app.getHttpServer())
+          .post("/v1/finance/tax-codes")
+          .set("Authorization", `Bearer ${adminToken}`)
+          .send({ code, name: code, treatment: "STANDARD" })
+          .expect(201);
+        return res.body.data.id as string;
+      }
+      async function createRate(taxCodeId: string, rateBasisPoints: number) {
+        const res = await request(app.getHttpServer())
+          .post(`/v1/finance/tax-codes/${taxCodeId}/rates`)
+          .set("Authorization", `Bearer ${adminToken}`)
+          .send({ rateBasisPoints, effectiveFrom: "2020-01-01" })
+          .expect(201);
+        return res.body.data.id as string;
+      }
+
+      taxCodeCalcId = await createTaxCode(`CN-TAXCALC-${suffix}`);
+      await createRate(taxCodeCalcId, 500);
+
+      taxCodeSecondId = await createTaxCode(`CN-TAXCALC2-${suffix}`);
+      await createRate(taxCodeSecondId, 1000);
+
+      taxCodeNoRateId = await createTaxCode(`CN-TAXNORATE-${suffix}`);
+      // deliberately no rate created
+
+      taxCodeInactiveId = await createTaxCode(`CN-TAXINACTIVE-${suffix}`);
+      await createRate(taxCodeInactiveId, 500);
+      await request(app.getHttpServer())
+        .patch(`/v1/finance/tax-codes/${taxCodeInactiveId}/deactivate`)
+        .set("Authorization", `Bearer ${adminToken}`)
+        .expect(200);
+
+      const adminA2Token = tokenFor(tenantAId, legalEntityA2Id, [
+        "finance.admin",
+      ]);
+      const a2Code = await request(app.getHttpServer())
+        .post("/v1/finance/tax-codes")
+        .set("Authorization", `Bearer ${adminA2Token}`)
+        .send({
+          code: `CN-TAXA2-${suffix}`,
+          name: "Entity 2 code",
+          treatment: "STANDARD",
+        })
+        .expect(201);
+      taxCodeA2Id = a2Code.body.data.id;
+    });
+
+    it("taxCodeId omitted preserves legacy behavior exactly", async () => {
+      const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.poster"]);
+      const invoice = await createAndPostInvoice(
+        token,
+        customerA1Id,
+        "2026-01-10",
+        1000,
+      );
+      const created = await request(app.getHttpServer())
+        .post("/v1/finance/credit-notes")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          customerId: customerA1Id,
+          creditNoteDate: "2026-01-15",
+          lines: [
+            {
+              accountId: revenueAccountA1Id,
+              amountMinor: 1000,
+              taxAmountMinor: 60,
+            },
+          ],
+          allocations: [{ invoiceId: invoice.id, allocatedAmountMinor: 1000 }],
+        })
+        .expect(201);
+      const [line] = created.body.data.lines;
+      expect(line.taxAmountMinor).toBe(60);
+      expect(line.taxCodeId).toBeNull();
+      expect(line.taxRateId).toBeNull();
+      expect(line.taxAmountCalculatedMinor).toBeNull();
+      expect(line.taxAmountOverridden).toBe(false);
+    });
+
+    it("taxCodeId supplied with no explicit taxAmountMinor: calculates, snapshots, taxAmountOverridden=false", async () => {
+      const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.poster"]);
+      const invoice = await createAndPostInvoice(
+        token,
+        customerA1Id,
+        "2026-01-10",
+        10000,
+      );
+      const created = await request(app.getHttpServer())
+        .post("/v1/finance/credit-notes")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          customerId: customerA1Id,
+          creditNoteDate: "2026-01-15",
+          lines: [
+            {
+              accountId: revenueAccountA1Id,
+              amountMinor: 10000,
+              taxCodeId: taxCodeCalcId,
+            },
+          ],
+          allocations: [{ invoiceId: invoice.id, allocatedAmountMinor: 10500 }],
+        })
+        .expect(201);
+      const [line] = created.body.data.lines;
+      expect(line.taxRateId).toBeTruthy();
+      expect(line.taxAmountCalculatedMinor).toBe(500);
+      expect(line.taxAmountMinor).toBe(500);
+      expect(line.taxAmountOverridden).toBe(false);
+      expect(created.body.data.totalMinor).toBe(10500);
+    });
+
+    it("taxCodeId + explicit taxAmountMinor: override is authoritative, calculated value retained", async () => {
+      const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.poster"]);
+      const invoice = await createAndPostInvoice(
+        token,
+        customerA1Id,
+        "2026-01-10",
+        10480,
+      );
+      const created = await request(app.getHttpServer())
+        .post("/v1/finance/credit-notes")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          customerId: customerA1Id,
+          creditNoteDate: "2026-01-15",
+          lines: [
+            {
+              accountId: revenueAccountA1Id,
+              amountMinor: 10000,
+              taxCodeId: taxCodeCalcId,
+              taxAmountMinor: 480,
+            },
+          ],
+          allocations: [{ invoiceId: invoice.id, allocatedAmountMinor: 10480 }],
+        })
+        .expect(201);
+      const [line] = created.body.data.lines;
+      expect(line.taxAmountMinor).toBe(480);
+      expect(line.taxAmountCalculatedMinor).toBe(500);
+      expect(line.taxAmountOverridden).toBe(true);
+    });
+
+    it("rejects an inactive taxCodeId on a new line (400)", async () => {
+      const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.poster"]);
+      await request(app.getHttpServer())
+        .post("/v1/finance/credit-notes")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          customerId: customerA1Id,
+          creditNoteDate: "2026-01-15",
+          lines: [
+            {
+              accountId: revenueAccountA1Id,
+              amountMinor: 1000,
+              taxCodeId: taxCodeInactiveId,
+            },
+          ],
+          allocations: [],
+        })
+        .expect(400);
+    });
+
+    it("rejects a taxCodeId with no tax rate effective on the credit note's date (400)", async () => {
+      const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.poster"]);
+      await request(app.getHttpServer())
+        .post("/v1/finance/credit-notes")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          customerId: customerA1Id,
+          creditNoteDate: "2026-01-15",
+          lines: [
+            {
+              accountId: revenueAccountA1Id,
+              amountMinor: 1000,
+              taxCodeId: taxCodeNoRateId,
+            },
+          ],
+          allocations: [],
+        })
+        .expect(400);
+    });
+
+    it("rejects a taxCodeId from a different legal entity (400)", async () => {
+      const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.poster"]);
+      await request(app.getHttpServer())
+        .post("/v1/finance/credit-notes")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          customerId: customerA1Id,
+          creditNoteDate: "2026-01-15",
+          lines: [
+            {
+              accountId: revenueAccountA1Id,
+              amountMinor: 1000,
+              taxCodeId: taxCodeA2Id,
+            },
+          ],
+          allocations: [],
+        })
+        .expect(400);
+    });
+
+    it("a credit note allocating to TWO DIFFERENT invoices resolves its own lines' tax entirely independently — proves the confirmed no-inheritance architecture decision", async () => {
+      const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.poster"]);
+      // Neither allocated invoice carries any tax at all — if the credit
+      // note's lines ever "inherited" from an allocated invoice, they
+      // would have nothing to inherit. Its own lines resolve their own
+      // tax codes on its own creditNoteDate regardless.
+      const invoiceOne = await createAndPostInvoice(
+        token,
+        customerA1Id,
+        "2026-01-05",
+        6000,
+      );
+      const invoiceTwo = await createAndPostInvoice(
+        token,
+        customerA1Id,
+        "2026-01-06",
+        4700,
+      );
+      const created = await request(app.getHttpServer())
+        .post("/v1/finance/credit-notes")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          customerId: customerA1Id,
+          creditNoteDate: "2026-01-15",
+          lines: [
+            {
+              accountId: revenueAccountA1Id,
+              amountMinor: 6000,
+              taxCodeId: taxCodeCalcId,
+            }, // 5% -> 300
+            {
+              accountId: revenueAccountA1Id,
+              amountMinor: 4000,
+              taxCodeId: taxCodeSecondId,
+            }, // 10% -> 400
+          ],
+          allocations: [
+            { invoiceId: invoiceOne.id, allocatedAmountMinor: 6000 },
+            { invoiceId: invoiceTwo.id, allocatedAmountMinor: 4700 },
+          ],
+        })
+        .expect(201);
+
+      const [line1, line2] = created.body.data.lines;
+      expect(line1.taxCodeId).toBe(taxCodeCalcId);
+      expect(line1.taxAmountMinor).toBe(300);
+      expect(line2.taxCodeId).toBe(taxCodeSecondId);
+      expect(line2.taxAmountMinor).toBe(400);
+      expect(created.body.data.subtotalMinor).toBe(10000);
+      expect(created.body.data.taxMinor).toBe(700);
+      expect(created.body.data.totalMinor).toBe(10700);
+      expect(created.body.data.allocations).toHaveLength(2);
+      const allocatedTotal = created.body.data.allocations.reduce(
+        (s: number, a: { allocatedAmountMinor: number }) =>
+          s + a.allocatedAmountMinor,
+        0,
+      );
+      expect(allocatedTotal).toBe(10700); // must equal totalMinor to be postable
+    });
+
+    it("posting is unaffected: the aggregate tax journal line still equals SUM(line.taxAmountMinor)", async () => {
+      const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.poster"]);
+      const invoice = await createAndPostInvoice(
+        token,
+        customerA1Id,
+        "2026-01-05",
+        10500,
+      );
+      const created = await request(app.getHttpServer())
+        .post("/v1/finance/credit-notes")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          customerId: customerA1Id,
+          creditNoteDate: "2026-01-15",
+          lines: [
+            {
+              accountId: revenueAccountA1Id,
+              amountMinor: 10000,
+              taxCodeId: taxCodeCalcId,
+            }, // 500 calculated
+          ],
+          allocations: [{ invoiceId: invoice.id, allocatedAmountMinor: 10500 }],
+        })
+        .expect(201);
+      const id = created.body.data.id;
+
+      const posted = await request(app.getHttpServer())
+        .post(`/v1/finance/credit-notes/${id}/post`)
+        .set("Authorization", `Bearer ${token}`)
+        .expect(200);
+
+      const lines = await withTenant(tenantAId, (tx) =>
+        tx
+          .select()
+          .from(journalLines)
+          .where(
+            eq(journalLines.journalEntryId, posted.body.data.journalEntryId),
+          ),
+      );
+      // Credit notes reverse the invoice's own polarity (see "happy
+      // path: reversed polarity" above): the tax line is a DEBIT against
+      // the tax OUTPUT account, not a credit.
+      const taxLine = lines.find((l) => l.accountId === taxOutputAccountA1Id);
+      expect(taxLine!.debitMinor).toBe(500);
+      const totalDebit = lines.reduce((s, l) => s + l.debitMinor, 0);
+      const totalCredit = lines.reduce((s, l) => s + l.creditMinor, 0);
+      expect(totalDebit).toBe(totalCredit);
+    });
+
+    it("DB level: the two new CHECK constraints reject an insert that bypasses the service layer", async () => {
+      const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.poster"]);
+      const invoice = await createAndPostInvoice(
+        token,
+        customerA1Id,
+        "2026-01-05",
+        1000,
+      );
+      const draft = await request(app.getHttpServer())
+        .post("/v1/finance/credit-notes")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          customerId: customerA1Id,
+          creditNoteDate: "2026-01-15",
+          lines: [{ accountId: revenueAccountA1Id, amountMinor: 1000 }],
+          allocations: [{ invoiceId: invoice.id, allocatedAmountMinor: 1000 }],
+        })
+        .expect(201);
+      const creditNoteId = draft.body.data.id;
+
+      await expect(
+        withTenant(tenantAId, (tx) =>
+          tx.execute(sql`
+            INSERT INTO customer_credit_note_lines
+              (tenant_id, credit_note_id, line_number, account_id, amount_minor, tax_amount_overridden)
+            VALUES
+              (${tenantAId}, ${creditNoteId}, 999, ${revenueAccountA1Id}, 100, true)
+          `),
+        ),
+      ).rejects.toThrow(/tax_overridden_requires_code/);
     });
   });
 });

@@ -36,6 +36,8 @@ import {
   type CustomerCreditNoteAllocation,
 } from "../../db/schema";
 import { withTenant, type TxClient } from "../../db/db";
+import { TaxRatesService } from "../../tax-configuration/tax-rates.service";
+import { calculateTaxAmountMinor } from "../../tax-configuration/tax-calculation";
 import type { CreateCustomerCreditNoteDto } from "./dto/create-customer-credit-note.dto";
 import type { CreateCustomerCreditNoteLineDto } from "./dto/create-customer-credit-note-line.dto";
 import type { CreateCustomerCreditNoteAllocationDto } from "./dto/create-customer-credit-note-allocation.dto";
@@ -45,6 +47,22 @@ export type CustomerCreditNoteWithDetails = CustomerCreditNote & {
   lines: CustomerCreditNoteLine[];
   allocations: CustomerCreditNoteAllocation[];
 };
+
+/** Tax/VAT Phase 3 — exact mirror of SupplierDebitNotesService's own
+ * ResolvedSupplierDebitNoteLine. A credit-note line after tax
+ * resolution, resolved INDEPENDENTLY of any allocated invoice, by this
+ * document's own creditNoteDate (discovery §4/§8 — no line-level
+ * linkage exists between a credit-note line and any invoice line). */
+interface ResolvedCustomerCreditNoteLine {
+  accountId: string;
+  description: string | null;
+  amountMinor: number;
+  taxAmountMinor: number;
+  taxCodeId: string | null;
+  taxRateId: string | null;
+  taxAmountCalculatedMinor: number | null;
+  taxAmountOverridden: boolean;
+}
 
 export interface ListCustomerCreditNotesFilters {
   status?: "DRAFT" | "POSTED";
@@ -86,11 +104,28 @@ export interface ListCustomerCreditNotesFilters {
  * receipt on account" rule exactly) — a fully-paid invoice therefore
  * rejects a further allocation with 422, by construction.
  *
+ * Tax/VAT Phase 3
+ * (docs/finance-work-item-tax-vat-phase-3-discovery.md §4/§8) — line-
+ * level tax is resolved INDEPENDENTLY per line, by this document's own
+ * creditNoteDate, never inherited from any allocated invoice. This
+ * carries forward, by direct structural analogy, the CTO-confirmed
+ * Decision 1 correction Tax/VAT Phase 2 established for supplier debit
+ * notes: a credit note has no single "original document" (allocations
+ * are many-to-many against invoices, header-level only via
+ * customer_credit_note_allocations) and no line-level linkage to any
+ * invoice line at all, so literal inheritance is not mechanically
+ * definable. See resolveLineTax() below — it takes only
+ * (tx, tenantId, legalEntityId, creditNoteDate, lines) and never reads
+ * dto.allocations, exact mirror of
+ * SupplierDebitNotesService.resolveLineTax()'s signature.
+ *
  * Same withTenant()/explicit-legalEntityId-predicate shape as every
  * other Finance service.
  */
 @Injectable()
 export class CustomerCreditNotesService {
+  constructor(private readonly taxRates: TaxRatesService) {}
+
   async create(
     tenantId: string,
     legalEntityId: string,
@@ -118,7 +153,20 @@ export class CustomerCreditNotesService {
         tenantId,
         legalEntityId,
       );
-      const totals = this.computeTotals(dto.lines);
+      // Tax/VAT Phase 3 — resolved INDEPENDENTLY of any allocation, by
+      // this credit note's OWN creditNoteDate (discovery §4/§8 — no
+      // line-level linkage exists to any allocated invoice's lines or
+      // tax codes). Exact mirror of
+      // SupplierDebitNotesService.create()'s resolve-then-total
+      // sequencing.
+      const resolvedLines = await this.resolveLineTax(
+        tx,
+        tenantId,
+        legalEntityId,
+        dto.creditNoteDate,
+        dto.lines,
+      );
+      const totals = this.computeTotals(resolvedLines);
 
       const [createdCreditNote] = await tx
         .insert(customerCreditNotes)
@@ -141,7 +189,7 @@ export class CustomerCreditNotesService {
         tx,
         tenantId,
         createdCreditNote!.id,
-        dto.lines,
+        resolvedLines,
       );
       const insertedAllocations = await this.insertAllocations(
         tx,
@@ -272,8 +320,21 @@ export class CustomerCreditNotesService {
       if (dto.memo !== undefined) {
         headerPatch.memo = dto.memo;
       }
+      // Tax/VAT Phase 3 — same effective-document-date reasoning as
+      // CustomerInvoicesService.update(): uses the incoming
+      // creditNoteDate if this same call also changes it, else the
+      // currently-stored date. Never reads dto.allocations.
+      let resolvedLines: ResolvedCustomerCreditNoteLine[] | undefined;
       if (dto.lines) {
-        const totals = this.computeTotals(dto.lines);
+        const documentDate = dto.creditNoteDate ?? before.creditNoteDate;
+        resolvedLines = await this.resolveLineTax(
+          tx,
+          tenantId,
+          legalEntityId,
+          documentDate,
+          dto.lines,
+        );
+        const totals = this.computeTotals(resolvedLines);
         headerPatch.subtotalMinor = totals.subtotalMinor;
         headerPatch.taxMinor = totals.taxMinor;
         headerPatch.totalMinor = totals.totalMinor;
@@ -296,7 +357,7 @@ export class CustomerCreditNotesService {
         await tx
           .delete(customerCreditNoteLines)
           .where(eq(customerCreditNoteLines.creditNoteId, id));
-        await this.insertLines(tx, tenantId, id, dto.lines);
+        await this.insertLines(tx, tenantId, id, resolvedLines!);
       }
       if (dto.allocations) {
         // Full-array replacement, not allocation-level add/remove — same
@@ -982,7 +1043,7 @@ export class CustomerCreditNotesService {
     tx: TxClient,
     tenantId: string,
     creditNoteId: string,
-    lines: CreateCustomerCreditNoteLineDto[],
+    lines: ResolvedCustomerCreditNoteLine[],
   ): Promise<CustomerCreditNoteLine[]> {
     return tx
       .insert(customerCreditNoteLines)
@@ -992,12 +1053,75 @@ export class CustomerCreditNotesService {
           creditNoteId,
           lineNumber: index + 1,
           accountId: line.accountId,
-          description: line.description ?? null,
+          description: line.description,
           amountMinor: line.amountMinor,
-          taxAmountMinor: line.taxAmountMinor ?? 0,
+          taxAmountMinor: line.taxAmountMinor,
+          taxCodeId: line.taxCodeId,
+          taxRateId: line.taxRateId,
+          taxAmountCalculatedMinor: line.taxAmountCalculatedMinor,
+          taxAmountOverridden: line.taxAmountOverridden,
         })),
       )
       .returning();
+  }
+
+  /** Tax/VAT Phase 3
+   * (docs/finance-work-item-tax-vat-phase-3-discovery.md §4/§7/§8) —
+   * exact mirror of SupplierDebitNotesService.resolveLineTax, EXCEPT
+   * resolution uses this credit note's OWN creditNoteDate — never any
+   * allocated invoice's date or tax code. A credit note has no
+   * line-level linkage to any invoice line (discovery §8's confirmed
+   * architecture decision: no inheritance), so each line is resolved
+   * completely independently, exactly as an invoice line would be. This
+   * method deliberately takes no `allocations` parameter — it must never
+   * read dto.allocations or any invoice data. */
+  private async resolveLineTax(
+    tx: TxClient,
+    tenantId: string,
+    legalEntityId: string,
+    documentDate: string,
+    lines: CreateCustomerCreditNoteLineDto[],
+  ): Promise<ResolvedCustomerCreditNoteLine[]> {
+    const resolved: ResolvedCustomerCreditNoteLine[] = [];
+    for (const line of lines) {
+      if (!line.taxCodeId) {
+        resolved.push({
+          accountId: line.accountId,
+          description: line.description ?? null,
+          amountMinor: line.amountMinor,
+          taxAmountMinor: line.taxAmountMinor ?? 0,
+          taxCodeId: null,
+          taxRateId: null,
+          taxAmountCalculatedMinor: null,
+          taxAmountOverridden: false,
+        });
+        continue;
+      }
+
+      const rate = await this.taxRates.resolveEffectiveRate(
+        tx,
+        tenantId,
+        legalEntityId,
+        line.taxCodeId,
+        documentDate,
+      );
+      const calculated = calculateTaxAmountMinor(
+        line.amountMinor,
+        rate.rateBasisPoints,
+      );
+      const overridden = line.taxAmountMinor !== undefined;
+      resolved.push({
+        accountId: line.accountId,
+        description: line.description ?? null,
+        amountMinor: line.amountMinor,
+        taxAmountMinor: overridden ? line.taxAmountMinor! : calculated,
+        taxCodeId: line.taxCodeId,
+        taxRateId: rate.id,
+        taxAmountCalculatedMinor: calculated,
+        taxAmountOverridden: overridden,
+      });
+    }
+    return resolved;
   }
 
   private async insertAllocations(
@@ -1023,15 +1147,17 @@ export class CustomerCreditNotesService {
    * SUM(line.taxAmountMinor), totalMinor = subtotalMinor + taxMinor —
    * server-computed, never client-supplied, matches the
    * customer_credit_notes_total_equals_subtotal_plus_tax CHECK
-   * constraint by construction. Identical to
+   * constraint by construction. Operates on already-resolved lines
+   * (Tax/VAT Phase 3), so taxAmountMinor here is always the final
+   * authoritative value. Identical to
    * CustomerInvoicesService.computeTotals. */
-  private computeTotals(lines: CreateCustomerCreditNoteLineDto[]): {
+  private computeTotals(lines: ResolvedCustomerCreditNoteLine[]): {
     subtotalMinor: number;
     taxMinor: number;
     totalMinor: number;
   } {
     const subtotalMinor = lines.reduce((sum, l) => sum + l.amountMinor, 0);
-    const taxMinor = lines.reduce((sum, l) => sum + (l.taxAmountMinor ?? 0), 0);
+    const taxMinor = lines.reduce((sum, l) => sum + l.taxAmountMinor, 0);
     return { subtotalMinor, taxMinor, totalMinor: subtotalMinor + taxMinor };
   }
 

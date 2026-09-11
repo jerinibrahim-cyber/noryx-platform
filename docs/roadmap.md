@@ -6,9 +6,9 @@ just a status tracker for the repo.
 
 ## Current execution status — 2026-09-11
 
-**Current baseline:** `main` — Tax/VAT Phase 2 (AP Tax Calculation) is implemented, verified (typecheck/lint clean, 583/583 unit tests, 829/829 e2e tests, 135/135 RBAC-matrix assertions), and pushed to GitHub. See `docs/finance-work-item-tax-vat-phase-2-completion-report.md` for the full verification record.
+**Current baseline:** `main` — Tax/VAT Phase 3 (AR Tax Calculation) is implemented, verified (typecheck/lint clean, 589/589 unit tests, 848/848 e2e tests, 135/135 RBAC-matrix assertions), and pushed to GitHub. See `docs/finance-work-item-tax-vat-phase-3-completion-report.md` for the full verification record.
 
-**Completed immediately before Tax/VAT Phase 2:** Tax/VAT Phase 1 (Tax Configuration Foundation, `dd6d135`); before that, Banking 1A–1E, Banking Reconciliation, and Scheduled Reversal are treated as complete per the governing Finance baseline.
+**Completed immediately before Tax/VAT Phase 3:** Tax/VAT Phase 2 (AP Tax Calculation, `ae4b073`/`6229bc6`); before that Tax/VAT Phase 1 (Tax Configuration Foundation, `dd6d135`); before that, Banking 1A–1E, Banking Reconciliation, and Scheduled Reversal are treated as complete per the governing Finance baseline.
 
 **Current work item:** Tax/VAT.
 
@@ -16,9 +16,11 @@ just a status tracker for the repo.
 
 **Tax/VAT Phase 2 — COMPLETE:** Wires the approved Tax Code/Rate model into Supplier Bills and Supplier Debit Notes — optional line-level `taxCodeId`, rate resolution by the document's own transaction date, line-level integer minor-unit rounding, snapshot (immutable `taxRateId` FK), and override semantics (Decision 4) — with legacy `taxAmountMinor` behavior fully preserved when `taxCodeId` is omitted. Debit-note tax resolves independently per line, by the debit note's own `debitNoteDate`, never inherited from any allocated bill — the CTO-confirmed correction to the originally-proposed Decision 1 (`docs/finance-work-item-tax-vat-phase-2-discovery.md` §13), because a debit note has no single "original document" and no line-level linkage to any bill line. Also corrected a pre-existing Phase 1 bug found while verifying the half-open effective-date boundary: `TaxRatesService.create()`'s overlap pre-check used inclusive comparisons, stricter than the actual (correct) EXCLUDE constraint — narrowed to strict comparisons so the pre-check matches the constraint it exists to preview; no change to the constraint itself or to any other approved behavior.
 
-**Next approved work item:** **Tax/VAT Phase 3 — AR Tax Calculation**, wiring the same approved Tax Code/Rate model into Customer Invoices and Customer Credit Notes. Not yet discovered or authorized.
+**Tax/VAT Phase 3 — COMPLETE:** Wires the same approved Tax Code/Rate model into Customer Invoices and Customer Credit Notes — optional line-level `taxCodeId`, rate resolution by the document's own transaction date (`invoiceDate`/`creditNoteDate`), line-level integer minor-unit rounding, snapshot (immutable `taxRateId` FK), and override semantics identical to Phase 2's Decision 4 — with legacy `taxAmountMinor` behavior fully preserved when `taxCodeId` is omitted. Credit-note tax resolves independently per line, by the credit note's own `creditNoteDate`, never inherited from any allocated invoice — carrying forward Phase 2's CTO-confirmed no-inheritance correction, because `customer_credit_note_allocations` is a header-level many-to-many table with no line-level linkage to any invoice line. Reused `TaxConfigurationModule`/`TaxRatesService`/`calculateTaxAmountMinor` unmodified via DI — no new tax-calculation logic was written, only AR wiring, per the discovery document's finding that this infrastructure was already AP/AR-agnostic. See `docs/finance-work-item-tax-vat-phase-3-discovery.md` for the discovery record and `docs/finance-work-item-tax-vat-phase-3-completion-report.md` for the full verification record.
 
-**Execution gate:** Phase 3 discovery/implementation starts only after a separate CTO discovery/authorization prompt. FX remains deferred and is not the next item.
+**Next approved work item:** **Tax/VAT Phase 4 — VAT Position Report**, or another Finance roadmap item. Not yet discovered or authorized.
+
+**Execution gate:** Phase 4 discovery/implementation starts only after a separate CTO discovery/authorization prompt. FX remains deferred and is not the next item.
 
 | Phase                             | Scope                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | Status                                               |
 | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
@@ -96,7 +98,7 @@ PHASE 1
 │   ├── Expense Management              (PLANNED)
 │   ├── Fixed Assets                    (PLANNED)
 │   ├── Budgeting / Planning            (PLANNED)
-│   ├── Tax / VAT                       (IN PROGRESS — Phase 1 & Phase 2 COMPLETE; Phase 3 AR Tax Calculation NEXT)
+│   ├── Tax / VAT                       (IN PROGRESS — Phase 1, 2 & 3 COMPLETE; Phase 4 VAT Position Report NEXT)
 │   ├── Multi-Currency                  (PLANNED)
 │   ├── Financial Reporting             (PLANNED — beyond Trial Balance/GL, already COMPLETE)
 │   ├── WIP / Accrual Engine            (PLANNED)
@@ -172,7 +174,7 @@ Sphere Finance as a product.
 
 - [x] Phase 1 — Tax Configuration Foundation (`dd6d135`, pushed to `main`): Tax Code master, effective-dated Tax Rates, RLS, RBAC, audit, migration/constraint pipeline, configuration APIs and DB-level overlap protection.
 - [x] Phase 2 — AP Tax Calculation (pushed to `main` — see `docs/finance-work-item-tax-vat-phase-2-completion-report.md`): wired `taxCodeId` and resolved/snapshotted rates into Supplier Bills and Supplier Debit Notes, preserving legacy manual-tax behavior when `taxCodeId` is omitted. Debit notes resolve tax independently per line by `debitNoteDate` (no inheritance from allocated bills — corrected from the originally-proposed Decision 1). Also fixed a pre-existing Phase 1 overlap pre-check bug (inclusive comparisons stricter than the real EXCLUDE constraint) discovered while verifying the half-open effective-date boundary.
-- [ ] Phase 3 — AR Tax Calculation: wire the approved tax model into Customer Invoices and Customer Credit Notes.
+- [x] Phase 3 — AR Tax Calculation (pushed to `main` — see `docs/finance-work-item-tax-vat-phase-3-completion-report.md`): wired `taxCodeId` and resolved/snapshotted rates into Customer Invoices and Customer Credit Notes, preserving legacy manual-tax behavior when `taxCodeId` is omitted. Credit notes resolve tax independently per line by `creditNoteDate` (no inheritance from allocated invoices — carrying forward Phase 2's confirmed no-inheritance correction). Reused Phase 1/Phase 2's tax-configuration infrastructure unmodified; no new tax-calculation logic.
 - [ ] Phase 4 — VAT Position Report: internal VAT reconciliation/reporting built on the existing GL read layer.
 - [ ] Later — statutory VAT filing formats, reverse charge, per-tax-code GL account mapping, multi-jurisdiction expansion, tax-inclusive pricing and other deferred items from the approved architecture.
 

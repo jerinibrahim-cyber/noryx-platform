@@ -32,6 +32,8 @@ import {
   type CustomerInvoiceLine,
 } from "../../db/schema";
 import { withTenant, type TxClient } from "../../db/db";
+import { TaxRatesService } from "../../tax-configuration/tax-rates.service";
+import { calculateTaxAmountMinor } from "../../tax-configuration/tax-calculation";
 import type { CreateCustomerInvoiceDto } from "./dto/create-customer-invoice.dto";
 import type { CreateCustomerInvoiceLineDto } from "./dto/create-customer-invoice-line.dto";
 import type { UpdateCustomerInvoiceDto } from "./dto/update-customer-invoice.dto";
@@ -39,6 +41,23 @@ import type { UpdateCustomerInvoiceDto } from "./dto/update-customer-invoice.dto
 export type CustomerInvoiceWithLines = CustomerInvoice & {
   lines: CustomerInvoiceLine[];
 };
+
+/** Tax/VAT Phase 3 — a line after tax resolution (discovery §4), ready
+ * to insert. Every field is authoritative/final; unlike
+ * CreateCustomerInvoiceLineDto's optional taxAmountMinor, this shape's
+ * taxAmountMinor is always the resolved, definite value that both
+ * computeTotals() and insertLines() consume. Identical shape to
+ * SupplierBillsService's ResolvedSupplierBillLine. */
+interface ResolvedCustomerInvoiceLine {
+  accountId: string;
+  description: string | null;
+  amountMinor: number;
+  taxAmountMinor: number;
+  taxCodeId: string | null;
+  taxRateId: string | null;
+  taxAmountCalculatedMinor: number | null;
+  taxAmountOverridden: boolean;
+}
 
 export interface ListCustomerInvoicesFilters {
   status?: "DRAFT" | "POSTED";
@@ -74,6 +93,8 @@ export interface ListCustomerInvoicesFilters {
  */
 @Injectable()
 export class CustomerInvoicesService {
+  constructor(private readonly taxRates: TaxRatesService) {}
+
   async create(
     tenantId: string,
     legalEntityId: string,
@@ -101,7 +122,20 @@ export class CustomerInvoicesService {
       const dueDate =
         dto.dueDate ??
         this.computeDefaultDueDate(dto.invoiceDate, customer.paymentTermsDays);
-      const totals = this.computeTotals(dto.lines);
+      // Tax/VAT Phase 3 — resolve/calculate/snapshot each line's tax
+      // BEFORE computing header totals, so subtotalMinor/taxMinor/
+      // totalMinor reflect the resolved (possibly calculated or
+      // overridden) taxAmountMinor, not the raw DTO input. Resolution
+      // uses this invoice's OWN invoiceDate. Identical shape to
+      // SupplierBillsService.create()'s Phase 2 addition.
+      const resolvedLines = await this.resolveLineTax(
+        tx,
+        tenantId,
+        legalEntityId,
+        dto.invoiceDate,
+        dto.lines,
+      );
+      const totals = this.computeTotals(resolvedLines);
 
       const [createdInvoice] = await tx
         .insert(customerInvoices)
@@ -124,7 +158,7 @@ export class CustomerInvoicesService {
         tx,
         tenantId,
         createdInvoice!.id,
-        dto.lines,
+        resolvedLines,
       );
 
       const full: CustomerInvoiceWithLines = {
@@ -226,6 +260,14 @@ export class CustomerInvoicesService {
         headerPatch.memo = dto.memo;
       }
 
+      // Tax/VAT Phase 3 — resolved once here (if lines are being
+      // replaced) and reused below for the actual line replacement, so
+      // resolution runs exactly once per call. Uses the EFFECTIVE
+      // document date for THIS write: the incoming invoiceDate if this
+      // same call also changes it, else the invoice's current stored
+      // invoiceDate — identical shape to SupplierBillsService.update()'s
+      // Phase 2 addition.
+      let resolvedLines: ResolvedCustomerInvoiceLine[] | undefined;
       if (dto.lines) {
         await this.validateLineAccountsOrThrow(
           tx,
@@ -233,7 +275,15 @@ export class CustomerInvoicesService {
           legalEntityId,
           dto.lines,
         );
-        const totals = this.computeTotals(dto.lines);
+        const documentDate = dto.invoiceDate ?? before.invoiceDate;
+        resolvedLines = await this.resolveLineTax(
+          tx,
+          tenantId,
+          legalEntityId,
+          documentDate,
+          dto.lines,
+        );
+        const totals = this.computeTotals(resolvedLines);
         headerPatch.subtotalMinor = totals.subtotalMinor;
         headerPatch.taxMinor = totals.taxMinor;
         headerPatch.totalMinor = totals.totalMinor;
@@ -258,7 +308,7 @@ export class CustomerInvoicesService {
         await tx
           .delete(customerInvoiceLines)
           .where(eq(customerInvoiceLines.invoiceId, id));
-        await this.insertLines(tx, tenantId, id, dto.lines);
+        await this.insertLines(tx, tenantId, id, resolvedLines!);
       }
 
       const after = await this.findByIdInTx(tx, tenantId, legalEntityId, id);
@@ -797,7 +847,7 @@ export class CustomerInvoicesService {
     tx: TxClient,
     tenantId: string,
     invoiceId: string,
-    lines: CreateCustomerInvoiceLineDto[],
+    lines: ResolvedCustomerInvoiceLine[],
   ): Promise<CustomerInvoiceLine[]> {
     return tx
       .insert(customerInvoiceLines)
@@ -807,26 +857,93 @@ export class CustomerInvoicesService {
           invoiceId,
           lineNumber: index + 1,
           accountId: line.accountId,
-          description: line.description ?? null,
+          description: line.description,
           amountMinor: line.amountMinor,
-          taxAmountMinor: line.taxAmountMinor ?? 0,
+          taxAmountMinor: line.taxAmountMinor,
+          taxCodeId: line.taxCodeId,
+          taxRateId: line.taxRateId,
+          taxAmountCalculatedMinor: line.taxAmountCalculatedMinor,
+          taxAmountOverridden: line.taxAmountOverridden,
         })),
       )
       .returning();
+  }
+
+  /** Tax/VAT Phase 3
+   * (docs/finance-work-item-tax-vat-phase-3-discovery.md §4/§6/§7) —
+   * resolves/calculates/snapshots tax for every line, in DTO order,
+   * against this invoice's OWN invoiceDate (never posting date). A line
+   * with no taxCodeId is untouched (100% legacy behavior: taxAmountMinor
+   * stays exactly the client-supplied manual value, or 0). A line with
+   * taxCodeId resolves the effective tax_rates row, calculates the
+   * line's tax, and treats an explicitly-supplied taxAmountMinor as an
+   * override: the supplied value becomes authoritative, the calculated
+   * value is retained in taxAmountCalculatedMinor, and
+   * taxAmountOverridden is set. Nothing is ever silently discarded.
+   * Identical shape/behavior to SupplierBillsService.resolveLineTax(). */
+  private async resolveLineTax(
+    tx: TxClient,
+    tenantId: string,
+    legalEntityId: string,
+    documentDate: string,
+    lines: CreateCustomerInvoiceLineDto[],
+  ): Promise<ResolvedCustomerInvoiceLine[]> {
+    const resolved: ResolvedCustomerInvoiceLine[] = [];
+    for (const line of lines) {
+      if (!line.taxCodeId) {
+        resolved.push({
+          accountId: line.accountId,
+          description: line.description ?? null,
+          amountMinor: line.amountMinor,
+          taxAmountMinor: line.taxAmountMinor ?? 0,
+          taxCodeId: null,
+          taxRateId: null,
+          taxAmountCalculatedMinor: null,
+          taxAmountOverridden: false,
+        });
+        continue;
+      }
+
+      const rate = await this.taxRates.resolveEffectiveRate(
+        tx,
+        tenantId,
+        legalEntityId,
+        line.taxCodeId,
+        documentDate,
+      );
+      const calculated = calculateTaxAmountMinor(
+        line.amountMinor,
+        rate.rateBasisPoints,
+      );
+      const overridden = line.taxAmountMinor !== undefined;
+      resolved.push({
+        accountId: line.accountId,
+        description: line.description ?? null,
+        amountMinor: line.amountMinor,
+        taxAmountMinor: overridden ? line.taxAmountMinor! : calculated,
+        taxCodeId: line.taxCodeId,
+        taxRateId: rate.id,
+        taxAmountCalculatedMinor: calculated,
+        taxAmountOverridden: overridden,
+      });
+    }
+    return resolved;
   }
 
   /** subtotalMinor = SUM(line.amountMinor), taxMinor =
    * SUM(line.taxAmountMinor), totalMinor = subtotalMinor + taxMinor —
    * server-computed, never client-supplied, matches the
    * customer_invoices_total_equals_subtotal_plus_tax CHECK constraint
-   * by construction. */
-  private computeTotals(lines: CreateCustomerInvoiceLineDto[]): {
+   * by construction. Operates on already-resolved lines (Tax/VAT Phase
+   * 3) so taxAmountMinor here is always the final authoritative value —
+   * calculated, overridden, or plain legacy manual/0. */
+  private computeTotals(lines: ResolvedCustomerInvoiceLine[]): {
     subtotalMinor: number;
     taxMinor: number;
     totalMinor: number;
   } {
     const subtotalMinor = lines.reduce((sum, l) => sum + l.amountMinor, 0);
-    const taxMinor = lines.reduce((sum, l) => sum + (l.taxAmountMinor ?? 0), 0);
+    const taxMinor = lines.reduce((sum, l) => sum + l.taxAmountMinor, 0);
     return { subtotalMinor, taxMinor, totalMinor: subtotalMinor + taxMinor };
   }
 
