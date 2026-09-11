@@ -12,6 +12,7 @@ import {
   auditLogs,
   and,
   eq,
+  sql,
 } from "@noryx/db-core";
 import {
   closeDb as closeFinanceDb,
@@ -1604,6 +1605,371 @@ describe("Supplier Debit Notes (e2e) — draft CRUD, lines, allocation, posting,
           ),
         );
       expect(deleteRows).toHaveLength(1);
+    });
+  });
+
+  /**
+   * Tax/VAT Phase 2 — AP Tax Calculation
+   * (docs/finance-work-item-tax-vat-phase-2-discovery.md §4/§11/§13).
+   * Exact mirror of supplier-bills.e2e-spec.ts's own "Tax calculation"
+   * block, EXCEPT the one test that matters most for this document: a
+   * debit note allocating to TWO DIFFERENT bills, with its own lines
+   * independently tax-coded on the debit note's own date, proving the
+   * confirmed "no inheritance" architecture decision holds end-to-end —
+   * neither allocated bill's tax coding (or lack of it) has any bearing
+   * on how the debit note's own lines resolve.
+   */
+  describe("Tax calculation — Tax/VAT Phase 2", () => {
+    let taxCodeCalcId: string; // STANDARD, 500bp, open-ended from 2020-01-01
+    let taxCodeSecondId: string; // STANDARD, 1000bp, open-ended from 2020-01-01
+    let taxCodeNoRateId: string; // STANDARD, no rate ever created
+    let taxCodeInactiveId: string; // STANDARD, one rate, then deactivated
+    let taxCodeA2Id: string; // created in legalEntityA2Id — cross-entity case
+
+    beforeAll(async () => {
+      const adminToken = tokenFor(tenantAId, legalEntityA1Id, [
+        "finance.admin",
+      ]);
+
+      async function createTaxCode(code: string) {
+        const res = await request(app.getHttpServer())
+          .post("/v1/finance/tax-codes")
+          .set("Authorization", `Bearer ${adminToken}`)
+          .send({ code, name: code, treatment: "STANDARD" })
+          .expect(201);
+        return res.body.data.id as string;
+      }
+      async function createRate(taxCodeId: string, rateBasisPoints: number) {
+        const res = await request(app.getHttpServer())
+          .post(`/v1/finance/tax-codes/${taxCodeId}/rates`)
+          .set("Authorization", `Bearer ${adminToken}`)
+          .send({ rateBasisPoints, effectiveFrom: "2020-01-01" })
+          .expect(201);
+        return res.body.data.id as string;
+      }
+
+      taxCodeCalcId = await createTaxCode(`DBN-TAXCALC-${suffix}`);
+      await createRate(taxCodeCalcId, 500);
+
+      taxCodeSecondId = await createTaxCode(`DBN-TAXCALC2-${suffix}`);
+      await createRate(taxCodeSecondId, 1000);
+
+      taxCodeNoRateId = await createTaxCode(`DBN-TAXNORATE-${suffix}`);
+      // deliberately no rate created
+
+      taxCodeInactiveId = await createTaxCode(`DBN-TAXINACTIVE-${suffix}`);
+      await createRate(taxCodeInactiveId, 500);
+      await request(app.getHttpServer())
+        .patch(`/v1/finance/tax-codes/${taxCodeInactiveId}/deactivate`)
+        .set("Authorization", `Bearer ${adminToken}`)
+        .expect(200);
+
+      const adminA2Token = tokenFor(tenantAId, legalEntityA2Id, [
+        "finance.admin",
+      ]);
+      const a2Code = await request(app.getHttpServer())
+        .post("/v1/finance/tax-codes")
+        .set("Authorization", `Bearer ${adminA2Token}`)
+        .send({
+          code: `DBN-TAXA2-${suffix}`,
+          name: "Entity 2 code",
+          treatment: "STANDARD",
+        })
+        .expect(201);
+      taxCodeA2Id = a2Code.body.data.id;
+    });
+
+    it("taxCodeId omitted preserves legacy behavior exactly", async () => {
+      const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.poster"]);
+      const bill = await createAndPostBill(
+        token,
+        supplierA1Id,
+        "2026-01-10",
+        1000,
+      );
+      const created = await request(app.getHttpServer())
+        .post("/v1/finance/debit-notes")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          supplierId: supplierA1Id,
+          debitNoteDate: "2026-01-15",
+          lines: [
+            {
+              accountId: expenseAccountA1Id,
+              amountMinor: 1000,
+              taxAmountMinor: 60,
+            },
+          ],
+          allocations: [{ billId: bill.id, allocatedAmountMinor: 1000 }],
+        })
+        .expect(201);
+      const [line] = created.body.data.lines;
+      expect(line.taxAmountMinor).toBe(60);
+      expect(line.taxCodeId).toBeNull();
+      expect(line.taxRateId).toBeNull();
+      expect(line.taxAmountCalculatedMinor).toBeNull();
+      expect(line.taxAmountOverridden).toBe(false);
+    });
+
+    it("taxCodeId supplied with no explicit taxAmountMinor: calculates, snapshots, taxAmountOverridden=false", async () => {
+      const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.poster"]);
+      const bill = await createAndPostBill(
+        token,
+        supplierA1Id,
+        "2026-01-10",
+        10000,
+      );
+      const created = await request(app.getHttpServer())
+        .post("/v1/finance/debit-notes")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          supplierId: supplierA1Id,
+          debitNoteDate: "2026-01-15",
+          lines: [
+            {
+              accountId: expenseAccountA1Id,
+              amountMinor: 10000,
+              taxCodeId: taxCodeCalcId,
+            },
+          ],
+          allocations: [{ billId: bill.id, allocatedAmountMinor: 10500 }],
+        })
+        .expect(201);
+      const [line] = created.body.data.lines;
+      expect(line.taxRateId).toBeTruthy();
+      expect(line.taxAmountCalculatedMinor).toBe(500);
+      expect(line.taxAmountMinor).toBe(500);
+      expect(line.taxAmountOverridden).toBe(false);
+      expect(created.body.data.totalMinor).toBe(10500);
+    });
+
+    it("taxCodeId + explicit taxAmountMinor: override is authoritative, calculated value retained", async () => {
+      const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.poster"]);
+      const bill = await createAndPostBill(
+        token,
+        supplierA1Id,
+        "2026-01-10",
+        10480,
+      );
+      const created = await request(app.getHttpServer())
+        .post("/v1/finance/debit-notes")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          supplierId: supplierA1Id,
+          debitNoteDate: "2026-01-15",
+          lines: [
+            {
+              accountId: expenseAccountA1Id,
+              amountMinor: 10000,
+              taxCodeId: taxCodeCalcId,
+              taxAmountMinor: 480,
+            },
+          ],
+          allocations: [{ billId: bill.id, allocatedAmountMinor: 10480 }],
+        })
+        .expect(201);
+      const [line] = created.body.data.lines;
+      expect(line.taxAmountMinor).toBe(480);
+      expect(line.taxAmountCalculatedMinor).toBe(500);
+      expect(line.taxAmountOverridden).toBe(true);
+    });
+
+    it("rejects an inactive taxCodeId on a new line (400)", async () => {
+      const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.poster"]);
+      await request(app.getHttpServer())
+        .post("/v1/finance/debit-notes")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          supplierId: supplierA1Id,
+          debitNoteDate: "2026-01-15",
+          lines: [
+            {
+              accountId: expenseAccountA1Id,
+              amountMinor: 1000,
+              taxCodeId: taxCodeInactiveId,
+            },
+          ],
+          allocations: [],
+        })
+        .expect(400);
+    });
+
+    it("rejects a taxCodeId with no tax rate effective on the debit note's date (400)", async () => {
+      const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.poster"]);
+      await request(app.getHttpServer())
+        .post("/v1/finance/debit-notes")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          supplierId: supplierA1Id,
+          debitNoteDate: "2026-01-15",
+          lines: [
+            {
+              accountId: expenseAccountA1Id,
+              amountMinor: 1000,
+              taxCodeId: taxCodeNoRateId,
+            },
+          ],
+          allocations: [],
+        })
+        .expect(400);
+    });
+
+    it("rejects a taxCodeId from a different legal entity (400)", async () => {
+      const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.poster"]);
+      await request(app.getHttpServer())
+        .post("/v1/finance/debit-notes")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          supplierId: supplierA1Id,
+          debitNoteDate: "2026-01-15",
+          lines: [
+            {
+              accountId: expenseAccountA1Id,
+              amountMinor: 1000,
+              taxCodeId: taxCodeA2Id,
+            },
+          ],
+          allocations: [],
+        })
+        .expect(400);
+    });
+
+    it("a debit note allocating to TWO DIFFERENT bills resolves its own lines' tax entirely independently — proves the confirmed no-inheritance architecture decision", async () => {
+      const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.poster"]);
+      // Neither allocated bill carries any tax at all — if the debit
+      // note's lines ever "inherited" from an allocated bill, they would
+      // have nothing to inherit. Its own lines resolve their own tax
+      // codes on its own debitNoteDate regardless.
+      const billOne = await createAndPostBill(
+        token,
+        supplierA1Id,
+        "2026-01-05",
+        6000,
+      );
+      const billTwo = await createAndPostBill(
+        token,
+        supplierA1Id,
+        "2026-01-06",
+        4700,
+      );
+      const created = await request(app.getHttpServer())
+        .post("/v1/finance/debit-notes")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          supplierId: supplierA1Id,
+          debitNoteDate: "2026-01-15",
+          lines: [
+            {
+              accountId: expenseAccountA1Id,
+              amountMinor: 6000,
+              taxCodeId: taxCodeCalcId,
+            }, // 5% -> 300
+            {
+              accountId: expenseAccountA1Id,
+              amountMinor: 4000,
+              taxCodeId: taxCodeSecondId,
+            }, // 10% -> 400
+          ],
+          allocations: [
+            { billId: billOne.id, allocatedAmountMinor: 6000 },
+            { billId: billTwo.id, allocatedAmountMinor: 4700 },
+          ],
+        })
+        .expect(201);
+
+      const [line1, line2] = created.body.data.lines;
+      expect(line1.taxCodeId).toBe(taxCodeCalcId);
+      expect(line1.taxAmountMinor).toBe(300);
+      expect(line2.taxCodeId).toBe(taxCodeSecondId);
+      expect(line2.taxAmountMinor).toBe(400);
+      expect(created.body.data.subtotalMinor).toBe(10000);
+      expect(created.body.data.taxMinor).toBe(700);
+      expect(created.body.data.totalMinor).toBe(10700);
+      expect(created.body.data.allocations).toHaveLength(2);
+      const allocatedTotal = created.body.data.allocations.reduce(
+        (s: number, a: { allocatedAmountMinor: number }) =>
+          s + a.allocatedAmountMinor,
+        0,
+      );
+      expect(allocatedTotal).toBe(10700); // must equal totalMinor to be postable
+    });
+
+    it("posting is unaffected: the aggregate tax journal line still equals SUM(line.taxAmountMinor)", async () => {
+      const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.poster"]);
+      const bill = await createAndPostBill(
+        token,
+        supplierA1Id,
+        "2026-01-05",
+        10500,
+      );
+      const created = await request(app.getHttpServer())
+        .post("/v1/finance/debit-notes")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          supplierId: supplierA1Id,
+          debitNoteDate: "2026-01-15",
+          lines: [
+            {
+              accountId: expenseAccountA1Id,
+              amountMinor: 10000,
+              taxCodeId: taxCodeCalcId,
+            }, // 500 calculated
+          ],
+          allocations: [{ billId: bill.id, allocatedAmountMinor: 10500 }],
+        })
+        .expect(201);
+      const id = created.body.data.id;
+
+      const posted = await request(app.getHttpServer())
+        .post(`/v1/finance/debit-notes/${id}/post`)
+        .set("Authorization", `Bearer ${token}`)
+        .expect(200);
+
+      const lines = await withTenant(tenantAId, (tx) =>
+        tx
+          .select()
+          .from(journalLines)
+          .where(
+            eq(journalLines.journalEntryId, posted.body.data.journalEntryId),
+          ),
+      );
+      const taxLine = lines.find((l) => l.accountId === taxInputAccountA1Id);
+      expect(taxLine!.creditMinor).toBe(500);
+      const totalDebit = lines.reduce((s, l) => s + l.debitMinor, 0);
+      const totalCredit = lines.reduce((s, l) => s + l.creditMinor, 0);
+      expect(totalDebit).toBe(totalCredit);
+    });
+
+    it("DB level: the two new CHECK constraints reject an insert that bypasses the service layer", async () => {
+      const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.poster"]);
+      const bill = await createAndPostBill(
+        token,
+        supplierA1Id,
+        "2026-01-05",
+        1000,
+      );
+      const draft = await request(app.getHttpServer())
+        .post("/v1/finance/debit-notes")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          supplierId: supplierA1Id,
+          debitNoteDate: "2026-01-15",
+          lines: [{ accountId: expenseAccountA1Id, amountMinor: 1000 }],
+          allocations: [{ billId: bill.id, allocatedAmountMinor: 1000 }],
+        })
+        .expect(201);
+      const debitNoteId = draft.body.data.id;
+
+      await expect(
+        withTenant(tenantAId, (tx) =>
+          tx.execute(sql`
+            INSERT INTO supplier_debit_note_lines
+              (tenant_id, debit_note_id, line_number, account_id, amount_minor, tax_amount_overridden)
+            VALUES
+              (${tenantAId}, ${debitNoteId}, 999, ${expenseAccountA1Id}, 100, true)
+          `),
+        ),
+      ).rejects.toThrow(/tax_overridden_requires_code/);
     });
   });
 });

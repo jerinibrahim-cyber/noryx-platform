@@ -36,6 +36,8 @@ import {
   type SupplierDebitNoteAllocation,
 } from "../../db/schema";
 import { withTenant, type TxClient } from "../../db/db";
+import { TaxRatesService } from "../../tax-configuration/tax-rates.service";
+import { calculateTaxAmountMinor } from "../../tax-configuration/tax-calculation";
 import type { CreateSupplierDebitNoteDto } from "./dto/create-supplier-debit-note.dto";
 import type { CreateSupplierDebitNoteLineDto } from "./dto/create-supplier-debit-note-line.dto";
 import type { CreateSupplierDebitNoteAllocationDto } from "./dto/create-supplier-debit-note-allocation.dto";
@@ -45,6 +47,22 @@ export type SupplierDebitNoteWithDetails = SupplierDebitNote & {
   lines: SupplierDebitNoteLine[];
   allocations: SupplierDebitNoteAllocation[];
 };
+
+/** Tax/VAT Phase 2 — exact mirror of SupplierBillsService's own
+ * ResolvedSupplierBillLine. A debit-note line after tax resolution,
+ * resolved INDEPENDENTLY of any allocated bill, by this document's own
+ * debitNoteDate (discovery §4/§13 — no line-level linkage exists
+ * between a debit-note line and any bill line). */
+interface ResolvedSupplierDebitNoteLine {
+  accountId: string;
+  description: string | null;
+  amountMinor: number;
+  taxAmountMinor: number;
+  taxCodeId: string | null;
+  taxRateId: string | null;
+  taxAmountCalculatedMinor: number | null;
+  taxAmountOverridden: boolean;
+}
 
 export interface ListSupplierDebitNotesFilters {
   status?: "DRAFT" | "POSTED";
@@ -75,6 +93,17 @@ export interface ListSupplierDebitNotesFilters {
  * tables, with multi-bill row locking in a fixed ascending-id order
  * (same deadlock-avoidance reasoning as SupplierPaymentsService.post()).
  *
+ * Tax/VAT Phase 2
+ * (docs/finance-work-item-tax-vat-phase-2-discovery.md §4/§13) — line-
+ * level tax is resolved INDEPENDENTLY per line, by this document's own
+ * debitNoteDate, never inherited from any allocated bill. This document
+ * confirms and implements a deliberate correction to the originally-
+ * proposed Decision 1 ("inherit the original document's tax code and
+ * snapshotted rate"): a debit note has no single "original document"
+ * (allocations are many-to-many against bills, header-level only) and
+ * no line-level linkage to any bill line at all, so literal inheritance
+ * is not mechanically definable. See resolveLineTax() below.
+ *
  * Accounting polarity is the bill's own polarity REVERSED (proposal
  * §9): Dr apSettings.apControlAccountId / Cr each line's account (+ Cr
  * apSettings.taxInputAccountId if tax > 0) — AP and expense both
@@ -91,6 +120,8 @@ export interface ListSupplierDebitNotesFilters {
  */
 @Injectable()
 export class SupplierDebitNotesService {
+  constructor(private readonly taxRates: TaxRatesService) {}
+
   async create(
     tenantId: string,
     legalEntityId: string,
@@ -118,7 +149,19 @@ export class SupplierDebitNotesService {
         tenantId,
         legalEntityId,
       );
-      const totals = this.computeTotals(dto.lines);
+      // Tax/VAT Phase 2 — resolved INDEPENDENTLY of any allocation, by
+      // this debit note's OWN debitNoteDate (discovery §4/§13 — no
+      // line-level linkage exists to any allocated bill's lines or tax
+      // codes). Exact mirror of SupplierBillsService.create()'s
+      // resolve-then-total sequencing.
+      const resolvedLines = await this.resolveLineTax(
+        tx,
+        tenantId,
+        legalEntityId,
+        dto.debitNoteDate,
+        dto.lines,
+      );
+      const totals = this.computeTotals(resolvedLines);
 
       const [createdDebitNote] = await tx
         .insert(supplierDebitNotes)
@@ -141,7 +184,7 @@ export class SupplierDebitNotesService {
         tx,
         tenantId,
         createdDebitNote!.id,
-        dto.lines,
+        resolvedLines,
       );
       const insertedAllocations = await this.insertAllocations(
         tx,
@@ -270,8 +313,20 @@ export class SupplierDebitNotesService {
       if (dto.memo !== undefined) {
         headerPatch.memo = dto.memo;
       }
+      // Tax/VAT Phase 2 — same effective-document-date reasoning as
+      // SupplierBillsService.update(): uses the incoming debitNoteDate if
+      // this same call also changes it, else the currently-stored date.
+      let resolvedLines: ResolvedSupplierDebitNoteLine[] | undefined;
       if (dto.lines) {
-        const totals = this.computeTotals(dto.lines);
+        const documentDate = dto.debitNoteDate ?? before.debitNoteDate;
+        resolvedLines = await this.resolveLineTax(
+          tx,
+          tenantId,
+          legalEntityId,
+          documentDate,
+          dto.lines,
+        );
+        const totals = this.computeTotals(resolvedLines);
         headerPatch.subtotalMinor = totals.subtotalMinor;
         headerPatch.taxMinor = totals.taxMinor;
         headerPatch.totalMinor = totals.totalMinor;
@@ -292,7 +347,7 @@ export class SupplierDebitNotesService {
         await tx
           .delete(supplierDebitNoteLines)
           .where(eq(supplierDebitNoteLines.debitNoteId, id));
-        await this.insertLines(tx, tenantId, id, dto.lines);
+        await this.insertLines(tx, tenantId, id, resolvedLines!);
       }
       if (dto.allocations) {
         await tx
@@ -956,7 +1011,7 @@ export class SupplierDebitNotesService {
     tx: TxClient,
     tenantId: string,
     debitNoteId: string,
-    lines: CreateSupplierDebitNoteLineDto[],
+    lines: ResolvedSupplierDebitNoteLine[],
   ): Promise<SupplierDebitNoteLine[]> {
     return tx
       .insert(supplierDebitNoteLines)
@@ -966,12 +1021,73 @@ export class SupplierDebitNotesService {
           debitNoteId,
           lineNumber: index + 1,
           accountId: line.accountId,
-          description: line.description ?? null,
+          description: line.description,
           amountMinor: line.amountMinor,
-          taxAmountMinor: line.taxAmountMinor ?? 0,
+          taxAmountMinor: line.taxAmountMinor,
+          taxCodeId: line.taxCodeId,
+          taxRateId: line.taxRateId,
+          taxAmountCalculatedMinor: line.taxAmountCalculatedMinor,
+          taxAmountOverridden: line.taxAmountOverridden,
         })),
       )
       .returning();
+  }
+
+  /** Tax/VAT Phase 2
+   * (docs/finance-work-item-tax-vat-phase-2-discovery.md §3/§4/§5/§6) —
+   * exact mirror of SupplierBillsService.resolveLineTax, EXCEPT
+   * resolution uses this debit note's OWN debitNoteDate — never any
+   * allocated bill's date or tax code. A debit note has no line-level
+   * linkage to any bill line (discovery §1.3/§13's confirmed
+   * architecture decision: no inheritance), so each line is resolved
+   * completely independently, exactly as a bill line would be. */
+  private async resolveLineTax(
+    tx: TxClient,
+    tenantId: string,
+    legalEntityId: string,
+    documentDate: string,
+    lines: CreateSupplierDebitNoteLineDto[],
+  ): Promise<ResolvedSupplierDebitNoteLine[]> {
+    const resolved: ResolvedSupplierDebitNoteLine[] = [];
+    for (const line of lines) {
+      if (!line.taxCodeId) {
+        resolved.push({
+          accountId: line.accountId,
+          description: line.description ?? null,
+          amountMinor: line.amountMinor,
+          taxAmountMinor: line.taxAmountMinor ?? 0,
+          taxCodeId: null,
+          taxRateId: null,
+          taxAmountCalculatedMinor: null,
+          taxAmountOverridden: false,
+        });
+        continue;
+      }
+
+      const rate = await this.taxRates.resolveEffectiveRate(
+        tx,
+        tenantId,
+        legalEntityId,
+        line.taxCodeId,
+        documentDate,
+      );
+      const calculated = calculateTaxAmountMinor(
+        line.amountMinor,
+        rate.rateBasisPoints,
+      );
+      const overridden = line.taxAmountMinor !== undefined;
+      resolved.push({
+        accountId: line.accountId,
+        description: line.description ?? null,
+        amountMinor: line.amountMinor,
+        taxAmountMinor: overridden ? line.taxAmountMinor! : calculated,
+        taxCodeId: line.taxCodeId,
+        taxRateId: rate.id,
+        taxAmountCalculatedMinor: calculated,
+        taxAmountOverridden: overridden,
+      });
+    }
+    return resolved;
   }
 
   private async insertAllocations(
@@ -996,14 +1112,16 @@ export class SupplierDebitNotesService {
   /** subtotalMinor = SUM(line.amountMinor), taxMinor =
    * SUM(line.taxAmountMinor), totalMinor = subtotalMinor + taxMinor —
    * server-computed, never client-supplied. Identical to
-   * SupplierBillsService.computeTotals. */
-  private computeTotals(lines: CreateSupplierDebitNoteLineDto[]): {
+   * SupplierBillsService.computeTotals; operates on already-resolved
+   * lines (Tax/VAT Phase 2), so taxAmountMinor here is always the final
+   * authoritative value. */
+  private computeTotals(lines: ResolvedSupplierDebitNoteLine[]): {
     subtotalMinor: number;
     taxMinor: number;
     totalMinor: number;
   } {
     const subtotalMinor = lines.reduce((sum, l) => sum + l.amountMinor, 0);
-    const taxMinor = lines.reduce((sum, l) => sum + (l.taxAmountMinor ?? 0), 0);
+    const taxMinor = lines.reduce((sum, l) => sum + l.taxAmountMinor, 0);
     return { subtotalMinor, taxMinor, totalMinor: subtotalMinor + taxMinor };
   }
 

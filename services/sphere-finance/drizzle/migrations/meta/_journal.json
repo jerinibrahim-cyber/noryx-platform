@@ -127,6 +127,13 @@
       "when": 1789082412299,
       "tag": "0017_tax_configuration",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1789149469536,
+      "tag": "0018_tax_vat_phase_2_ap_calculation",
+      "breakpoints": true
     }
   ]
 }

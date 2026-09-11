@@ -15,6 +15,14 @@ import {
  *
  * No lineNumber field, deliberately — SupplierDebitNotesService assigns
  * 1..N from array order, same convention as SupplierBillsService.
+ *
+ * taxCodeId — Tax/VAT Phase 2
+ * (docs/finance-work-item-tax-vat-phase-2-discovery.md §3/§4/§6). Exact
+ * mirror of CreateSupplierBillLineDto.taxCodeId, EXCEPT resolution uses
+ * this document's own debitNoteDate, never any allocated bill's date or
+ * tax code — see SupplierDebitNotesService's own doc comment for why
+ * (no line-level linkage exists between a debit-note line and any bill
+ * line — discovery §1.3/§13).
  */
 export class CreateSupplierDebitNoteLineDto {
   @IsUUID()
@@ -35,4 +43,8 @@ export class CreateSupplierDebitNoteLineDto {
   @IsInt()
   @Min(0)
   taxAmountMinor?: number;
+
+  @IsOptional()
+  @IsUUID()
+  taxCodeId?: string;
 }

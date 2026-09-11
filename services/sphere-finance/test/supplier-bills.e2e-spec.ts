@@ -12,6 +12,7 @@ import {
   auditLogs,
   and,
   eq,
+  sql,
 } from "@noryx/db-core";
 import {
   closeDb as closeFinanceDb,
@@ -1155,6 +1156,447 @@ describe("Supplier Bills (e2e) — draft CRUD, posting, immutability, isolation,
           ),
         );
       expect(deleteRows).toHaveLength(1);
+    });
+  });
+
+  /**
+   * Tax/VAT Phase 2 — AP Tax Calculation
+   * (docs/finance-work-item-tax-vat-phase-2-discovery.md §11). Covers
+   * legacy-preservation, calculation, override, inactive/no-effective-
+   * rate rejection, multi-line independent resolution, the half-open
+   * effective-date boundary, historical snapshot immutability, cross-
+   * legal-entity isolation, posting, and the two new CHECK constraints
+   * at the DB level. All fixtures below are scoped to legalEntityA1Id
+   * (or legalEntityA2Id for the cross-entity case) using this file's
+   * existing tokenFor()/adminToken conventions.
+   */
+  describe("Tax calculation — Tax/VAT Phase 2", () => {
+    let taxCodeCalcId: string; // STANDARD, 500bp, open-ended from 2020-01-01
+    let taxCodeSecondId: string; // STANDARD, 1000bp, open-ended from 2020-01-01
+    let taxCodeNoRateId: string; // STANDARD, no rate ever created
+    let taxCodeInactiveId: string; // STANDARD, one rate, then deactivated
+    let taxCodeBoundaryId: string; // STANDARD, two adjacent half-open rates
+    let boundaryRateEarlyId: string; // 400bp, [2020-01-01, 2020-07-01)
+    let boundaryRateLateId: string; // 600bp, [2020-07-01, ∞)
+    let taxCodeA2Id: string; // created in legalEntityA2Id — cross-entity case
+
+    beforeAll(async () => {
+      const adminToken = tokenFor(tenantAId, legalEntityA1Id, [
+        "finance.admin",
+      ]);
+
+      async function createTaxCode(code: string) {
+        const res = await request(app.getHttpServer())
+          .post("/v1/finance/tax-codes")
+          .set("Authorization", `Bearer ${adminToken}`)
+          .send({ code, name: code, treatment: "STANDARD" })
+          .expect(201);
+        return res.body.data.id as string;
+      }
+      async function createRate(
+        taxCodeId: string,
+        rateBasisPoints: number,
+        effectiveFrom: string,
+        effectiveTo?: string,
+      ) {
+        const res = await request(app.getHttpServer())
+          .post(`/v1/finance/tax-codes/${taxCodeId}/rates`)
+          .set("Authorization", `Bearer ${adminToken}`)
+          .send({
+            rateBasisPoints,
+            effectiveFrom,
+            ...(effectiveTo ? { effectiveTo } : {}),
+          })
+          .expect(201);
+        return res.body.data.id as string;
+      }
+
+      taxCodeCalcId = await createTaxCode(`BILL-TAXCALC-${suffix}`);
+      await createRate(taxCodeCalcId, 500, "2020-01-01");
+
+      taxCodeSecondId = await createTaxCode(`BILL-TAXCALC2-${suffix}`);
+      await createRate(taxCodeSecondId, 1000, "2020-01-01");
+
+      taxCodeNoRateId = await createTaxCode(`BILL-TAXNORATE-${suffix}`);
+      // deliberately no rate created
+
+      taxCodeInactiveId = await createTaxCode(`BILL-TAXINACTIVE-${suffix}`);
+      await createRate(taxCodeInactiveId, 500, "2020-01-01");
+      await request(app.getHttpServer())
+        .patch(`/v1/finance/tax-codes/${taxCodeInactiveId}/deactivate`)
+        .set("Authorization", `Bearer ${adminToken}`)
+        .expect(200);
+
+      taxCodeBoundaryId = await createTaxCode(`BILL-TAXBOUNDARY-${suffix}`);
+      boundaryRateEarlyId = await createRate(
+        taxCodeBoundaryId,
+        400,
+        "2020-01-01",
+        "2020-07-01",
+      );
+      boundaryRateLateId = await createRate(
+        taxCodeBoundaryId,
+        600,
+        "2020-07-01",
+      );
+
+      const adminA2Token = tokenFor(tenantAId, legalEntityA2Id, [
+        "finance.admin",
+      ]);
+      const a2Code = await request(app.getHttpServer())
+        .post("/v1/finance/tax-codes")
+        .set("Authorization", `Bearer ${adminA2Token}`)
+        .send({
+          code: `BILL-TAXA2-${suffix}`,
+          name: "Entity 2 code",
+          treatment: "STANDARD",
+        })
+        .expect(201);
+      taxCodeA2Id = a2Code.body.data.id;
+    });
+
+    it("taxCodeId omitted preserves legacy behavior exactly (explicit taxAmountMinor and default 0)", async () => {
+      const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.poster"]);
+      const created = await request(app.getHttpServer())
+        .post("/v1/finance/bills")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          supplierId: supplierA1Id,
+          supplierBillNumber: `TAX-LEGACY-${suffix}`,
+          billDate: "2026-01-15",
+          lines: [
+            {
+              accountId: expenseAccountA1Id,
+              amountMinor: 1000,
+              taxAmountMinor: 75,
+            },
+            { accountId: expenseAccountA1Id, amountMinor: 2000 },
+          ],
+        })
+        .expect(201);
+
+      const [line1, line2] = created.body.data.lines;
+      expect(line1.taxAmountMinor).toBe(75);
+      expect(line1.taxCodeId).toBeNull();
+      expect(line1.taxRateId).toBeNull();
+      expect(line1.taxAmountCalculatedMinor).toBeNull();
+      expect(line1.taxAmountOverridden).toBe(false);
+      expect(line2.taxAmountMinor).toBe(0);
+      expect(line2.taxCodeId).toBeNull();
+      expect(created.body.data.taxMinor).toBe(75);
+      expect(created.body.data.totalMinor).toBe(3075);
+    });
+
+    it("taxCodeId supplied with no explicit taxAmountMinor: calculates, snapshots, taxAmountOverridden=false", async () => {
+      const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.poster"]);
+      const created = await request(app.getHttpServer())
+        .post("/v1/finance/bills")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          supplierId: supplierA1Id,
+          supplierBillNumber: `TAX-CALC-${suffix}`,
+          billDate: "2026-01-15",
+          lines: [
+            {
+              accountId: expenseAccountA1Id,
+              amountMinor: 10000,
+              taxCodeId: taxCodeCalcId,
+            },
+          ],
+        })
+        .expect(201);
+
+      const [line] = created.body.data.lines;
+      expect(line.taxCodeId).toBe(taxCodeCalcId);
+      expect(line.taxRateId).toBeTruthy();
+      expect(line.taxAmountCalculatedMinor).toBe(500); // 10000 * 500bp / 10000
+      expect(line.taxAmountMinor).toBe(500);
+      expect(line.taxAmountOverridden).toBe(false);
+      expect(created.body.data.subtotalMinor).toBe(10000);
+      expect(created.body.data.taxMinor).toBe(500);
+      expect(created.body.data.totalMinor).toBe(10500);
+    });
+
+    it("taxCodeId + explicit taxAmountMinor: override is authoritative, calculated value retained, taxAmountOverridden=true", async () => {
+      const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.poster"]);
+      const created = await request(app.getHttpServer())
+        .post("/v1/finance/bills")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          supplierId: supplierA1Id,
+          supplierBillNumber: `TAX-OVERRIDE-${suffix}`,
+          billDate: "2026-01-15",
+          lines: [
+            {
+              accountId: expenseAccountA1Id,
+              amountMinor: 10000,
+              taxCodeId: taxCodeCalcId,
+              taxAmountMinor: 480, // caller's explicit override, not the calculated 500
+            },
+          ],
+        })
+        .expect(201);
+
+      const [line] = created.body.data.lines;
+      expect(line.taxAmountMinor).toBe(480); // authoritative — the override
+      expect(line.taxAmountCalculatedMinor).toBe(500); // retained, not discarded
+      expect(line.taxAmountOverridden).toBe(true);
+      expect(created.body.data.taxMinor).toBe(480);
+    });
+
+    it("rejects an inactive taxCodeId on a new line (400) at create and at update", async () => {
+      const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.poster"]);
+      await request(app.getHttpServer())
+        .post("/v1/finance/bills")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          supplierId: supplierA1Id,
+          supplierBillNumber: `TAX-INACTIVE-CREATE-${suffix}`,
+          billDate: "2026-01-15",
+          lines: [
+            {
+              accountId: expenseAccountA1Id,
+              amountMinor: 1000,
+              taxCodeId: taxCodeInactiveId,
+            },
+          ],
+        })
+        .expect(400);
+
+      const draft = await request(app.getHttpServer())
+        .post("/v1/finance/bills")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          supplierId: supplierA1Id,
+          supplierBillNumber: `TAX-INACTIVE-UPDATE-${suffix}`,
+          billDate: "2026-01-15",
+          lines: oneLine(expenseAccountA1Id),
+        })
+        .expect(201);
+      await request(app.getHttpServer())
+        .patch(`/v1/finance/bills/${draft.body.data.id}`)
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          lines: [
+            {
+              accountId: expenseAccountA1Id,
+              amountMinor: 1000,
+              taxCodeId: taxCodeInactiveId,
+            },
+          ],
+        })
+        .expect(400);
+    });
+
+    it("rejects a taxCodeId with no tax rate effective on the bill's date (400), never silently zero", async () => {
+      const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.poster"]);
+      await request(app.getHttpServer())
+        .post("/v1/finance/bills")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          supplierId: supplierA1Id,
+          supplierBillNumber: `TAX-NORATE-${suffix}`,
+          billDate: "2026-01-15",
+          lines: [
+            {
+              accountId: expenseAccountA1Id,
+              amountMinor: 1000,
+              taxCodeId: taxCodeNoRateId,
+            },
+          ],
+        })
+        .expect(400);
+    });
+
+    it("resolves two different lines against two different tax codes independently", async () => {
+      const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.poster"]);
+      const created = await request(app.getHttpServer())
+        .post("/v1/finance/bills")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          supplierId: supplierA1Id,
+          supplierBillNumber: `TAX-MULTI-${suffix}`,
+          billDate: "2026-01-15",
+          lines: [
+            {
+              accountId: expenseAccountA1Id,
+              amountMinor: 10000,
+              taxCodeId: taxCodeCalcId,
+            }, // 5% -> 500
+            {
+              accountId: expenseAccountA1Id,
+              amountMinor: 10000,
+              taxCodeId: taxCodeSecondId,
+            }, // 10% -> 1000
+          ],
+        })
+        .expect(201);
+
+      const [line1, line2] = created.body.data.lines;
+      expect(line1.taxCodeId).toBe(taxCodeCalcId);
+      expect(line1.taxAmountMinor).toBe(500);
+      expect(line2.taxCodeId).toBe(taxCodeSecondId);
+      expect(line2.taxAmountMinor).toBe(1000);
+      expect(created.body.data.taxMinor).toBe(1500);
+    });
+
+    it("resolves the correct rate on each side of the half-open effective-date boundary, and the resolved snapshot survives a later re-GET unchanged (historical correctness)", async () => {
+      const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.poster"]);
+
+      const lastDayOfEarly = await request(app.getHttpServer())
+        .post("/v1/finance/bills")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          supplierId: supplierA1Id,
+          supplierBillNumber: `TAX-BOUNDARY-EARLY-${suffix}`,
+          billDate: "2020-06-30", // just before boundaryRateLateId's effectiveFrom
+          lines: [
+            {
+              accountId: expenseAccountA1Id,
+              amountMinor: 10000,
+              taxCodeId: taxCodeBoundaryId,
+            },
+          ],
+        })
+        .expect(201);
+      expect(lastDayOfEarly.body.data.lines[0].taxRateId).toBe(
+        boundaryRateEarlyId,
+      );
+      expect(lastDayOfEarly.body.data.lines[0].taxAmountMinor).toBe(400); // 4%
+
+      const firstDayOfLate = await request(app.getHttpServer())
+        .post("/v1/finance/bills")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          supplierId: supplierA1Id,
+          supplierBillNumber: `TAX-BOUNDARY-LATE-${suffix}`,
+          billDate: "2020-07-01", // exactly boundaryRateLateId's effectiveFrom
+          lines: [
+            {
+              accountId: expenseAccountA1Id,
+              amountMinor: 10000,
+              taxCodeId: taxCodeBoundaryId,
+            },
+          ],
+        })
+        .expect(201);
+      expect(firstDayOfLate.body.data.lines[0].taxRateId).toBe(
+        boundaryRateLateId,
+      );
+      expect(firstDayOfLate.body.data.lines[0].taxAmountMinor).toBe(600); // 6%
+
+      // Historical correctness — re-fetch the earlier bill now that the
+      // later rate also exists; its snapshot must be untouched.
+      const refetched = await request(app.getHttpServer())
+        .get(`/v1/finance/bills/${lastDayOfEarly.body.data.id}`)
+        .set("Authorization", `Bearer ${token}`)
+        .expect(200);
+      expect(refetched.body.data.lines[0].taxRateId).toBe(boundaryRateEarlyId);
+      expect(refetched.body.data.lines[0].taxAmountMinor).toBe(400);
+    });
+
+    it("rejects a taxCodeId from a different legal entity (400) — same cross-entity posture as accountId", async () => {
+      const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.poster"]);
+      await request(app.getHttpServer())
+        .post("/v1/finance/bills")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          supplierId: supplierA1Id,
+          supplierBillNumber: `TAX-CROSSENTITY-${suffix}`,
+          billDate: "2026-01-15",
+          lines: [
+            {
+              accountId: expenseAccountA1Id,
+              amountMinor: 1000,
+              taxCodeId: taxCodeA2Id,
+            },
+          ],
+        })
+        .expect(400);
+    });
+
+    it("posting is unaffected: the aggregate tax journal line still equals SUM(line.taxAmountMinor) with calculated and overridden tax mixed", async () => {
+      const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.poster"]);
+      const created = await request(app.getHttpServer())
+        .post("/v1/finance/bills")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          supplierId: supplierA1Id,
+          supplierBillNumber: `TAX-POST-${suffix}`,
+          billDate: "2026-01-15",
+          lines: [
+            {
+              accountId: expenseAccountA1Id,
+              amountMinor: 10000,
+              taxCodeId: taxCodeCalcId,
+            }, // calculated: 500
+            {
+              accountId: expenseAccountA1Id,
+              amountMinor: 10000,
+              taxCodeId: taxCodeSecondId,
+              taxAmountMinor: 900, // override, calculated would be 1000
+            },
+          ],
+        })
+        .expect(201);
+      expect(created.body.data.taxMinor).toBe(1400); // 500 + 900
+
+      const id = created.body.data.id;
+      const posted = await request(app.getHttpServer())
+        .post(`/v1/finance/bills/${id}/post`)
+        .set("Authorization", `Bearer ${token}`)
+        .expect(200);
+
+      const lines = await withTenant(tenantAId, (tx) =>
+        tx
+          .select()
+          .from(journalLines)
+          .where(
+            eq(journalLines.journalEntryId, posted.body.data.journalEntryId),
+          ),
+      );
+      const taxLine = lines.find((l) => l.accountId === taxInputAccountA1Id);
+      expect(taxLine!.debitMinor).toBe(1400);
+      const totalDebit = lines.reduce((s, l) => s + l.debitMinor, 0);
+      const totalCredit = lines.reduce((s, l) => s + l.creditMinor, 0);
+      expect(totalDebit).toBe(totalCredit);
+    });
+
+    it("DB level: the two new CHECK constraints reject an insert that bypasses the service layer", async () => {
+      const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.poster"]);
+      const draft = await request(app.getHttpServer())
+        .post("/v1/finance/bills")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          supplierId: supplierA1Id,
+          supplierBillNumber: `TAX-CHECK-${suffix}`,
+          billDate: "2026-01-15",
+          lines: oneLine(expenseAccountA1Id),
+        })
+        .expect(201);
+      const billId = draft.body.data.id;
+
+      await expect(
+        withTenant(tenantAId, (tx) =>
+          tx.execute(sql`
+            INSERT INTO supplier_bill_lines
+              (tenant_id, bill_id, line_number, account_id, amount_minor, tax_amount_overridden)
+            VALUES
+              (${tenantAId}, ${billId}, 999, ${expenseAccountA1Id}, 100, true)
+          `),
+        ),
+      ).rejects.toThrow(/tax_overridden_requires_code/);
+
+      await expect(
+        withTenant(tenantAId, (tx) =>
+          tx.execute(sql`
+            INSERT INTO supplier_bill_lines
+              (tenant_id, bill_id, line_number, account_id, amount_minor, tax_rate_id)
+            VALUES
+              (${tenantAId}, ${billId}, 998, ${expenseAccountA1Id}, 100, ${boundaryRateEarlyId})
+          `),
+        ),
+      ).rejects.toThrow(/tax_rate_requires_code/);
     });
   });
 });

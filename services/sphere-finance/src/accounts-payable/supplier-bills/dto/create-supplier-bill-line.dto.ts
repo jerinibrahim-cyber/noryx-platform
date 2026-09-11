@@ -15,6 +15,16 @@ import {
  *
  * No lineNumber field, deliberately — SupplierBillsService assigns
  * 1..N from array order, same convention as JournalEntriesService.
+ *
+ * taxCodeId — Tax/VAT Phase 2
+ * (docs/finance-work-item-tax-vat-phase-2-discovery.md §3/§6). Optional:
+ * omitted preserves 100% of pre-Phase-2 behavior (taxAmountMinor stays
+ * a plain manual value). When supplied, SupplierBillsService resolves
+ * and snapshots the effective tax rate and treats taxAmountMinor (if
+ * also supplied) as an explicit override — see that service's
+ * insertLines() doc comment. taxRateId/taxAmountCalculatedMinor/
+ * taxAmountOverridden are server-computed, never client-supplied, so
+ * they are deliberately not DTO fields.
  */
 export class CreateSupplierBillLineDto {
   @IsUUID()
@@ -37,4 +47,8 @@ export class CreateSupplierBillLineDto {
   @IsInt()
   @Min(0)
   taxAmountMinor?: number;
+
+  @IsOptional()
+  @IsUUID()
+  taxCodeId?: string;
 }

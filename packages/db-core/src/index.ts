@@ -37,7 +37,12 @@ export * from "./schema";
 // directly, keeping the ORM choice swappable in one place if it ever needs
 // to change again. gte/lte/isNull/ne added for Finance's 2c-1 (accounting
 // period date-range queries, optional-filter checks) — purely additive,
-// no change to any existing export.
+// no change to any existing export. gt/lt added for Tax/VAT Phase 2
+// (docs/finance-work-item-tax-vat-phase-2-discovery.md §5 —
+// TaxRatesService.resolveEffectiveRate()'s half-open
+// [effectiveFrom, effectiveTo) coverage check, and the accompanying
+// correction to TaxRatesService.create()'s overlap pre-check — see that
+// method's own comment) — likewise purely additive.
 export {
   eq,
   and,
@@ -45,7 +50,9 @@ export {
   sql,
   desc,
   asc,
+  gt,
   gte,
+  lt,
   lte,
   isNull,
   ne,

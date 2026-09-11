@@ -616,9 +616,44 @@ export const supplierBillLines = pgTable(
       .references(() => chartOfAccounts.id),
     description: varchar("description", { length: 500 }),
     amountMinor: bigint("amount_minor", { mode: "number" }).notNull(),
+    /// The single authoritative tax amount for this line — unchanged in
+    /// meaning by Tax/VAT Phase 2 (docs/finance-work-item-tax-vat-
+    /// phase-2-discovery.md §3/§6). When taxCodeId is null this is the
+    /// legacy manually-entered value, exactly as before Phase 2. When
+    /// taxCodeId is set, this is either the calculated amount (no
+    /// override) or the caller's explicit override value (Decision 4) —
+    /// taxAmountCalculatedMinor below retains the calculated figure in
+    /// the override case so nothing is silently discarded.
     taxAmountMinor: bigint("tax_amount_minor", { mode: "number" })
       .notNull()
       .default(0),
+    /// Tax/VAT Phase 2 — optional resolved tax code for this line. Null
+    /// preserves 100% of pre-Phase-2 behavior (manual taxAmountMinor).
+    /// Real FK: tax_codes is Finance's own table, same migration
+    /// lifecycle. No onDelete behavior needed — tax_codes has no hard
+    /// delete (deactivate/reactivate only, Phase 1).
+    taxCodeId: uuid("tax_code_id").references(() => taxCodes.id),
+    /// Tax/VAT Phase 2 — the specific tax_rates row resolved for this
+    /// line at write time, by the document's own transaction date
+    /// (discovery §5/§7). tax_rates is create-only/immutable (Phase 1),
+    /// so this FK is a safe, permanent point-in-time snapshot: a later
+    /// tax_rates row for a later period can never retroactively change
+    /// what this line resolved to.
+    taxRateId: uuid("tax_rate_id").references(() => taxRates.id),
+    /// Tax/VAT Phase 2 — the calculated amount, always populated when
+    /// taxCodeId is set (even when overridden), so the calculated figure
+    /// is never lost when taxAmountMinor holds an explicit override
+    /// (Decision 4). Null when taxCodeId is null (nothing was
+    /// calculated).
+    taxAmountCalculatedMinor: bigint("tax_amount_calculated_minor", {
+      mode: "number",
+    }),
+    /// Tax/VAT Phase 2 — true only when both taxCodeId AND an explicit
+    /// taxAmountMinor were supplied together (Decision 4's override
+    /// case). Server-computed, never client-supplied.
+    taxAmountOverridden: boolean("tax_amount_overridden")
+      .notNull()
+      .default(false),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -633,6 +668,17 @@ export const supplierBillLines = pgTable(
     check(
       "supplier_bill_lines_tax_amount_non_negative",
       sql`${t.taxAmountMinor} >= 0`,
+    ),
+    // Tax/VAT Phase 2 (discovery §9) — defense-in-depth mirrors of the
+    // service-layer invariants: an override requires a resolved code,
+    // and a resolved rate implies a resolved code.
+    check(
+      "supplier_bill_lines_tax_overridden_requires_code",
+      sql`${t.taxAmountOverridden} = false OR ${t.taxCodeId} IS NOT NULL`,
+    ),
+    check(
+      "supplier_bill_lines_tax_rate_requires_code",
+      sql`${t.taxRateId} IS NULL OR ${t.taxCodeId} IS NOT NULL`,
     ),
   ],
 );
@@ -1647,9 +1693,34 @@ export const supplierDebitNoteLines = pgTable(
       .references(() => chartOfAccounts.id),
     description: varchar("description", { length: 500 }),
     amountMinor: bigint("amount_minor", { mode: "number" }).notNull(),
+    /// Same authoritative-value semantics as supplierBillLines.
+    /// taxAmountMinor — see that column's doc comment. Tax/VAT Phase 2
+    /// (discovery §4) resolves debit-note tax INDEPENDENTLY per line, by
+    /// this document's OWN debitNoteDate — never inherited from any
+    /// allocated bill (the confirmed architecture decision; a debit note
+    /// has no line-level linkage to any bill line — see discovery §1.3/
+    /// §13).
     taxAmountMinor: bigint("tax_amount_minor", { mode: "number" })
       .notNull()
       .default(0),
+    /// Tax/VAT Phase 2 — optional resolved tax code for this line. Null
+    /// preserves 100% of pre-Phase-2 behavior. Exact mirror of
+    /// supplierBillLines.taxCodeId.
+    taxCodeId: uuid("tax_code_id").references(() => taxCodes.id),
+    /// Tax/VAT Phase 2 — the specific tax_rates row resolved for this
+    /// line at write time, by debitNoteDate. Exact mirror of
+    /// supplierBillLines.taxRateId — see that column's doc comment.
+    taxRateId: uuid("tax_rate_id").references(() => taxRates.id),
+    /// Tax/VAT Phase 2 — exact mirror of
+    /// supplierBillLines.taxAmountCalculatedMinor.
+    taxAmountCalculatedMinor: bigint("tax_amount_calculated_minor", {
+      mode: "number",
+    }),
+    /// Tax/VAT Phase 2 — exact mirror of
+    /// supplierBillLines.taxAmountOverridden.
+    taxAmountOverridden: boolean("tax_amount_overridden")
+      .notNull()
+      .default(false),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -1663,6 +1734,16 @@ export const supplierDebitNoteLines = pgTable(
     check(
       "supplier_debit_note_lines_amount_positive",
       sql`${t.amountMinor} > 0`,
+    ),
+    // Tax/VAT Phase 2 (discovery §9) — exact mirror of the two
+    // supplier_bill_lines defense-in-depth CHECKs above.
+    check(
+      "supplier_debit_note_lines_tax_overridden_requires_code",
+      sql`${t.taxAmountOverridden} = false OR ${t.taxCodeId} IS NOT NULL`,
+    ),
+    check(
+      "supplier_debit_note_lines_tax_rate_requires_code",
+      sql`${t.taxRateId} IS NULL OR ${t.taxCodeId} IS NOT NULL`,
     ),
     check(
       "supplier_debit_note_lines_tax_amount_non_negative",
