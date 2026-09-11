@@ -30,6 +30,7 @@ import { BankReportsController } from "./bank-reports/bank-reports.controller";
 import { PaymentProviderSettlementsController } from "./payment-provider-settlements/payment-provider-settlements.controller";
 import { ScheduledReversalsController } from "./scheduled-reversals/scheduled-reversals.controller";
 import { TaxCodesController } from "./tax-configuration/tax-codes.controller";
+import { TaxReportsController } from "./tax-reports/tax-reports.controller";
 
 /**
  * Milestone 3.2 — Route → Required-Role Matrix Hardening
@@ -231,8 +232,11 @@ function role(
  * TaxCodesController (7 routes: Tax Code CRUD-minus-delete plus nested
  * Tax Rate create/list, CTO-approved architecture proposal + CTO
  * decision turn, Phase 1 implementation authorization only — no AP/AR
- * wiring or VAT report routes exist yet), 125 routes total across 24
- * controllers.
+ * wiring or VAT report routes existed yet), plus Tax/VAT Phase 4's
+ * TaxReportsController (1 route: the VAT Position Report, added per
+ * docs/finance-work-item-tax-vat-phase-4-discovery.md, CTO-authorized
+ * implementation turn — read-only, no write-side split), 126 routes
+ * total across 25 controllers.
  */
 const EXPECTED: DiscoveredRoute[] = [
   role("POST", "accounts", "AccountsController", ["finance.admin"]),
@@ -347,6 +351,17 @@ const EXPECTED: DiscoveredRoute[] = [
     "finance.admin",
   ]),
   role("GET", "tax-codes/:taxCodeId/rates", "TaxCodesController", [
+    "finance.viewer",
+    "finance.poster",
+    "finance.admin",
+  ]),
+
+  // Tax/VAT Phase 4 — VAT Position Report.
+  // docs/finance-work-item-tax-vat-phase-4-discovery.md §8. Pure read,
+  // no write-side split to make — same any-finance-role posture as
+  // GeneralLedgerController/ApReportsController/ArReportsController/
+  // FinancialStatementsController.
+  role("GET", "tax-reports/vat-position", "TaxReportsController", [
     "finance.viewer",
     "finance.poster",
     "finance.admin",
@@ -909,11 +924,12 @@ describe("Route → required-role matrix (sphere-finance)", () => {
     ...discoverRoutes(PaymentProviderSettlementsController),
     ...discoverRoutes(ScheduledReversalsController),
     ...discoverRoutes(TaxCodesController),
+    ...discoverRoutes(TaxReportsController),
   ];
   const actualByKey = new Map(actual.map((r) => [r.key, r]));
   const expectedByKey = new Map(EXPECTED.map((r) => [r.key, r]));
 
-  it("discovers exactly the expected number of routes across all twenty-four controllers", () => {
+  it("discovers exactly the expected number of routes across all twenty-five controllers", () => {
     expect(actual).toHaveLength(EXPECTED.length);
   });
 

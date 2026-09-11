@@ -15,6 +15,7 @@ import { BankReportsModule } from "./bank-reports/bank-reports.module";
 import { PaymentProviderSettlementsModule } from "./payment-provider-settlements/payment-provider-settlements.module";
 import { ScheduledReversalsModule } from "./scheduled-reversals/scheduled-reversals.module";
 import { TaxConfigurationModule } from "./tax-configuration/tax-configuration.module";
+import { TaxReportsModule } from "./tax-reports/tax-reports.module";
 import { HealthController } from "./health/health.controller";
 import { TenantContextMiddleware } from "./tenant/tenant-context.middleware";
 
@@ -136,6 +137,17 @@ import { TenantContextMiddleware } from "./tenant/tenant-context.middleware";
     // credit/debit note inheritance, no VAT report — all explicitly
     // deferred to a later, separately-authorized phase.
     TaxConfigurationModule,
+    // Tax/VAT Phase 4 — VAT Position Report.
+    // docs/finance-work-item-tax-vat-phase-4-discovery.md §6.1 (§11
+    // decision 1). A top-level Accounting Core sibling of
+    // GeneralLedgerModule/FinancialStatementsModule, not nested under
+    // TaxConfigurationModule/AccountsPayableModule/
+    // AccountsReceivableModule — this report reads across both
+    // subledgers' already-posted tax lines (Tax/VAT Phase 2/3), the
+    // identical cross-cutting reasoning FinancialStatementsModule's own
+    // comment above gives for its own top-level placement. Pure read
+    // layer; touches none of the modules above.
+    TaxReportsModule,
     // Scoped registration so TenantContextMiddleware can inject JwtService
     // without importing AccountsModule's other providers — same pattern as
     // services/identity/src/app.module.ts.

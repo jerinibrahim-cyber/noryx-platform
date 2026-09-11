@@ -6,9 +6,9 @@ just a status tracker for the repo.
 
 ## Current execution status — 2026-09-11
 
-**Current baseline:** `main` — Tax/VAT Phase 3 (AR Tax Calculation) is implemented, verified (typecheck/lint clean, 589/589 unit tests, 848/848 e2e tests, 135/135 RBAC-matrix assertions), and pushed to GitHub. See `docs/finance-work-item-tax-vat-phase-3-completion-report.md` for the full verification record.
+**Current baseline:** `main` — Tax/VAT Phase 4 (VAT Position Report) is implemented, verified (typecheck/lint clean, 602/602 unit tests, 865/865 e2e tests, 136/136 RBAC-matrix assertions), and pushed to GitHub. See `docs/finance-work-item-tax-vat-phase-4-completion-report.md` for the full verification record.
 
-**Completed immediately before Tax/VAT Phase 3:** Tax/VAT Phase 2 (AP Tax Calculation, `ae4b073`/`6229bc6`); before that Tax/VAT Phase 1 (Tax Configuration Foundation, `dd6d135`); before that, Banking 1A–1E, Banking Reconciliation, and Scheduled Reversal are treated as complete per the governing Finance baseline.
+**Completed immediately before Tax/VAT Phase 4:** Tax/VAT Phase 3 (AR Tax Calculation, `ad71a50`/`263354b`); before that Tax/VAT Phase 2 (AP Tax Calculation, `ae4b073`/`6229bc6`); before that Tax/VAT Phase 1 (Tax Configuration Foundation, `dd6d135`); before that, Banking 1A–1E, Banking Reconciliation, and Scheduled Reversal are treated as complete per the governing Finance baseline.
 
 **Current work item:** Tax/VAT.
 
@@ -18,9 +18,11 @@ just a status tracker for the repo.
 
 **Tax/VAT Phase 3 — COMPLETE:** Wires the same approved Tax Code/Rate model into Customer Invoices and Customer Credit Notes — optional line-level `taxCodeId`, rate resolution by the document's own transaction date (`invoiceDate`/`creditNoteDate`), line-level integer minor-unit rounding, snapshot (immutable `taxRateId` FK), and override semantics identical to Phase 2's Decision 4 — with legacy `taxAmountMinor` behavior fully preserved when `taxCodeId` is omitted. Credit-note tax resolves independently per line, by the credit note's own `creditNoteDate`, never inherited from any allocated invoice — carrying forward Phase 2's CTO-confirmed no-inheritance correction, because `customer_credit_note_allocations` is a header-level many-to-many table with no line-level linkage to any invoice line. Reused `TaxConfigurationModule`/`TaxRatesService`/`calculateTaxAmountMinor` unmodified via DI — no new tax-calculation logic was written, only AR wiring, per the discovery document's finding that this infrastructure was already AP/AR-agnostic. See `docs/finance-work-item-tax-vat-phase-3-discovery.md` for the discovery record and `docs/finance-work-item-tax-vat-phase-3-completion-report.md` for the full verification record.
 
-**Next approved work item:** **Tax/VAT Phase 4 — VAT Position Report**, or another Finance roadmap item. Not yet discovered or authorized.
+**Tax/VAT Phase 4 — COMPLETE:** A new read-only `TaxReportsController`/`TaxReportsService` (`GET /v1/finance/tax-reports/vat-position`) reports the VAT position for a legal entity over a `dateFrom`/`dateTo` window (or a resolved `periodId`) — net output tax (posted Customer Invoices net of posted Customer Credit Notes), net input tax (posted Supplier Bills net of posted Supplier Debit Notes), and the net VAT position, broken down by tax code/treatment with supply-value and calculated-vs-overridden visibility, plus an optional GL movement cross-check against the two singleton tax accounts. No schema change, no migration — built entirely on the four line tables Phases 2/3 already wrote, never on `journal_lines` (which carries no `tax_code_id` and cannot support a per-code breakdown — confirmed by direct inspection of the posting code). See `docs/finance-work-item-tax-vat-phase-4-discovery.md` for the discovery record (all six §11 decisions resolved per its own recommendations) and `docs/finance-work-item-tax-vat-phase-4-completion-report.md` for the full verification record.
 
-**Execution gate:** Phase 4 discovery/implementation starts only after a separate CTO discovery/authorization prompt. FX remains deferred and is not the next item.
+**Next approved work item:** another Finance roadmap item. Not yet discovered or authorized.
+
+**Execution gate:** the next phase's discovery/implementation starts only after a separate CTO discovery/authorization prompt. FX remains deferred and is not the next item.
 
 | Phase                             | Scope                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | Status                                               |
 | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
@@ -98,7 +100,7 @@ PHASE 1
 │   ├── Expense Management              (PLANNED)
 │   ├── Fixed Assets                    (PLANNED)
 │   ├── Budgeting / Planning            (PLANNED)
-│   ├── Tax / VAT                       (IN PROGRESS — Phase 1, 2 & 3 COMPLETE; Phase 4 VAT Position Report NEXT)
+│   ├── Tax / VAT                       (COMPLETE for the current MVP scope — Phase 1, 2, 3 & 4 all COMPLETE; statutory filing/reverse charge/multi-jurisdiction deferred, see below)
 │   ├── Multi-Currency                  (PLANNED)
 │   ├── Financial Reporting             (PLANNED — beyond Trial Balance/GL, already COMPLETE)
 │   ├── WIP / Accrual Engine            (PLANNED)
@@ -170,17 +172,17 @@ Sphere Finance as a product.
 
 **Banking & Reconciliation — COMPLETE.** Bank accounts, transactions, reconciliation, payment-provider settlement/reconciliation surfaces, cash management, transfers and current cash-position reporting are implemented and verified. Banking 1A–1E and reconciliation are closed work items.
 
-**Tax / VAT — IN PROGRESS.**
+**Tax / VAT — COMPLETE for the current MVP scope (Phases 1-4); statutory/jurisdiction expansion deferred, see "Later" below.**
 
 - [x] Phase 1 — Tax Configuration Foundation (`dd6d135`, pushed to `main`): Tax Code master, effective-dated Tax Rates, RLS, RBAC, audit, migration/constraint pipeline, configuration APIs and DB-level overlap protection.
 - [x] Phase 2 — AP Tax Calculation (pushed to `main` — see `docs/finance-work-item-tax-vat-phase-2-completion-report.md`): wired `taxCodeId` and resolved/snapshotted rates into Supplier Bills and Supplier Debit Notes, preserving legacy manual-tax behavior when `taxCodeId` is omitted. Debit notes resolve tax independently per line by `debitNoteDate` (no inheritance from allocated bills — corrected from the originally-proposed Decision 1). Also fixed a pre-existing Phase 1 overlap pre-check bug (inclusive comparisons stricter than the real EXCLUDE constraint) discovered while verifying the half-open effective-date boundary.
 - [x] Phase 3 — AR Tax Calculation (pushed to `main` — see `docs/finance-work-item-tax-vat-phase-3-completion-report.md`): wired `taxCodeId` and resolved/snapshotted rates into Customer Invoices and Customer Credit Notes, preserving legacy manual-tax behavior when `taxCodeId` is omitted. Credit notes resolve tax independently per line by `creditNoteDate` (no inheritance from allocated invoices — carrying forward Phase 2's confirmed no-inheritance correction). Reused Phase 1/Phase 2's tax-configuration infrastructure unmodified; no new tax-calculation logic.
-- [ ] Phase 4 — VAT Position Report: internal VAT reconciliation/reporting built on the existing GL read layer.
-- [ ] Later — statutory VAT filing formats, reverse charge, per-tax-code GL account mapping, multi-jurisdiction expansion, tax-inclusive pricing and other deferred items from the approved architecture.
+- [x] Phase 4 — VAT Position Report (pushed to `main` — see `docs/finance-work-item-tax-vat-phase-4-completion-report.md`): a new read-only `GET /tax-reports/vat-position` reports net output tax (Invoices net of Credit Notes), net input tax (Bills net of Debit Notes), and net VAT position, broken down by tax code/treatment with supply-value and calculated-vs-overridden visibility, plus an optional GL movement cross-check. Built on the four AP/AR tax line tables Phases 2/3 already wrote — not on `journal_lines`, which posts one aggregate tax line per document and cannot support a per-tax-code breakdown (confirmed by direct inspection of the posting code, `docs/finance-work-item-tax-vat-phase-4-discovery.md` §3.2). No schema change, no migration.
+- [ ] Later — statutory VAT filing formats, reverse charge, per-tax-code GL account mapping, multi-jurisdiction expansion, tax-inclusive pricing, and coverage of manually-posted (non-AP/AR) tax journal entries — all deferred items from the approved architecture, restated in the Phase 4 discovery's own risk section (§10).
 
 **Multi-Currency — PLANNED.** Currency master, exchange rates, conversion, foreign-currency transactions, realised FX, unrealised FX and revaluation remain deferred until a concrete multi-currency requirement is approved. The existing fixed `currencyCode` fields are not functional FX.
 
-**Financial Reporting — PARTIAL.** Trial Balance and General Ledger reports are complete; broader P&L, Balance Sheet, Cash Flow, account statements, AP/AR ageing and management reporting remain planned.
+**Financial Reporting — Trial Balance, General Ledger, Profit & Loss, Balance Sheet, AP/AR ageing, AP/AR-to-GL reconciliation, supplier/customer statements and balances, and the VAT Position Report are all COMPLETE.** (Corrected 2026-09-11, Tax/VAT Phase 4 discovery §1: this paragraph previously read "Trial Balance and General Ledger reports are complete; broader P&L, Balance Sheet, ... remain planned" — that had gone stale relative to the actual repository, which already had `financial-statements`, `ap-reports`, and `ar-reports` fully implemented and e2e-verified before this phase began; corrected here rather than left to mislead the next reader.) Cash Flow and broader management reporting remain planned.
 
 **WIP / Accruals — PLANNED.** WIP, accruals, deferrals, recognition, reversal and period-end processing remain future Finance capabilities.
 
