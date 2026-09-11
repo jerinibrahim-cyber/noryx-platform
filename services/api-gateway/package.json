@@ -29,7 +29,7 @@
   },
   "devDependencies": {
     "@noryx/eslint-config": "workspace:*",
-    "@nestjs/testing": "^10.4.0",
+    "@nestjs/testing": "^11.2.1",
     "@types/express": "^4.17.21",
     "@types/node": "^20.14.0",
     "@types/supertest": "^6.0.2",
