@@ -62,6 +62,13 @@ interface ResolvedCustomerCreditNoteLine {
   taxRateId: string | null;
   taxAmountCalculatedMinor: number | null;
   taxAmountOverridden: boolean;
+  /** Tax/VAT Phase 5 — identical shape/semantics to
+   * SupplierBillsService's ResolvedSupplierBillLine.resolvedTaxAccountId
+   * (see that interface's doc comment), for the AR/output direction.
+   * Resolved from THIS credit note's own taxCodeId/documentDate — never
+   * inherited from any allocated invoice (same no-inheritance
+   * architecture as every other tax field on this line). */
+  resolvedTaxAccountId: string | null;
 }
 
 export interface ListCustomerCreditNotesFilters {
@@ -497,21 +504,23 @@ export class CustomerCreditNotesService {
         before.lines,
       );
 
-      // Step 6: load AR settings; validate the tax-output account is
-      // configured if this credit note carries any tax — same
-      // validation CustomerInvoicesService.post() already performs.
+      // Step 6: load AR settings — arControlAccountId is required
+      // unconditionally. Tax/VAT Phase 5: the tax-account check/journal
+      // line below now reads each line's own resolvedTaxAccountId
+      // snapshot instead of settings.taxOutputAccountId — see
+      // SupplierBillsService.post()'s identical step for the full
+      // rationale.
       const settings = await this.loadArSettingsOrThrow(
         tx,
         tenantId,
         legalEntityId,
       );
-      const taxTotal = before.lines.reduce(
-        (sum, l) => sum + l.taxAmountMinor,
-        0,
+      const linesMissingTaxAccount = before.lines.filter(
+        (l) => l.taxAmountMinor > 0 && !l.resolvedTaxAccountId,
       );
-      if (taxTotal > 0 && !settings.taxOutputAccountId) {
+      if (linesMissingTaxAccount.length > 0) {
         throw new UnprocessableEntityException(
-          "This credit note has tax amounts but no tax output account is configured in AR settings for this legal entity.",
+          "This credit note has tax amounts on one or more lines with no resolved tax account. Configure a tax-code-level or AR-settings tax output account and re-save the affected line(s) before posting.",
         );
       }
 
@@ -634,13 +643,31 @@ export class CustomerCreditNotesService {
             line.description ?? `Credit note ${internalReference} line`,
         });
       }
-      if (taxTotal > 0) {
+      // Tax/VAT Phase 5 (proposal §6) — one journal line per DISTINCT
+      // resolvedTaxAccountId, same aggregation rule as
+      // SupplierBillsService.post(), with this document type's own
+      // (reversed) polarity: DEBIT, not credit.
+      const taxByAccount = new Map<string, number>();
+      const taxAccountOrder: string[] = [];
+      for (const line of before.lines) {
+        if (line.taxAmountMinor > 0 && line.resolvedTaxAccountId) {
+          if (!taxByAccount.has(line.resolvedTaxAccountId)) {
+            taxAccountOrder.push(line.resolvedTaxAccountId);
+            taxByAccount.set(line.resolvedTaxAccountId, 0);
+          }
+          taxByAccount.set(
+            line.resolvedTaxAccountId,
+            taxByAccount.get(line.resolvedTaxAccountId)! + line.taxAmountMinor,
+          );
+        }
+      }
+      for (const accountId of taxAccountOrder) {
         journalLineValues.push({
           tenantId,
           journalEntryId: draftJournalEntry!.id,
           lineNumber: lineNumber++,
-          accountId: settings.taxOutputAccountId!,
-          debitMinor: taxTotal,
+          accountId,
+          debitMinor: taxByAccount.get(accountId)!,
           creditMinor: 0,
           description: `Tax on credit note ${internalReference}`,
         });
@@ -827,18 +854,25 @@ export class CustomerCreditNotesService {
   }
 
   /** Posting-time re-validation of every line's account — independent
-   * of whatever passed at draft create/edit time. 422, not 400. */
+   * of whatever passed at draft create/edit time. 422, not 400.
+   *
+   * Tax/VAT Phase 5 — also re-validates every distinct
+   * resolvedTaxAccountId snapshotted on these lines (see
+   * SupplierBillsService's identical method for the full rationale). */
   private async revalidateLineAccountsForPostingOrThrow(
     tx: TxClient,
     tenantId: string,
     legalEntityId: string,
     lines: CustomerCreditNoteLine[],
   ): Promise<void> {
+    const taxAccountIds = lines
+      .map((l) => l.resolvedTaxAccountId)
+      .filter((accId): accId is string => accId !== null);
     const invalid = await this.findInvalidAccountIds(
       tx,
       tenantId,
       legalEntityId,
-      lines.map((l) => l.accountId),
+      [...lines.map((l) => l.accountId), ...taxAccountIds],
     );
     if (invalid.length > 0) {
       throw new UnprocessableEntityException(
@@ -1060,9 +1094,32 @@ export class CustomerCreditNotesService {
           taxRateId: line.taxRateId,
           taxAmountCalculatedMinor: line.taxAmountCalculatedMinor,
           taxAmountOverridden: line.taxAmountOverridden,
+          resolvedTaxAccountId: line.resolvedTaxAccountId,
         })),
       )
       .returning();
+  }
+
+  /** Tax/VAT Phase 5 — non-throwing AR-settings lookup, identical
+   * purpose/reasoning to SupplierBillsService's own
+   * loadApTaxInputAccountFallback (see that method's doc comment), for
+   * the AR/output direction. */
+  private async loadArTaxOutputAccountFallback(
+    tx: TxClient,
+    tenantId: string,
+    legalEntityId: string,
+  ): Promise<string | null> {
+    const rows = await tx
+      .select({ taxOutputAccountId: arSettings.taxOutputAccountId })
+      .from(arSettings)
+      .where(
+        and(
+          eq(arSettings.tenantId, tenantId),
+          eq(arSettings.legalEntityId, legalEntityId),
+        ),
+      )
+      .limit(1);
+    return rows[0]?.taxOutputAccountId ?? null;
   }
 
   /** Tax/VAT Phase 3
@@ -1082,23 +1139,34 @@ export class CustomerCreditNotesService {
     documentDate: string,
     lines: CreateCustomerCreditNoteLineDto[],
   ): Promise<ResolvedCustomerCreditNoteLine[]> {
+    // Tax/VAT Phase 5 — see SupplierBillsService.resolveLineTax's own
+    // doc comment on this same pattern.
+    const fallbackTaxAccountId = await this.loadArTaxOutputAccountFallback(
+      tx,
+      tenantId,
+      legalEntityId,
+    );
+
     const resolved: ResolvedCustomerCreditNoteLine[] = [];
     for (const line of lines) {
       if (!line.taxCodeId) {
+        const taxAmountMinor = line.taxAmountMinor ?? 0;
         resolved.push({
           accountId: line.accountId,
           description: line.description ?? null,
           amountMinor: line.amountMinor,
-          taxAmountMinor: line.taxAmountMinor ?? 0,
+          taxAmountMinor,
           taxCodeId: null,
           taxRateId: null,
           taxAmountCalculatedMinor: null,
           taxAmountOverridden: false,
+          resolvedTaxAccountId:
+            taxAmountMinor > 0 ? fallbackTaxAccountId : null,
         });
         continue;
       }
 
-      const rate = await this.taxRates.resolveEffectiveRate(
+      const { rate, taxCode } = await this.taxRates.resolveEffectiveRate(
         tx,
         tenantId,
         legalEntityId,
@@ -1110,15 +1178,22 @@ export class CustomerCreditNotesService {
         rate.rateBasisPoints,
       );
       const overridden = line.taxAmountMinor !== undefined;
+      const finalTaxAmountMinor = overridden
+        ? line.taxAmountMinor!
+        : calculated;
       resolved.push({
         accountId: line.accountId,
         description: line.description ?? null,
         amountMinor: line.amountMinor,
-        taxAmountMinor: overridden ? line.taxAmountMinor! : calculated,
+        taxAmountMinor: finalTaxAmountMinor,
         taxCodeId: line.taxCodeId,
         taxRateId: rate.id,
         taxAmountCalculatedMinor: calculated,
         taxAmountOverridden: overridden,
+        resolvedTaxAccountId:
+          finalTaxAmountMinor > 0
+            ? (taxCode.arTaxAccountId ?? fallbackTaxAccountId)
+            : null,
       });
     }
     return resolved;

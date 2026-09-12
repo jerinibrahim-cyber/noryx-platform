@@ -56,6 +56,16 @@ interface ResolvedSupplierBillLine {
   taxRateId: string | null;
   taxAmountCalculatedMinor: number | null;
   taxAmountOverridden: boolean;
+  /** Tax/VAT Phase 5 (docs/finance-work-item-tax-vat-phase-5-proposal.md
+   * §5/§6) — the GL account this line's tax resolves to, snapshotted at
+   * THIS resolution (draft create/edit), never re-derived at post()
+   * time. taxCodeId.apTaxAccountId if set, else ap_settings'
+   * tax_input_account_id at that same moment. Populated whenever
+   * taxAmountMinor > 0, including legacy lines with no taxCodeId; null
+   * when the line carries no tax, or when neither a code-level override
+   * nor the AP-settings singleton is configured (posting then rejects
+   * — see post()'s deterministic-destination check). */
+  resolvedTaxAccountId: string | null;
 }
 
 export interface ListSupplierBillsFilters {
@@ -427,20 +437,28 @@ export class SupplierBillsService {
         before.lines,
       );
 
-      // Step 5: load AP settings; validate the tax-input account is
-      // configured if this bill carries any tax.
+      // Step 5: load AP settings — apControlAccountId is required for
+      // every bill regardless of tax (loadApSettingsOrThrow's own doc
+      // comment). Tax/VAT Phase 5 (proposal §6): this step no longer
+      // reads settings.taxInputAccountId for the tax check/journal
+      // line below — each line's own resolvedTaxAccountId snapshot
+      // (captured at draft resolveLineTax() time) is now what
+      // determines that. "Every posted tax line must have a
+      // deterministic accounting destination": any line carrying tax
+      // but snapshotted with a null resolvedTaxAccountId (no code-level
+      // override AND no singleton fallback configured at resolution
+      // time) blocks posting here.
       const settings = await this.loadApSettingsOrThrow(
         tx,
         tenantId,
         legalEntityId,
       );
-      const taxTotal = before.lines.reduce(
-        (sum, l) => sum + l.taxAmountMinor,
-        0,
+      const linesMissingTaxAccount = before.lines.filter(
+        (l) => l.taxAmountMinor > 0 && !l.resolvedTaxAccountId,
       );
-      if (taxTotal > 0 && !settings.taxInputAccountId) {
+      if (linesMissingTaxAccount.length > 0) {
         throw new UnprocessableEntityException(
-          "This bill has tax amounts but no tax input account is configured in AP settings for this legal entity.",
+          "This bill has tax amounts on one or more lines with no resolved tax account. Configure a tax-code-level or AP-settings tax input account and re-save the affected line(s) before posting.",
         );
       }
 
@@ -505,13 +523,34 @@ export class SupplierBillsService {
           description: line.description ?? `Bill ${internalReference} line`,
         });
       }
-      if (taxTotal > 0) {
+      // Tax/VAT Phase 5 (proposal §6, CTO worked example) — one journal
+      // line per DISTINCT resolvedTaxAccountId, aggregating every line
+      // that resolved to that same account; never aggregating different
+      // accounts together merely because they're both input tax, and
+      // never emitting a separate line per source line when multiple
+      // lines share one account. Accumulated in first-seen order for a
+      // deterministic journal-line ordering.
+      const taxByAccount = new Map<string, number>();
+      const taxAccountOrder: string[] = [];
+      for (const line of before.lines) {
+        if (line.taxAmountMinor > 0 && line.resolvedTaxAccountId) {
+          if (!taxByAccount.has(line.resolvedTaxAccountId)) {
+            taxAccountOrder.push(line.resolvedTaxAccountId);
+            taxByAccount.set(line.resolvedTaxAccountId, 0);
+          }
+          taxByAccount.set(
+            line.resolvedTaxAccountId,
+            taxByAccount.get(line.resolvedTaxAccountId)! + line.taxAmountMinor,
+          );
+        }
+      }
+      for (const accountId of taxAccountOrder) {
         journalLineValues.push({
           tenantId,
           journalEntryId: draftJournalEntry!.id,
           lineNumber: lineNumber++,
-          accountId: settings.taxInputAccountId!,
-          debitMinor: taxTotal,
+          accountId,
+          debitMinor: taxByAccount.get(accountId)!,
           creditMinor: 0,
           description: `Tax on bill ${internalReference}`,
         });
@@ -663,18 +702,27 @@ export class SupplierBillsService {
   /** Posting-time re-validation of every line's account — independent
    * of whatever passed at draft create/edit time. An account can be
    * archived between draft creation and posting. 422, not 400: this is
-   * a business-rule/invariant failure at posting time. */
+   * a business-rule/invariant failure at posting time.
+   *
+   * Tax/VAT Phase 5 (docs/finance-work-item-tax-vat-phase-5-proposal.md
+   * §6) — also re-validates every distinct resolvedTaxAccountId
+   * snapshotted on these lines: a tax account can be archived between
+   * draft resolution and posting, exactly the same hazard this method
+   * already guards against for each line's own accountId. */
   private async revalidateLineAccountsForPostingOrThrow(
     tx: TxClient,
     tenantId: string,
     legalEntityId: string,
     lines: SupplierBillLine[],
   ): Promise<void> {
+    const taxAccountIds = lines
+      .map((l) => l.resolvedTaxAccountId)
+      .filter((accId): accId is string => accId !== null);
     const invalid = await this.findInvalidAccountIds(
       tx,
       tenantId,
       legalEntityId,
-      lines.map((l) => l.accountId),
+      [...lines.map((l) => l.accountId), ...taxAccountIds],
     );
     if (invalid.length > 0) {
       throw new UnprocessableEntityException(
@@ -869,9 +917,38 @@ export class SupplierBillsService {
           taxRateId: line.taxRateId,
           taxAmountCalculatedMinor: line.taxAmountCalculatedMinor,
           taxAmountOverridden: line.taxAmountOverridden,
+          resolvedTaxAccountId: line.resolvedTaxAccountId,
         })),
       )
       .returning();
+  }
+
+  /** Tax/VAT Phase 5 (docs/finance-work-item-tax-vat-phase-5-proposal.md
+   * §6) — non-throwing AP-settings lookup used only to source the
+   * singleton tax-input-account fallback during resolveLineTax(). Unlike
+   * loadApSettingsOrThrow (used at post() time, where an unconfigured AP
+   * settings row IS a hard failure because apControlAccountId is always
+   * required), draft create/update must succeed even when AP settings
+   * haven't been configured yet — the resulting resolvedTaxAccountId is
+   * simply null, and post()'s own deterministic-destination check is
+   * what turns that into a hard failure, only if and when this bill
+   * actually carries tax at posting time. */
+  private async loadApTaxInputAccountFallback(
+    tx: TxClient,
+    tenantId: string,
+    legalEntityId: string,
+  ): Promise<string | null> {
+    const rows = await tx
+      .select({ taxInputAccountId: apSettings.taxInputAccountId })
+      .from(apSettings)
+      .where(
+        and(
+          eq(apSettings.tenantId, tenantId),
+          eq(apSettings.legalEntityId, legalEntityId),
+        ),
+      )
+      .limit(1);
+    return rows[0]?.taxInputAccountId ?? null;
   }
 
   /** Tax/VAT Phase 2
@@ -895,23 +972,40 @@ export class SupplierBillsService {
     documentDate: string,
     lines: CreateSupplierBillLineDto[],
   ): Promise<ResolvedSupplierBillLine[]> {
+    // Tax/VAT Phase 5 — loaded once per call, not once per line: the
+    // singleton AP tax-input-account fallback, used only when a line's
+    // own tax code carries no apTaxAccountId override (or the line has
+    // no tax code at all). Non-throwing — see
+    // loadApTaxInputAccountFallback's own doc comment.
+    const fallbackTaxAccountId = await this.loadApTaxInputAccountFallback(
+      tx,
+      tenantId,
+      legalEntityId,
+    );
+
     const resolved: ResolvedSupplierBillLine[] = [];
     for (const line of lines) {
       if (!line.taxCodeId) {
+        const taxAmountMinor = line.taxAmountMinor ?? 0;
         resolved.push({
           accountId: line.accountId,
           description: line.description ?? null,
           amountMinor: line.amountMinor,
-          taxAmountMinor: line.taxAmountMinor ?? 0,
+          taxAmountMinor,
           taxCodeId: null,
           taxRateId: null,
           taxAmountCalculatedMinor: null,
           taxAmountOverridden: false,
+          // Legacy/manual-tax lines have no tax code to carry a
+          // per-code override, so they always fall back to the
+          // singleton AP tax-input account (or null if unconfigured).
+          resolvedTaxAccountId:
+            taxAmountMinor > 0 ? fallbackTaxAccountId : null,
         });
         continue;
       }
 
-      const rate = await this.taxRates.resolveEffectiveRate(
+      const { rate, taxCode } = await this.taxRates.resolveEffectiveRate(
         tx,
         tenantId,
         legalEntityId,
@@ -923,15 +1017,25 @@ export class SupplierBillsService {
         rate.rateBasisPoints,
       );
       const overridden = line.taxAmountMinor !== undefined;
+      const finalTaxAmountMinor = overridden
+        ? line.taxAmountMinor!
+        : calculated;
       resolved.push({
         accountId: line.accountId,
         description: line.description ?? null,
         amountMinor: line.amountMinor,
-        taxAmountMinor: overridden ? line.taxAmountMinor! : calculated,
+        taxAmountMinor: finalTaxAmountMinor,
         taxCodeId: line.taxCodeId,
         taxRateId: rate.id,
         taxAmountCalculatedMinor: calculated,
         taxAmountOverridden: overridden,
+        // This tax code's own AP override if set, else the singleton
+        // fallback — resolved at THIS moment (draft create/edit), never
+        // re-resolved at post() time.
+        resolvedTaxAccountId:
+          finalTaxAmountMinor > 0
+            ? (taxCode.apTaxAccountId ?? fallbackTaxAccountId)
+            : null,
       });
     }
     return resolved;

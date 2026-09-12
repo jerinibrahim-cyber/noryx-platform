@@ -235,8 +235,14 @@ function role(
  * wiring or VAT report routes existed yet), plus Tax/VAT Phase 4's
  * TaxReportsController (1 route: the VAT Position Report, added per
  * docs/finance-work-item-tax-vat-phase-4-discovery.md, CTO-authorized
- * implementation turn — read-only, no write-side split), 126 routes
- * total across 25 controllers.
+ * implementation turn — read-only, no write-side split), plus Tax/VAT
+ * Phase 5's addition of a single new route to the EXISTING
+ * TaxCodesController (`PATCH tax-codes/:id/gl-accounts`, added per
+ * docs/finance-work-item-tax-vat-phase-5-proposal.md §9, CTO-approved —
+ * implementation-authorization turn; finance.admin only, same
+ * write-side posture as every other TaxCodesController mutation), 127
+ * routes total across 25 controllers (still 25 — this phase added no
+ * new controller).
  */
 const EXPECTED: DiscoveredRoute[] = [
   role("POST", "accounts", "AccountsController", ["finance.admin"]),
@@ -345,6 +351,13 @@ const EXPECTED: DiscoveredRoute[] = [
     "finance.admin",
   ]),
   role("PATCH", "tax-codes/:id/reactivate", "TaxCodesController", [
+    "finance.admin",
+  ]),
+  // Tax/VAT Phase 5 — sets/clears a tax code's per-direction GL account
+  // overrides. finance.admin only, same write-side role as every other
+  // TaxCodesController mutation above — master-data configuration, not
+  // a transactional document write.
+  role("PATCH", "tax-codes/:id/gl-accounts", "TaxCodesController", [
     "finance.admin",
   ]),
   role("POST", "tax-codes/:taxCodeId/rates", "TaxCodesController", [

@@ -141,6 +141,13 @@
       "when": 1789158117795,
       "tag": "0019_tax_vat_phase_3_ar_calculation",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1789246319755,
+      "tag": "0020_tax_vat_phase_5_gl_account_mapping",
+      "breakpoints": true
     }
   ]
 }

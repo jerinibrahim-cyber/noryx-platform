@@ -19,6 +19,22 @@ export interface VatPositionCodeRow {
   netCalculatedTaxMinor: number;
 }
 
+/** Tax/VAT Phase 5 (docs/finance-work-item-tax-vat-phase-5-proposal.md
+ * §8) — one distinct tax GL account's own movement/reconciliation for a
+ * report window, within `VatPositionGlCrossCheck.outputTaxAccounts`/
+ * `inputTaxAccounts`. `sourceLineTaxMinor` is derived from the POSTED
+ * lines' own `resolvedTaxAccountId` snapshots (historical fact), never
+ * from current `tax_codes`/AP-AR-settings configuration — see
+ * docs/finance-work-item-tax-vat-phase-5-discovery.md §13's correctness
+ * proof for why that stays correct even after a later remapping. */
+export interface VatPositionGlAccountBreakdown {
+  accountId: string;
+  sourceLineTaxMinor: number;
+  glMovementMinor: number;
+  differenceMinor: number;
+  reconciled: boolean;
+}
+
 export interface VatPositionGlCrossCheck {
   taxOutputAccountId: string | null;
   glOutputTaxMovementMinor: number;
@@ -28,6 +44,18 @@ export interface VatPositionGlCrossCheck {
   glInputTaxMovementMinor: number;
   inputDifferenceMinor: number;
   inputReconciled: boolean;
+  /** Tax/VAT Phase 5 (proposal §8) — ADDITIVE ONLY: the eight fields
+   * above keep their exact pre-Phase-5 names/types/meanings, each still
+   * describing the single singleton AP/AR-settings tax account
+   * specifically (unchanged for existing consumers). These two new
+   * fields are the full multi-account picture — one entry per distinct
+   * GL account any in-window POSTED tax line actually resolved to,
+   * unioned with the singleton account even if it saw no movement this
+   * window. A tenant using only the singleton (no tax-code-level
+   * overrides configured) sees exactly one entry here, equal in
+   * substance to the corresponding 4 fields above. */
+  outputTaxAccounts: VatPositionGlAccountBreakdown[];
+  inputTaxAccounts: VatPositionGlAccountBreakdown[];
 }
 
 export interface VatPositionMeta {
@@ -515,6 +543,44 @@ export class TaxReportsService {
     const outputDifferenceMinor = outputTaxMinor - glOutputTaxMovementMinor;
     const inputDifferenceMinor = inputTaxMinor - glInputTaxMovementMinor;
 
+    // Tax/VAT Phase 5 (proposal §8) — the additive multi-account
+    // breakdown, derived from each line's own resolvedTaxAccountId
+    // snapshot rather than current configuration.
+    const outputTaxAccounts = await this.accountBreakdown(
+      tx,
+      tenantId,
+      legalEntityId,
+      dateFrom,
+      dateTo,
+      "customer_invoice_lines",
+      "customer_invoices",
+      "invoice_id",
+      "invoice_date",
+      "customer_credit_note_lines",
+      "customer_credit_notes",
+      "credit_note_id",
+      "credit_note_date",
+      taxOutputAccountId,
+      "credit",
+    );
+    const inputTaxAccounts = await this.accountBreakdown(
+      tx,
+      tenantId,
+      legalEntityId,
+      dateFrom,
+      dateTo,
+      "supplier_bill_lines",
+      "supplier_bills",
+      "bill_id",
+      "bill_date",
+      "supplier_debit_note_lines",
+      "supplier_debit_notes",
+      "debit_note_id",
+      "debit_note_date",
+      taxInputAccountId,
+      "debit",
+    );
+
     return {
       taxOutputAccountId,
       glOutputTaxMovementMinor,
@@ -524,7 +590,130 @@ export class TaxReportsService {
       glInputTaxMovementMinor,
       inputDifferenceMinor,
       inputReconciled: inputDifferenceMinor === 0,
+      outputTaxAccounts,
+      inputTaxAccounts,
     };
+  }
+
+  /** Tax/VAT Phase 5 (proposal §8) — builds one direction's
+   * (output/input) full multi-account breakdown: every distinct
+   * resolvedTaxAccountId actually snapshotted on in-window POSTED
+   * primary/contra lines (net = primary - contra, same reasoning as
+   * `netByCode`), unioned with `singletonAccountId` (added at a zero
+   * source-line total if it saw no lines this window, so the singleton
+   * always appears even when every line resolved to a code-level
+   * override instead). Each account's GL movement is computed with the
+   * SAME `glMovement` helper/polarity the singleton cross-check above
+   * already uses. */
+  private async accountBreakdown(
+    tx: TxClient,
+    tenantId: string,
+    legalEntityId: string,
+    dateFrom: string,
+    dateTo: string,
+    primaryLineTable: string,
+    primaryParentTable: string,
+    primaryParentFk: string,
+    primaryDateColumn: string,
+    contraLineTable: string,
+    contraParentTable: string,
+    contraParentFk: string,
+    contraDateColumn: string,
+    singletonAccountId: string | null,
+    normalSide: "debit" | "credit",
+  ): Promise<VatPositionGlAccountBreakdown[]> {
+    const primary = await this.resolvedAccountTax(
+      tx,
+      tenantId,
+      legalEntityId,
+      primaryLineTable,
+      primaryParentTable,
+      primaryParentFk,
+      primaryDateColumn,
+      dateFrom,
+      dateTo,
+    );
+    const contra = await this.resolvedAccountTax(
+      tx,
+      tenantId,
+      legalEntityId,
+      contraLineTable,
+      contraParentTable,
+      contraParentFk,
+      contraDateColumn,
+      dateFrom,
+      dateTo,
+    );
+
+    const net = new Map<string, number>(primary);
+    for (const [accountId, taxMinor] of contra) {
+      net.set(accountId, (net.get(accountId) ?? 0) - taxMinor);
+    }
+    if (singletonAccountId && !net.has(singletonAccountId)) {
+      net.set(singletonAccountId, 0);
+    }
+
+    const breakdown: VatPositionGlAccountBreakdown[] = [];
+    for (const accountId of [...net.keys()].sort()) {
+      const sourceLineTaxMinor = net.get(accountId)!;
+      const glMovementMinor = await this.glMovement(
+        tx,
+        tenantId,
+        legalEntityId,
+        accountId,
+        dateFrom,
+        dateTo,
+        normalSide,
+      );
+      const differenceMinor = sourceLineTaxMinor - glMovementMinor;
+      breakdown.push({
+        accountId,
+        sourceLineTaxMinor,
+        glMovementMinor,
+        differenceMinor,
+        reconciled: differenceMinor === 0,
+      });
+    }
+    return breakdown;
+  }
+
+  /** Per-account SUM of tax_amount_minor for one line table, restricted
+   * to POSTED parents dated within [dateFrom, dateTo] and to lines that
+   * actually carry a resolvedTaxAccountId — the historical-fact source
+   * `accountBreakdown` nets primary against contra with. Same
+   * fixed-internal-call-set `sql.raw` posture as `codeRows`/`totalTax`
+   * above. */
+  private async resolvedAccountTax(
+    tx: TxClient,
+    tenantId: string,
+    legalEntityId: string,
+    lineTable: string,
+    parentTable: string,
+    parentFk: string,
+    dateColumn: string,
+    dateFrom: string,
+    dateTo: string,
+  ): Promise<Map<string, number>> {
+    const rows = (await tx.execute(sql`
+      SELECT
+        ln.resolved_tax_account_id AS account_id,
+        COALESCE(SUM(ln.tax_amount_minor), 0) AS tax_minor
+      FROM ${sql.raw(lineTable)} ln
+      INNER JOIN ${sql.raw(parentTable)} doc ON doc.id = ln.${sql.raw(parentFk)}
+      WHERE ln.tenant_id = ${tenantId}
+        AND doc.tenant_id = ${tenantId}
+        AND doc.legal_entity_id = ${legalEntityId}
+        AND doc.status = 'POSTED'
+        AND doc.${sql.raw(dateColumn)} >= ${dateFrom}::date
+        AND doc.${sql.raw(dateColumn)} <= ${dateTo}::date
+        AND ln.resolved_tax_account_id IS NOT NULL
+      GROUP BY ln.resolved_tax_account_id
+    `)) as unknown as Array<{ account_id: string; tax_minor: unknown }>;
+    const map = new Map<string, number>();
+    for (const r of rows) {
+      map.set(r.account_id, this.toNumber(r.tax_minor));
+    }
+    return map;
   }
 
   /** Period MOVEMENT on one account (not a cumulative balance —

@@ -5,7 +5,7 @@ import {
 } from "@nestjs/common";
 import { and, auditLogs, eq, gt, isNull, lt, lte, or } from "@noryx/db-core";
 import { PostgresError } from "postgres";
-import { taxRates, type TaxRate } from "../db/schema";
+import { taxRates, type TaxCode, type TaxRate } from "../db/schema";
 import { withTenant, type TxClient } from "../db/db";
 import { TaxCodesService } from "./tax-codes.service";
 import type { CreateTaxRateDto } from "./dto/create-tax-rate.dto";
@@ -199,6 +199,16 @@ export class TaxRatesService {
    * code doesn't exist/isn't active/isn't in scope, or when no rate
    * covers `onDate` — a real tax code with no effective rate must reject
    * the write, not be silently treated as tax-free.
+   *
+   * Tax/VAT Phase 5 (docs/finance-work-item-tax-vat-phase-5-proposal.md
+   * §6) — returns the resolved `taxCode` row alongside `rate`. This
+   * method already fetches the full tax_codes row internally (via
+   * `findByIdInTx`, above) purely for its own `isActive` check and used
+   * to discard everything else about it; exposing it costs zero
+   * additional queries and lets callers read the code's
+   * apTaxAccountId/arTaxAccountId without a second per-line SELECT —
+   * the CTO's explicit "do not introduce an unnecessary additional
+   * per-line tax_codes SELECT merely to obtain the GL account" directive.
    */
   async resolveEffectiveRate(
     tx: TxClient,
@@ -206,7 +216,7 @@ export class TaxRatesService {
     legalEntityId: string,
     taxCodeId: string,
     onDate: string,
-  ): Promise<TaxRate> {
+  ): Promise<{ rate: TaxRate; taxCode: TaxCode }> {
     const taxCode = await this.taxCodes.findByIdInTx(
       tx,
       legalEntityId,
@@ -242,6 +252,6 @@ export class TaxRatesService {
         `Tax code "${taxCode.code}" has no effective tax rate covering ${onDate}.`,
       );
     }
-    return rate;
+    return { rate, taxCode };
   }
 }

@@ -654,6 +654,21 @@ export const supplierBillLines = pgTable(
     taxAmountOverridden: boolean("tax_amount_overridden")
       .notNull()
       .default(false),
+    /// Tax/VAT Phase 5 (docs/finance-work-item-tax-vat-phase-5-proposal.md
+    /// §5/§6) — the GL account this line's tax was RESOLVED to at
+    /// resolveLineTax() time (draft create/last edit), before this bill
+    /// is ever posted: the line's taxCodeId's own apTaxAccountId
+    /// override if set, else ap_settings.tax_input_account_id at that
+    /// same moment — populated unconditionally whenever taxAmountMinor >
+    /// 0, including legacy lines with no taxCodeId. NULL only when the
+    /// line carries no tax, or (pre-Phase-5 rows only) was posted before
+    /// this column existed. Immutable once this bill is POSTED — the
+    /// same `supplier_bill_lines_immutable` trigger below that protects
+    /// every other line field already covers this one for free. post()
+    /// only ever READS this value; it is never written by post().
+    resolvedTaxAccountId: uuid("resolved_tax_account_id").references(
+      () => chartOfAccounts.id,
+    ),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -1174,6 +1189,13 @@ export const customerInvoiceLines = pgTable(
     taxAmountOverridden: boolean("tax_amount_overridden")
       .notNull()
       .default(false),
+    /// Tax/VAT Phase 5 — identical shape/semantics to
+    /// supplierBillLines.resolvedTaxAccountId (see that column's doc
+    /// comment), for the AR/output direction (taxCodeId.arTaxAccountId
+    /// override, else ar_settings.tax_output_account_id).
+    resolvedTaxAccountId: uuid("resolved_tax_account_id").references(
+      () => chartOfAccounts.id,
+    ),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -1578,6 +1600,16 @@ export const customerCreditNoteLines = pgTable(
     taxAmountOverridden: boolean("tax_amount_overridden")
       .notNull()
       .default(false),
+    /// Tax/VAT Phase 5 — identical shape/semantics to
+    /// supplierBillLines.resolvedTaxAccountId (see that column's doc
+    /// comment), for the AR/output direction (taxCodeId.arTaxAccountId
+    /// override, else ar_settings.tax_output_account_id). Reversal
+    /// polarity of the parent invoice's own resolution is applied at
+    /// posting time, not here — this column is independent of any
+    /// allocation.
+    resolvedTaxAccountId: uuid("resolved_tax_account_id").references(
+      () => chartOfAccounts.id,
+    ),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -1811,6 +1843,16 @@ export const supplierDebitNoteLines = pgTable(
     taxAmountOverridden: boolean("tax_amount_overridden")
       .notNull()
       .default(false),
+    /// Tax/VAT Phase 5 — identical shape/semantics to
+    /// supplierBillLines.resolvedTaxAccountId (see that column's doc
+    /// comment), for the AP/input direction (taxCodeId.apTaxAccountId
+    /// override, else ap_settings.tax_input_account_id). Reversal
+    /// polarity of the parent bill's own resolution is applied at
+    /// posting time, not here — this column is independent of any
+    /// allocation.
+    resolvedTaxAccountId: uuid("resolved_tax_account_id").references(
+      () => chartOfAccounts.id,
+    ),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -2868,6 +2910,25 @@ export const taxCodes = pgTable(
     name: varchar("name", { length: 255 }).notNull(),
     treatment: taxTreatmentEnum("treatment").notNull(),
     isActive: boolean("is_active").notNull().default(true),
+    /// Tax/VAT Phase 5 (docs/finance-work-item-tax-vat-phase-5-proposal.md
+    /// §5) — optional per-code override of which GL account this code's
+    /// AP-side (input) tax posts to. NULL (the default for every
+    /// existing/new row) means "use ap_settings.tax_input_account_id",
+    /// today's Phase 2-4 behavior, completely unchanged. Deliberately no
+    /// `accountType` check — same jurisdiction-dependent reasoning as
+    /// apSettings.taxInputAccountId (see that column's own doc comment).
+    /// A single tax code may legitimately be used on both AP and AR
+    /// documents (no direction constraint anywhere in this schema), so
+    /// this is one of two independent direction-scoped columns, not a
+    /// single column + direction enum.
+    apTaxAccountId: uuid("ap_tax_account_id").references(
+      () => chartOfAccounts.id,
+    ),
+    /// Tax/VAT Phase 5 — the AR-side (output) mirror of apTaxAccountId
+    /// above. NULL means "use ar_settings.tax_output_account_id".
+    arTaxAccountId: uuid("ar_tax_account_id").references(
+      () => chartOfAccounts.id,
+    ),
     createdBy: uuid("created_by"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()

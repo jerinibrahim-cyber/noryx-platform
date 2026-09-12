@@ -62,6 +62,13 @@ interface ResolvedSupplierDebitNoteLine {
   taxRateId: string | null;
   taxAmountCalculatedMinor: number | null;
   taxAmountOverridden: boolean;
+  /** Tax/VAT Phase 5 — identical shape/semantics to
+   * SupplierBillsService's ResolvedSupplierBillLine.resolvedTaxAccountId
+   * (see that interface's doc comment), for the AP/input direction.
+   * Resolved from THIS debit note's own taxCodeId/documentDate — never
+   * inherited from any allocated bill (same no-inheritance architecture
+   * as every other tax field on this line). */
+  resolvedTaxAccountId: string | null;
 }
 
 export interface ListSupplierDebitNotesFilters {
@@ -471,20 +478,23 @@ export class SupplierDebitNotesService {
         before.lines,
       );
 
-      // Step 6: load AP settings; validate the tax-input account is
-      // configured if this debit note carries any tax.
+      // Step 6: load AP settings — apControlAccountId is required
+      // unconditionally. Tax/VAT Phase 5: the tax-account check/journal
+      // line below now reads each line's own resolvedTaxAccountId
+      // snapshot instead of settings.taxInputAccountId — see
+      // SupplierBillsService.post()'s identical step for the full
+      // rationale.
       const settings = await this.loadApSettingsOrThrow(
         tx,
         tenantId,
         legalEntityId,
       );
-      const taxTotal = before.lines.reduce(
-        (sum, l) => sum + l.taxAmountMinor,
-        0,
+      const linesMissingTaxAccount = before.lines.filter(
+        (l) => l.taxAmountMinor > 0 && !l.resolvedTaxAccountId,
       );
-      if (taxTotal > 0 && !settings.taxInputAccountId) {
+      if (linesMissingTaxAccount.length > 0) {
         throw new UnprocessableEntityException(
-          "This debit note has tax amounts but no tax input account is configured in AP settings for this legal entity.",
+          "This debit note has tax amounts on one or more lines with no resolved tax account. Configure a tax-code-level or AP-settings tax input account and re-save the affected line(s) before posting.",
         );
       }
 
@@ -614,14 +624,32 @@ export class SupplierDebitNotesService {
             line.description ?? `Debit note ${internalReference} line`,
         });
       }
-      if (taxTotal > 0) {
+      // Tax/VAT Phase 5 (proposal §6) — one journal line per DISTINCT
+      // resolvedTaxAccountId, same aggregation rule as
+      // SupplierBillsService.post(), with this document type's own
+      // (reversed) polarity: CREDIT, not debit.
+      const taxByAccount = new Map<string, number>();
+      const taxAccountOrder: string[] = [];
+      for (const line of before.lines) {
+        if (line.taxAmountMinor > 0 && line.resolvedTaxAccountId) {
+          if (!taxByAccount.has(line.resolvedTaxAccountId)) {
+            taxAccountOrder.push(line.resolvedTaxAccountId);
+            taxByAccount.set(line.resolvedTaxAccountId, 0);
+          }
+          taxByAccount.set(
+            line.resolvedTaxAccountId,
+            taxByAccount.get(line.resolvedTaxAccountId)! + line.taxAmountMinor,
+          );
+        }
+      }
+      for (const accountId of taxAccountOrder) {
         journalLineValues.push({
           tenantId,
           journalEntryId: draftJournalEntry!.id,
           lineNumber: lineNumber++,
-          accountId: settings.taxInputAccountId!,
+          accountId,
           debitMinor: 0,
-          creditMinor: taxTotal,
+          creditMinor: taxByAccount.get(accountId)!,
           description: `Tax on debit note ${internalReference}`,
         });
       }
@@ -796,18 +824,24 @@ export class SupplierDebitNotesService {
     }
   }
 
-  /** Posting-time re-validation of every line's account. 422, not 400. */
+  /** Posting-time re-validation of every line's account. 422, not 400.
+   * Tax/VAT Phase 5 — also re-validates every distinct
+   * resolvedTaxAccountId snapshotted on these lines (see
+   * SupplierBillsService's identical method for the full rationale). */
   private async revalidateLineAccountsForPostingOrThrow(
     tx: TxClient,
     tenantId: string,
     legalEntityId: string,
     lines: SupplierDebitNoteLine[],
   ): Promise<void> {
+    const taxAccountIds = lines
+      .map((l) => l.resolvedTaxAccountId)
+      .filter((accId): accId is string => accId !== null);
     const invalid = await this.findInvalidAccountIds(
       tx,
       tenantId,
       legalEntityId,
-      lines.map((l) => l.accountId),
+      [...lines.map((l) => l.accountId), ...taxAccountIds],
     );
     if (invalid.length > 0) {
       throw new UnprocessableEntityException(
@@ -1028,6 +1062,7 @@ export class SupplierDebitNotesService {
           taxRateId: line.taxRateId,
           taxAmountCalculatedMinor: line.taxAmountCalculatedMinor,
           taxAmountOverridden: line.taxAmountOverridden,
+          resolvedTaxAccountId: line.resolvedTaxAccountId,
         })),
       )
       .returning();
@@ -1048,23 +1083,34 @@ export class SupplierDebitNotesService {
     documentDate: string,
     lines: CreateSupplierDebitNoteLineDto[],
   ): Promise<ResolvedSupplierDebitNoteLine[]> {
+    // Tax/VAT Phase 5 — see SupplierBillsService.resolveLineTax's own
+    // doc comment on this same pattern.
+    const fallbackTaxAccountId = await this.loadApTaxInputAccountFallback(
+      tx,
+      tenantId,
+      legalEntityId,
+    );
+
     const resolved: ResolvedSupplierDebitNoteLine[] = [];
     for (const line of lines) {
       if (!line.taxCodeId) {
+        const taxAmountMinor = line.taxAmountMinor ?? 0;
         resolved.push({
           accountId: line.accountId,
           description: line.description ?? null,
           amountMinor: line.amountMinor,
-          taxAmountMinor: line.taxAmountMinor ?? 0,
+          taxAmountMinor,
           taxCodeId: null,
           taxRateId: null,
           taxAmountCalculatedMinor: null,
           taxAmountOverridden: false,
+          resolvedTaxAccountId:
+            taxAmountMinor > 0 ? fallbackTaxAccountId : null,
         });
         continue;
       }
 
-      const rate = await this.taxRates.resolveEffectiveRate(
+      const { rate, taxCode } = await this.taxRates.resolveEffectiveRate(
         tx,
         tenantId,
         legalEntityId,
@@ -1076,18 +1122,46 @@ export class SupplierDebitNotesService {
         rate.rateBasisPoints,
       );
       const overridden = line.taxAmountMinor !== undefined;
+      const finalTaxAmountMinor = overridden
+        ? line.taxAmountMinor!
+        : calculated;
       resolved.push({
         accountId: line.accountId,
         description: line.description ?? null,
         amountMinor: line.amountMinor,
-        taxAmountMinor: overridden ? line.taxAmountMinor! : calculated,
+        taxAmountMinor: finalTaxAmountMinor,
         taxCodeId: line.taxCodeId,
         taxRateId: rate.id,
         taxAmountCalculatedMinor: calculated,
         taxAmountOverridden: overridden,
+        resolvedTaxAccountId:
+          finalTaxAmountMinor > 0
+            ? (taxCode.apTaxAccountId ?? fallbackTaxAccountId)
+            : null,
       });
     }
     return resolved;
+  }
+
+  /** Tax/VAT Phase 5 — non-throwing AP-settings lookup, identical
+   * purpose/reasoning to SupplierBillsService's own
+   * loadApTaxInputAccountFallback (see that method's doc comment). */
+  private async loadApTaxInputAccountFallback(
+    tx: TxClient,
+    tenantId: string,
+    legalEntityId: string,
+  ): Promise<string | null> {
+    const rows = await tx
+      .select({ taxInputAccountId: apSettings.taxInputAccountId })
+      .from(apSettings)
+      .where(
+        and(
+          eq(apSettings.tenantId, tenantId),
+          eq(apSettings.legalEntityId, legalEntityId),
+        ),
+      )
+      .limit(1);
+    return rows[0]?.taxInputAccountId ?? null;
   }
 
   private async insertAllocations(

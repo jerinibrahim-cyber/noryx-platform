@@ -20,6 +20,7 @@ import { TaxCodesService } from "./tax-codes.service";
 import { TaxRatesService } from "./tax-rates.service";
 import { CreateTaxCodeDto } from "./dto/create-tax-code.dto";
 import { CreateTaxRateDto } from "./dto/create-tax-rate.dto";
+import { UpdateTaxCodeGlAccountsDto } from "./dto/update-tax-code-gl-accounts.dto";
 
 /**
  * Tax / VAT MVP Phase 1 — Tax Configuration (CTO-approved architecture
@@ -113,6 +114,32 @@ export class TaxCodesController {
       "tax codes require",
     );
     return this.taxCodes.reactivate(tenantId, legalEntityId, user.userId, id);
+  }
+
+  /** Tax/VAT Phase 5
+   * (docs/finance-work-item-tax-vat-phase-5-proposal.md §9) — sets/
+   * clears this tax code's optional per-direction GL account overrides.
+   * finance.admin only, same write-side role as create/deactivate/
+   * reactivate above — this is master-data configuration, not a
+   * transactional document write. */
+  @Patch(":id/gl-accounts")
+  @Roles("finance.admin")
+  setGlAccounts(
+    @CurrentUser() user: AuthenticatedRequestUser,
+    @Param("id") id: string,
+    @Body() dto: UpdateTaxCodeGlAccountsDto,
+  ) {
+    const { tenantId, legalEntityId } = requireTenantContext(
+      user,
+      "tax codes require",
+    );
+    return this.taxCodes.setGlAccounts(
+      tenantId,
+      legalEntityId,
+      user.userId,
+      id,
+      dto,
+    );
   }
 
   @Post(":taxCodeId/rates")
