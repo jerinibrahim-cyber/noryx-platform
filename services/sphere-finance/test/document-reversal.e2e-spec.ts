@@ -9,6 +9,8 @@ import {
   closeDb as closePlatformDb,
   tenants,
   legalEntities,
+  auditLogs,
+  and,
   asc,
   eq,
 } from "@noryx/db-core";
@@ -69,6 +71,10 @@ describe("Document-Level Reversal for Posted AP & AR Documents (e2e)", () => {
   let posterToken: string;
   let viewerToken: string;
   let adminToken: string;
+  // The `sub` claim baked into `posterToken` at creation time (fixed for
+  // the whole suite) — the exact `actorUserId` every reverse() call in
+  // this file is expected to have written into its audit rows.
+  let posterUserId: string;
 
   // Wide open period so the suite is independent of wall-clock date;
   // a narrow CLOSED period is used to force the atomic-rollback (I)
@@ -133,6 +139,7 @@ describe("Document-Level Reversal for Posted AP & AR Documents (e2e)", () => {
     posterToken = tokenFor(["finance.poster"]);
     viewerToken = tokenFor(["finance.viewer"]);
     adminToken = tokenFor(["finance.admin"]);
+    posterUserId = (jwt.decode(posterToken) as { sub: string }).sub;
 
     const financeDb = getFinanceDb();
     const [exp] = await financeDb
@@ -483,6 +490,26 @@ describe("Document-Level Reversal for Posted AP & AR Documents (e2e)", () => {
     );
   }
 
+  /** Audit rows are written to the PLATFORM db (@noryx/db-core's
+   * `auditLogs`), never the finance-tenant-scoped db — same distinction
+   * ap-bill-concurrency.e2e-spec.ts's own audit assertions already rely
+   * on. Ordered by `createdAt` so callers can assert exact write order
+   * within a single reverse() transaction. */
+  async function fetchAuditRows(entityType: string, entityId: string) {
+    const platformDb = getPlatformDb();
+    return platformDb
+      .select()
+      .from(auditLogs)
+      .where(
+        and(
+          eq(auditLogs.tenantId, tenantId),
+          eq(auditLogs.entityType, entityType),
+          eq(auditLogs.entityId, entityId),
+        ),
+      )
+      .orderBy(asc(auditLogs.createdAt));
+  }
+
   // -------------------------------------------------------------------
   // DOC_TYPES — the symmetry table. Each `setup()` call creates a FRESH
   // document (and, for settlement types, a fresh target it settles
@@ -494,6 +521,10 @@ describe("Document-Level Reversal for Posted AP & AR Documents (e2e)", () => {
     resource: string;
     kind: "target" | "settlement";
     hasTax: boolean;
+    // The exact `entityType` string each service's reverse() writes on
+    // its own document-level audit row (confirmed against each
+    // service's source, not assumed) — needed to query auditLogs.
+    entityType: string;
     setup: () => Promise<{ doc: any; target?: any }>;
   }
 
@@ -503,6 +534,7 @@ describe("Document-Level Reversal for Posted AP & AR Documents (e2e)", () => {
       resource: "bills",
       kind: "target",
       hasTax: true,
+      entityType: "supplier_bill",
       setup: async () => ({ doc: await createPostedBill(10000, 500) }),
     },
     {
@@ -510,6 +542,7 @@ describe("Document-Level Reversal for Posted AP & AR Documents (e2e)", () => {
       resource: "invoices",
       kind: "target",
       hasTax: true,
+      entityType: "customer_invoice",
       setup: async () => ({ doc: await createPostedInvoice(10000, 500) }),
     },
     {
@@ -517,6 +550,7 @@ describe("Document-Level Reversal for Posted AP & AR Documents (e2e)", () => {
       resource: "payments",
       kind: "settlement",
       hasTax: false,
+      entityType: "supplier_payment",
       setup: async () => {
         const bill = await createPostedBill(10000);
         const doc = await createPostedPayment(bill.id, bill.totalMinor);
@@ -528,6 +562,7 @@ describe("Document-Level Reversal for Posted AP & AR Documents (e2e)", () => {
       resource: "receipts",
       kind: "settlement",
       hasTax: false,
+      entityType: "customer_receipt",
       setup: async () => {
         const invoice = await createPostedInvoice(10000);
         const doc = await createPostedReceipt(invoice.id, invoice.totalMinor);
@@ -539,6 +574,7 @@ describe("Document-Level Reversal for Posted AP & AR Documents (e2e)", () => {
       resource: "debit-notes",
       kind: "settlement",
       hasTax: true,
+      entityType: "supplier_debit_note",
       setup: async () => {
         const bill = await createPostedBill(10000);
         const doc = await createPostedDebitNote(
@@ -554,6 +590,7 @@ describe("Document-Level Reversal for Posted AP & AR Documents (e2e)", () => {
       resource: "credit-notes",
       kind: "settlement",
       hasTax: true,
+      entityType: "customer_credit_note",
       setup: async () => {
         const invoice = await createPostedInvoice(10000);
         const doc = await createPostedCreditNote(
@@ -607,6 +644,107 @@ describe("Document-Level Reversal for Posted AP & AR Documents (e2e)", () => {
         expect(originalJe.reversedByJournalEntryId).toBe(
           res.body.data.reversal.journalEntryId,
         );
+      });
+
+      it("(N) audit trail: reverse() writes the document-level REVERSE row, the 3 journal-level rows (REVERSE/CREATE/POST), and — for settlements — a per-allocation UPDATE row on the target, each with correct actor/entity/beforeState/afterState", async () => {
+        const { doc, target } = await cfg.setup();
+
+        const res = await request(app.getHttpServer())
+          .post(`/v1/finance/${cfg.resource}/${doc.id}/reverse`)
+          .set(...auth(posterToken))
+          .send({})
+          .expect(201);
+        const reversalJournalEntryId: string =
+          res.body.data.reversal.journalEntryId;
+
+        // --- (i) document-level REVERSE row --------------------------
+        const docRows = await fetchAuditRows(cfg.entityType, doc.id);
+        const docReverseRows = docRows.filter((r) => r.action === "REVERSE");
+        expect(docReverseRows).toHaveLength(1);
+        const docRow = docReverseRows[0]!;
+        expect(docRow.actorUserId).toBe(posterUserId);
+        expect(docRow.tenantId).toBe(tenantId);
+        expect(docRow.legalEntityId).toBe(legalEntityId);
+        const docBefore = docRow.beforeState as any;
+        const docAfter = docRow.afterState as any;
+        expect(docBefore.id).toBe(doc.id);
+        expect(docBefore.status).toBe("POSTED");
+        expect(docBefore.journalEntryId).toBe(doc.journalEntryId);
+        expect(docAfter.id).toBe(doc.id);
+        expect(docAfter.status).toBe("POSTED");
+        expect(docAfter.journalEntryId).toBe(doc.journalEntryId);
+
+        // --- (ii) journal-level rows (completeReversalPosting's own,
+        // reused, 3-row contract: REVERSE on the original, CREATE + POST
+        // on the new reversal entry) --------------------------------
+        const originalJeRows = await fetchAuditRows(
+          "journal_entry",
+          doc.journalEntryId,
+        );
+        const originalReverseRows = originalJeRows.filter(
+          (r) => r.action === "REVERSE",
+        );
+        expect(originalReverseRows).toHaveLength(1);
+        expect(originalReverseRows[0]!.actorUserId).toBe(posterUserId);
+        expect((originalReverseRows[0]!.beforeState as any).id).toBe(
+          doc.journalEntryId,
+        );
+        expect(
+          (originalReverseRows[0]!.beforeState as any).reversedByJournalEntryId,
+        ).toBeNull();
+        expect(
+          (originalReverseRows[0]!.afterState as any).reversedByJournalEntryId,
+        ).toBe(reversalJournalEntryId);
+
+        const reversalJeRows = await fetchAuditRows(
+          "journal_entry",
+          reversalJournalEntryId,
+        );
+        const createRows = reversalJeRows.filter((r) => r.action === "CREATE");
+        const postRows = reversalJeRows.filter((r) => r.action === "POST");
+        expect(createRows).toHaveLength(1);
+        expect(postRows).toHaveLength(1);
+        expect(createRows[0]!.actorUserId).toBe(posterUserId);
+        expect(createRows[0]!.beforeState).toBeNull();
+        expect((createRows[0]!.afterState as any).id).toBe(
+          reversalJournalEntryId,
+        );
+        expect(postRows[0]!.actorUserId).toBe(posterUserId);
+        expect(postRows[0]!.beforeState).toBeNull();
+        expect((postRows[0]!.afterState as any).id).toBe(
+          reversalJournalEntryId,
+        );
+        expect((postRows[0]!.afterState as any).status).toBe("POSTED");
+
+        // --- (iii) settlement-unwind row on the target ---------------
+        if (cfg.kind === "settlement") {
+          const targetResource = targetResourceFor(cfg);
+          const targetEntityType =
+            targetResource === "bills" ? "supplier_bill" : "customer_invoice";
+          const targetRows = await fetchAuditRows(targetEntityType, target.id);
+          const targetUpdateRows = targetRows.filter(
+            (r) => r.action === "UPDATE",
+          );
+          // The target already has ONE pre-existing UPDATE audit row from
+          // the settlement's own post() applying its allocation
+          // (paidMinor 0 -> totalMinor) before this test's reverse() ever
+          // runs — that is unrelated, correct, pre-existing behavior, not
+          // part of what this test verifies. The reversal's own unwind
+          // row is therefore the LAST one written (createdAt-ordered) and
+          // is identified unambiguously by running in the opposite
+          // direction (PAID -> UNPAID) from the post-time row.
+          expect(targetUpdateRows.length).toBeGreaterThanOrEqual(1);
+          const targetRow = targetUpdateRows[targetUpdateRows.length - 1]!;
+          expect(targetRow.actorUserId).toBe(posterUserId);
+          const targetBefore = targetRow.beforeState as any;
+          const targetAfter = targetRow.afterState as any;
+          expect(targetBefore.id).toBe(target.id);
+          expect(targetBefore.paidMinor).toBe(target.totalMinor);
+          expect(targetBefore.paymentStatus).toBe("PAID");
+          expect(targetAfter.id).toBe(target.id);
+          expect(targetAfter.paidMinor).toBe(0);
+          expect(targetAfter.paymentStatus).toBe("UNPAID");
+        }
       });
 
       it("(C) a posted document cannot be reversed twice (409); the second attempt changes nothing", async () => {
@@ -973,6 +1111,241 @@ describe("Document-Level Reversal for Posted AP & AR Documents (e2e)", () => {
         .set(...auth(posterToken))
         .expect(200);
       expect(balanceAfterReversal.body.data.closingBalanceMinor).toBe(before);
+    });
+  });
+
+  // ---------------------------------------------------------------------
+  // (P) Reporting isolation — proves the disclosed, bounded `asOfTotals()`
+  // reversal-awareness (proposal §12 point 5 / completion report "Known
+  // Limitations") behaves exactly as documented: the target-document
+  // (bill/invoice) side is genuinely reversal- and date-aware; the
+  // settlement-allocation side deliberately is not (a real, disclosed
+  // gap, reproduced here rather than assumed); and neither one ever
+  // leaks into the live/current (non-as-of) totals or AP Ageing, which
+  // read the live, already-correct `paidMinor` column instead of
+  // reconstructing history. Each test uses a dedicated, freshly created
+  // supplier/customer so the aggregate totals asserted below are exact
+  // and never contaminated by bills/invoices/payments created by any of
+  // this file's other (shared-fixture) tests. AP is exercised in full;
+  // AR is exercised for the primary (target-document) fix only, as a
+  // symmetry check against the confirmed-identical AR mirror in
+  // ar-reports.service.ts — the same representative-testing disclosure
+  // this file already uses for (I)/(L)/(M) above.
+  // ---------------------------------------------------------------------
+  describe("(P) Reporting isolation — asOfTotals() reversal-awareness is bounded exactly as documented", () => {
+    it("AP Supplier Balance: total_billed is reversal- and date-aware (reversed after cutoff still counts, at/before cutoff does not); the live/current totals always reflect the live state regardless of any as-of query", async () => {
+      const supplier = await request(app.getHttpServer())
+        .post("/v1/finance/suppliers")
+        .set(...auth(adminToken))
+        .send({ code: uniq("ISO-SUP"), name: "Isolation Test Supplier" })
+        .expect(201);
+      const isoSupplierId = supplier.body.data.id;
+
+      const billRes = await request(app.getHttpServer())
+        .post("/v1/finance/bills")
+        .set(...auth(posterToken))
+        .send({
+          supplierId: isoSupplierId,
+          supplierBillNumber: uniq("ISO-BILL"),
+          billDate: "2026-01-01",
+          lines: [{ accountId: expenseAccountId, amountMinor: 10000 }],
+        })
+        .expect(201);
+      const billId = billRes.body.data.id;
+      await request(app.getHttpServer())
+        .post(`/v1/finance/bills/${billId}/post`)
+        .set(...auth(posterToken))
+        .expect(200);
+
+      // Baseline — no reversal exists at all yet: an as-of query after
+      // the bill date behaves identically to the pre-fix code (the
+      // added LEFT JOIN condition's `reversed_by_journal_entry_id IS
+      // NULL` branch is a no-op for every never-reversed bill).
+      const noReversalYet = await request(app.getHttpServer())
+        .get(`/v1/finance/suppliers/${isoSupplierId}/balance`)
+        .query({ asOf: "2026-02-01" })
+        .set(...auth(posterToken))
+        .expect(200);
+      expect(noReversalYet.body.data.totalBilledMinor).toBe(10000);
+      expect(noReversalYet.body.data.totalOutstandingMinor).toBe(10000);
+
+      await request(app.getHttpServer())
+        .post(`/v1/finance/bills/${billId}/reverse`)
+        .set(...auth(posterToken))
+        .send({ transactionDate: "2026-02-15" })
+        .expect(201);
+
+      // As of a cutoff BEFORE the reversal's own transactionDate, the
+      // bill genuinely was still outstanding as of that historical
+      // date — must still count.
+      const beforeReversalDate = await request(app.getHttpServer())
+        .get(`/v1/finance/suppliers/${isoSupplierId}/balance`)
+        .query({ asOf: "2026-02-10" })
+        .set(...auth(posterToken))
+        .expect(200);
+      expect(beforeReversalDate.body.data.totalBilledMinor).toBe(10000);
+
+      // As of a cutoff AT/AFTER the reversal's own transactionDate, the
+      // bill had already been reversed by then — must be excluded.
+      const afterReversalDate = await request(app.getHttpServer())
+        .get(`/v1/finance/suppliers/${isoSupplierId}/balance`)
+        .query({ asOf: "2026-02-20" })
+        .set(...auth(posterToken))
+        .expect(200);
+      expect(afterReversalDate.body.data.totalBilledMinor).toBe(0);
+
+      // Live/current (non-as-of) totals: a completely separate code path
+      // (currentTotals()'s unconditional NOT EXISTS, no date involved at
+      // all) — always reflects the live state.
+      const live = await request(app.getHttpServer())
+        .get(`/v1/finance/suppliers/${isoSupplierId}/balance`)
+        .set(...auth(posterToken))
+        .expect(200);
+      expect(live.body.data.totalBilledMinor).toBe(0);
+    });
+
+    it("AP Supplier Balance: the disclosed settlement-allocation gap in asOfTotals() is real, but confined to that one historical reconstruction — it never leaks into the live (non-as-of) totals, which read the bill's own live paidMinor instead", async () => {
+      const supplier = await request(app.getHttpServer())
+        .post("/v1/finance/suppliers")
+        .set(...auth(adminToken))
+        .send({ code: uniq("ISO-SUP2"), name: "Isolation Test Supplier 2" })
+        .expect(201);
+      const isoSupplierId = supplier.body.data.id;
+
+      const billRes = await request(app.getHttpServer())
+        .post("/v1/finance/bills")
+        .set(...auth(posterToken))
+        .send({
+          supplierId: isoSupplierId,
+          supplierBillNumber: uniq("ISO-BILL2"),
+          billDate: "2026-01-01",
+          lines: [{ accountId: expenseAccountId, amountMinor: 10000 }],
+        })
+        .expect(201);
+      const billId = billRes.body.data.id;
+      await request(app.getHttpServer())
+        .post(`/v1/finance/bills/${billId}/post`)
+        .set(...auth(posterToken))
+        .expect(200);
+
+      const paymentRes = await request(app.getHttpServer())
+        .post("/v1/finance/payments")
+        .set(...auth(posterToken))
+        .send({
+          supplierId: isoSupplierId,
+          paymentDate: "2026-01-05",
+          paymentAmountMinor: 10000,
+          paymentMethod: "BANK_TRANSFER",
+          bankCashAccountId,
+          allocations: [{ billId, allocatedAmountMinor: 10000 }],
+        })
+        .expect(201);
+      const paymentId = paymentRes.body.data.id;
+      await request(app.getHttpServer())
+        .post(`/v1/finance/payments/${paymentId}/post`)
+        .set(...auth(posterToken))
+        .expect(200);
+
+      // Reverse the payment itself with an EARLY transactionDate — the
+      // settlement was undone shortly after it was made.
+      await request(app.getHttpServer())
+        .post(`/v1/finance/payments/${paymentId}/reverse`)
+        .set(...auth(posterToken))
+        .send({ transactionDate: "2026-01-08" })
+        .expect(201);
+
+      // --- Live (non-as-of) totals: always correct, no gap here -------
+      // paidMinor is live-mutated by unsettleTarget() at the moment of
+      // reversal, so currentTotals() (which reads it directly) needs no
+      // reversal-date check of its own to already be correct.
+      const live = await request(app.getHttpServer())
+        .get(`/v1/finance/suppliers/${isoSupplierId}/balance`)
+        .set(...auth(posterToken))
+        .expect(200);
+      expect(live.body.data.totalBilledMinor).toBe(10000);
+      expect(live.body.data.totalPaidMinor).toBe(0);
+      expect(live.body.data.totalOutstandingMinor).toBe(10000);
+
+      // --- Historical as-of reconstruction: the disclosed, known gap --
+      // As of 2026-01-10 (AFTER the reversal's own transactionDate,
+      // 2026-01-08), a fully correct historical reconstruction would
+      // show the payment as no longer applied by then. asOfTotals()'s
+      // total_paid subquery carries no reversal-date check on the
+      // settlement side (deliberately not extended — completion report
+      // "Known Limitations"), so it still counts the allocation purely
+      // by payment_date <= cutoff. Reproduced here as a DEFECT
+      // CONFIRMATION, not an expectation of correctness: this is the
+      // disclosed limitation, shown to be real and exactly this narrow.
+      const historicalAfterReversal = await request(app.getHttpServer())
+        .get(`/v1/finance/suppliers/${isoSupplierId}/balance`)
+        .query({ asOf: "2026-01-10" })
+        .set(...auth(posterToken))
+        .expect(200);
+      expect(historicalAfterReversal.body.data.totalBilledMinor).toBe(10000);
+      // KNOWN LIMITATION, reproduced deliberately: an ideal historical
+      // reconstruction would report 0 here; the current implementation
+      // still reports 10000, exactly as disclosed.
+      expect(historicalAfterReversal.body.data.totalPaidMinor).toBe(10000);
+
+      // An as-of query dated BEFORE the reversal ever happened is
+      // unaffected either way — same value, for the ordinary reason
+      // (the allocation was genuinely still in effect then).
+      const historicalBeforeReversal = await request(app.getHttpServer())
+        .get(`/v1/finance/suppliers/${isoSupplierId}/balance`)
+        .query({ asOf: "2026-01-06" })
+        .set(...auth(posterToken))
+        .expect(200);
+      expect(historicalBeforeReversal.body.data.totalPaidMinor).toBe(10000);
+    });
+
+    it("AR Customer Balance: total_invoiced is reversal- and date-aware, an exact symmetry check against the confirmed-identical AR mirror (ar-reports.service.ts asOfTotals())", async () => {
+      const customerRes = await request(app.getHttpServer())
+        .post("/v1/finance/customers")
+        .set(...auth(adminToken))
+        .send({ code: uniq("ISO-CUST"), name: "Isolation Test Customer" })
+        .expect(201);
+      const isoCustomerId = customerRes.body.data.id;
+
+      const invoiceRes = await request(app.getHttpServer())
+        .post("/v1/finance/invoices")
+        .set(...auth(posterToken))
+        .send({
+          customerId: isoCustomerId,
+          invoiceDate: "2026-01-01",
+          lines: [{ accountId: revenueAccountId, amountMinor: 10000 }],
+        })
+        .expect(201);
+      const invoiceId = invoiceRes.body.data.id;
+      await request(app.getHttpServer())
+        .post(`/v1/finance/invoices/${invoiceId}/post`)
+        .set(...auth(posterToken))
+        .expect(200);
+
+      await request(app.getHttpServer())
+        .post(`/v1/finance/invoices/${invoiceId}/reverse`)
+        .set(...auth(posterToken))
+        .send({ transactionDate: "2026-02-15" })
+        .expect(201);
+
+      const beforeReversalDate = await request(app.getHttpServer())
+        .get(`/v1/finance/customers/${isoCustomerId}/balance`)
+        .query({ asOf: "2026-02-10" })
+        .set(...auth(posterToken))
+        .expect(200);
+      expect(beforeReversalDate.body.data.totalInvoicedMinor).toBe(10000);
+
+      const afterReversalDate = await request(app.getHttpServer())
+        .get(`/v1/finance/customers/${isoCustomerId}/balance`)
+        .query({ asOf: "2026-02-20" })
+        .set(...auth(posterToken))
+        .expect(200);
+      expect(afterReversalDate.body.data.totalInvoicedMinor).toBe(0);
+
+      const live = await request(app.getHttpServer())
+        .get(`/v1/finance/customers/${isoCustomerId}/balance`)
+        .set(...auth(posterToken))
+        .expect(200);
+      expect(live.body.data.totalInvoicedMinor).toBe(0);
     });
   });
 });
