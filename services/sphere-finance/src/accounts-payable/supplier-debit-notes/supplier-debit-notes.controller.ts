@@ -22,6 +22,7 @@ import type { AuthenticatedRequestUser } from "@noryx/shared-types";
 import { SupplierDebitNotesService } from "./supplier-debit-notes.service";
 import { CreateSupplierDebitNoteDto } from "./dto/create-supplier-debit-note.dto";
 import { UpdateSupplierDebitNoteDto } from "./dto/update-supplier-debit-note.dto";
+import { ReverseJournalEntryDto } from "../../journal-entries/dto/reverse-journal-entry.dto";
 
 /**
  * docs/finance-work-item-credit-debit-notes-proposal.md §12/§13.
@@ -132,5 +133,25 @@ export class SupplierDebitNotesController {
       "Supplier debit notes require",
     );
     return this.debitNotes.post(tenantId, legalEntityId, user.userId, id);
+  }
+
+  @Post(":id/reverse")
+  @Roles("finance.poster")
+  reverse(
+    @CurrentUser() user: AuthenticatedRequestUser,
+    @Param("id") id: string,
+    @Body() dto: ReverseJournalEntryDto,
+  ) {
+    const { tenantId, legalEntityId } = requireTenantContext(
+      user,
+      "Supplier debit notes require",
+    );
+    return this.debitNotes.reverse(
+      tenantId,
+      legalEntityId,
+      user.userId,
+      id,
+      dto,
+    );
   }
 }

@@ -38,6 +38,14 @@ import {
 import { withTenant, type TxClient } from "../../db/db";
 import { TaxRatesService } from "../../tax-configuration/tax-rates.service";
 import { calculateTaxAmountMinor } from "../../tax-configuration/tax-calculation";
+import { JournalEntriesService } from "../../journal-entries/journal-entries.service";
+import type { ReverseJournalEntryDto } from "../../journal-entries/dto/reverse-journal-entry.dto";
+import {
+  resolveOpenPeriodOrThrow,
+  resolveReversalInfo,
+  unsettleTarget,
+  type ReversalInfo,
+} from "../../common/reversal/reversal.util";
 import type { CreateSupplierDebitNoteDto } from "./dto/create-supplier-debit-note.dto";
 import type { CreateSupplierDebitNoteLineDto } from "./dto/create-supplier-debit-note-line.dto";
 import type { CreateSupplierDebitNoteAllocationDto } from "./dto/create-supplier-debit-note-allocation.dto";
@@ -46,6 +54,10 @@ import type { UpdateSupplierDebitNoteDto } from "./dto/update-supplier-debit-not
 export type SupplierDebitNoteWithDetails = SupplierDebitNote & {
   lines: SupplierDebitNoteLine[];
   allocations: SupplierDebitNoteAllocation[];
+};
+
+export type SupplierDebitNoteWithReversal = SupplierDebitNoteWithDetails & {
+  reversal: ReversalInfo | null;
 };
 
 /** Tax/VAT Phase 2 — exact mirror of SupplierBillsService's own
@@ -127,7 +139,10 @@ export interface ListSupplierDebitNotesFilters {
  */
 @Injectable()
 export class SupplierDebitNotesService {
-  constructor(private readonly taxRates: TaxRatesService) {}
+  constructor(
+    private readonly taxRates: TaxRatesService,
+    private readonly journalEntries: JournalEntriesService,
+  ) {}
 
   async create(
     tenantId: string,
@@ -256,7 +271,7 @@ export class SupplierDebitNotesService {
     tenantId: string,
     legalEntityId: string,
     id: string,
-  ): Promise<SupplierDebitNoteWithDetails> {
+  ): Promise<SupplierDebitNoteWithReversal> {
     return withTenant(tenantId, async (tx: TxClient) => {
       const found = await this.findByIdInTx(tx, tenantId, legalEntityId, id);
       if (!found) {
@@ -264,7 +279,11 @@ export class SupplierDebitNotesService {
           `No supplier debit note found with id ${id}.`,
         );
       }
-      return found;
+      // Document-Level Reversal work item
+      // (docs/finance-work-item-document-reversal-proposal.md §17) —
+      // additive, computed field on single-document reads.
+      const reversal = await resolveReversalInfo(tx, found.journalEntryId);
+      return { ...found, reversal };
     });
   }
 
@@ -772,6 +791,152 @@ export class SupplierDebitNotesService {
       ]);
 
       return after;
+    });
+  }
+
+  /**
+   * `POST /supplier-debit-notes/:id/reverse` — Document-Level Reversal
+   * for Posted AP & AR Documents work item
+   * (docs/finance-work-item-document-reversal-proposal.md §7/§9/§18,
+   * CTO-approved implementation authorization). Supplier debit notes
+   * are a "settlement" document (§7) despite having their own lines —
+   * never blocked, and unwind their own allocations against whatever
+   * bills they settled via the shared `unsettleTarget()` helper, the
+   * mirror image of `post()`'s own step 15. Locks every allocated bill
+   * first, in the same fixed ascending-id order `post()` itself uses.
+   */
+  async reverse(
+    tenantId: string,
+    legalEntityId: string,
+    actorUserId: string | null,
+    id: string,
+    dto: ReverseJournalEntryDto,
+  ): Promise<SupplierDebitNoteWithReversal> {
+    return withTenant(tenantId, async (tx: TxClient) => {
+      const before = await this.findByIdInTx(tx, tenantId, legalEntityId, id, {
+        forUpdate: true,
+      });
+      if (!before) {
+        throw new NotFoundException(
+          `No supplier debit note found with id ${id}.`,
+        );
+      }
+      if (before.status !== "POSTED") {
+        throw new UnprocessableEntityException(
+          "Only a posted supplier debit note can be reversed.",
+        );
+      }
+      if (!before.journalEntryId) {
+        throw new UnprocessableEntityException(
+          "This supplier debit note has no posted journal entry to reverse.",
+        );
+      }
+
+      const billIds = before.allocations.map((a) => a.billId);
+      const lockedBills = billIds.length
+        ? await tx
+            .select()
+            .from(supplierBills)
+            .where(
+              and(
+                inArray(supplierBills.id, billIds),
+                eq(supplierBills.tenantId, tenantId),
+                eq(supplierBills.legalEntityId, legalEntityId),
+              ),
+            )
+            .orderBy(asc(supplierBills.id))
+            .for("update")
+        : [];
+      const billsById = new Map<string, SupplierBill>(
+        lockedBills.map((b) => [b.id, b]),
+      );
+
+      const original =
+        await this.journalEntries.lockAndValidateOriginalForReversal(
+          tx,
+          tenantId,
+          legalEntityId,
+          before.journalEntryId,
+        );
+
+      const transactionDate =
+        dto.transactionDate ?? new Date().toISOString().slice(0, 10);
+      const memo =
+        dto.memo ??
+        `Reversal of supplier debit note ${before.internalReference}`;
+
+      const period = await resolveOpenPeriodOrThrow(
+        this.journalEntries,
+        tx,
+        tenantId,
+        legalEntityId,
+        transactionDate,
+      );
+
+      await this.journalEntries.completeReversalPosting(
+        tx,
+        tenantId,
+        legalEntityId,
+        actorUserId,
+        original,
+        period,
+        transactionDate,
+        memo,
+      );
+
+      const billAuditRows: {
+        tenantId: string;
+        legalEntityId: string;
+        actorUserId: string | undefined;
+        action: string;
+        entityType: string;
+        entityId: string;
+        beforeState: Record<string, unknown>;
+        afterState: Record<string, unknown>;
+      }[] = [];
+      for (const allocation of before.allocations) {
+        const bill = billsById.get(allocation.billId);
+        if (!bill) {
+          throw new UnprocessableEntityException(
+            `Allocated bill ${allocation.billId} could not be found in this legal entity.`,
+          );
+        }
+        const updatedBill = await unsettleTarget(
+          tx,
+          supplierBills,
+          bill,
+          allocation.allocatedAmountMinor,
+        );
+        billAuditRows.push({
+          tenantId,
+          legalEntityId,
+          actorUserId: actorUserId ?? undefined,
+          action: "UPDATE",
+          entityType: "supplier_bill",
+          entityId: bill.id,
+          beforeState: bill as unknown as Record<string, unknown>,
+          afterState: updatedBill as unknown as Record<string, unknown>,
+        });
+      }
+
+      const after = await this.findByIdInTx(tx, tenantId, legalEntityId, id);
+
+      await tx.insert(auditLogs).values([
+        {
+          tenantId,
+          legalEntityId,
+          actorUserId: actorUserId ?? undefined,
+          action: "REVERSE",
+          entityType: "supplier_debit_note",
+          entityId: id,
+          beforeState: before as unknown as Record<string, unknown>,
+          afterState: after as unknown as Record<string, unknown>,
+        },
+        ...billAuditRows,
+      ]);
+
+      const reversal = await resolveReversalInfo(tx, after!.journalEntryId);
+      return { ...after!, reversal };
     });
   }
 

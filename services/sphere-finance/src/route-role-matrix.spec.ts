@@ -241,8 +241,16 @@ function role(
  * docs/finance-work-item-tax-vat-phase-5-proposal.md §9, CTO-approved —
  * implementation-authorization turn; finance.admin only, same
  * write-side posture as every other TaxCodesController mutation), 127
- * routes total across 25 controllers (still 25 — this phase added no
- * new controller).
+ * routes total across 25 controllers, plus the Document-Level Reversal
+ * for Posted AP & AR Documents work item's addition of one
+ * `POST .../:id/reverse` route to each of the six existing document
+ * controllers — SupplierBillsController, SupplierPaymentsController,
+ * SupplierDebitNotesController, CustomerInvoicesController,
+ * CustomerCreditNotesController, CustomerReceiptsController (proposal
+ * §17/§18, CTO-approved implementation authorization) — finance.poster
+ * only, the same write-side posture as every other mutation on those
+ * six controllers: 133 routes total across the same 25 controllers
+ * (still 25 — this work item added no new controller).
  */
 const EXPECTED: DiscoveredRoute[] = [
   role("POST", "accounts", "AccountsController", ["finance.admin"]),
@@ -458,6 +466,13 @@ const EXPECTED: DiscoveredRoute[] = [
   role("PATCH", "bills/:id", "SupplierBillsController", ["finance.poster"]),
   role("DELETE", "bills/:id", "SupplierBillsController", ["finance.poster"]),
   role("POST", "bills/:id/post", "SupplierBillsController", ["finance.poster"]),
+  // Document-Level Reversal work item
+  // (docs/finance-work-item-document-reversal-proposal.md §17/§18,
+  // CTO-approved) — reversal, like create/edit/delete/post, is a
+  // finance.poster write.
+  role("POST", "bills/:id/reverse", "SupplierBillsController", [
+    "finance.poster",
+  ]),
 
   // AP-1c — docs/finance-work-item-1c-supplier-payments-proposal.md
   // §10/§11. Same finance.poster-writes/any-role-reads split as
@@ -481,6 +496,10 @@ const EXPECTED: DiscoveredRoute[] = [
     "finance.poster",
   ]),
   role("POST", "payments/:id/post", "SupplierPaymentsController", [
+    "finance.poster",
+  ]),
+  // Document-Level Reversal work item (§17/§18, CTO-approved).
+  role("POST", "payments/:id/reverse", "SupplierPaymentsController", [
     "finance.poster",
   ]),
 
@@ -561,6 +580,10 @@ const EXPECTED: DiscoveredRoute[] = [
   role("POST", "invoices/:id/post", "CustomerInvoicesController", [
     "finance.poster",
   ]),
+  // Document-Level Reversal work item (§17/§18, CTO-approved).
+  role("POST", "invoices/:id/reverse", "CustomerInvoicesController", [
+    "finance.poster",
+  ]),
 
   // AR-1c — docs/finance-work-item-1c-customer-receipts-proposal.md
   // §16/§18. Same finance.poster-writes/any-role-reads split as
@@ -584,6 +607,10 @@ const EXPECTED: DiscoveredRoute[] = [
     "finance.poster",
   ]),
   role("POST", "receipts/:id/post", "CustomerReceiptsController", [
+    "finance.poster",
+  ]),
+  // Document-Level Reversal work item (§17/§18, CTO-approved).
+  role("POST", "receipts/:id/reverse", "CustomerReceiptsController", [
     "finance.poster",
   ]),
 
@@ -639,6 +666,10 @@ const EXPECTED: DiscoveredRoute[] = [
   role("POST", "credit-notes/:id/post", "CustomerCreditNotesController", [
     "finance.poster",
   ]),
+  // Document-Level Reversal work item (§17/§18, CTO-approved).
+  role("POST", "credit-notes/:id/reverse", "CustomerCreditNotesController", [
+    "finance.poster",
+  ]),
 
   role("POST", "debit-notes", "SupplierDebitNotesController", [
     "finance.poster",
@@ -660,6 +691,10 @@ const EXPECTED: DiscoveredRoute[] = [
     "finance.poster",
   ]),
   role("POST", "debit-notes/:id/post", "SupplierDebitNotesController", [
+    "finance.poster",
+  ]),
+  // Document-Level Reversal work item (§17/§18, CTO-approved).
+  role("POST", "debit-notes/:id/reverse", "SupplierDebitNotesController", [
     "finance.poster",
   ]),
 

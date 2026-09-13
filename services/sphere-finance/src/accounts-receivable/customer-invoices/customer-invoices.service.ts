@@ -34,12 +34,23 @@ import {
 import { withTenant, type TxClient } from "../../db/db";
 import { TaxRatesService } from "../../tax-configuration/tax-rates.service";
 import { calculateTaxAmountMinor } from "../../tax-configuration/tax-calculation";
+import { JournalEntriesService } from "../../journal-entries/journal-entries.service";
+import type { ReverseJournalEntryDto } from "../../journal-entries/dto/reverse-journal-entry.dto";
+import {
+  resolveOpenPeriodOrThrow,
+  resolveReversalInfo,
+  type ReversalInfo,
+} from "../../common/reversal/reversal.util";
 import type { CreateCustomerInvoiceDto } from "./dto/create-customer-invoice.dto";
 import type { CreateCustomerInvoiceLineDto } from "./dto/create-customer-invoice-line.dto";
 import type { UpdateCustomerInvoiceDto } from "./dto/update-customer-invoice.dto";
 
 export type CustomerInvoiceWithLines = CustomerInvoice & {
   lines: CustomerInvoiceLine[];
+};
+
+export type CustomerInvoiceWithReversal = CustomerInvoiceWithLines & {
+  reversal: ReversalInfo | null;
 };
 
 /** Tax/VAT Phase 3 — a line after tax resolution (discovery §4), ready
@@ -99,7 +110,10 @@ export interface ListCustomerInvoicesFilters {
  */
 @Injectable()
 export class CustomerInvoicesService {
-  constructor(private readonly taxRates: TaxRatesService) {}
+  constructor(
+    private readonly taxRates: TaxRatesService,
+    private readonly journalEntries: JournalEntriesService,
+  ) {}
 
   async create(
     tenantId: string,
@@ -225,13 +239,19 @@ export class CustomerInvoicesService {
     tenantId: string,
     legalEntityId: string,
     id: string,
-  ): Promise<CustomerInvoiceWithLines> {
+  ): Promise<CustomerInvoiceWithReversal> {
     return withTenant(tenantId, async (tx: TxClient) => {
       const found = await this.findByIdInTx(tx, tenantId, legalEntityId, id);
       if (!found) {
         throw new NotFoundException(`No customer invoice found with id ${id}.`);
       }
-      return found;
+      // Document-Level Reversal work item
+      // (docs/finance-work-item-document-reversal-proposal.md §17) —
+      // additive, computed field on single-document reads; never
+      // stored, always derived from journalEntryId ->
+      // journal_entries.reversedByJournalEntryId.
+      const reversal = await resolveReversalInfo(tx, found.journalEntryId);
+      return { ...found, reversal };
     });
   }
 
@@ -622,6 +642,97 @@ export class CustomerInvoicesService {
       ]);
 
       return after;
+    });
+  }
+
+  /**
+   * `POST /invoices/:id/reverse` — Document-Level Reversal for Posted
+   * AP & AR Documents work item
+   * (docs/finance-work-item-document-reversal-proposal.md §7/§8/§18,
+   * CTO-approved implementation authorization). Byte-mirror of
+   * SupplierBillsService.reverse() for the AR side: customer invoices
+   * are a "target" document (§7), blocked while any receipt/credit-note
+   * allocation exists (`paidMinor > 0`). Status stays POSTED; reversal
+   * state is always derived (§16) from journalEntryId ->
+   * journal_entries.reversedByJournalEntryId.
+   */
+  async reverse(
+    tenantId: string,
+    legalEntityId: string,
+    actorUserId: string | null,
+    id: string,
+    dto: ReverseJournalEntryDto,
+  ): Promise<CustomerInvoiceWithReversal> {
+    return withTenant(tenantId, async (tx: TxClient) => {
+      const before = await this.findByIdInTx(tx, tenantId, legalEntityId, id, {
+        forUpdate: true,
+      });
+      if (!before) {
+        throw new NotFoundException(`No customer invoice found with id ${id}.`);
+      }
+      if (before.status !== "POSTED") {
+        throw new UnprocessableEntityException(
+          "Only a posted customer invoice can be reversed.",
+        );
+      }
+      if (before.paidMinor > 0) {
+        throw new UnprocessableEntityException(
+          "Cannot reverse a customer invoice with payment allocations; unwind the allocating receipt(s)/credit note(s) first.",
+        );
+      }
+      if (!before.journalEntryId) {
+        throw new UnprocessableEntityException(
+          "This customer invoice has no posted journal entry to reverse.",
+        );
+      }
+
+      const original =
+        await this.journalEntries.lockAndValidateOriginalForReversal(
+          tx,
+          tenantId,
+          legalEntityId,
+          before.journalEntryId,
+        );
+
+      const transactionDate =
+        dto.transactionDate ?? new Date().toISOString().slice(0, 10);
+      const memo =
+        dto.memo ?? `Reversal of customer invoice ${before.internalReference}`;
+
+      const period = await resolveOpenPeriodOrThrow(
+        this.journalEntries,
+        tx,
+        tenantId,
+        legalEntityId,
+        transactionDate,
+      );
+
+      await this.journalEntries.completeReversalPosting(
+        tx,
+        tenantId,
+        legalEntityId,
+        actorUserId,
+        original,
+        period,
+        transactionDate,
+        memo,
+      );
+
+      const after = await this.findByIdInTx(tx, tenantId, legalEntityId, id);
+
+      await tx.insert(auditLogs).values({
+        tenantId,
+        legalEntityId,
+        actorUserId: actorUserId ?? undefined,
+        action: "REVERSE",
+        entityType: "customer_invoice",
+        entityId: id,
+        beforeState: before as unknown as Record<string, unknown>,
+        afterState: after as unknown as Record<string, unknown>,
+      });
+
+      const reversal = await resolveReversalInfo(tx, after!.journalEntryId);
+      return { ...after!, reversal };
     });
   }
 

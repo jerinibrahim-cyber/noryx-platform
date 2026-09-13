@@ -34,12 +34,24 @@ import {
   type CustomerReceiptAllocation,
 } from "../../db/schema";
 import { withTenant, type TxClient } from "../../db/db";
+import { JournalEntriesService } from "../../journal-entries/journal-entries.service";
+import type { ReverseJournalEntryDto } from "../../journal-entries/dto/reverse-journal-entry.dto";
+import {
+  resolveOpenPeriodOrThrow,
+  resolveReversalInfo,
+  unsettleTarget,
+  type ReversalInfo,
+} from "../../common/reversal/reversal.util";
 import type { CreateCustomerReceiptDto } from "./dto/create-customer-receipt.dto";
 import type { CreateCustomerReceiptAllocationDto } from "./dto/create-customer-receipt-allocation.dto";
 import type { UpdateCustomerReceiptDto } from "./dto/update-customer-receipt.dto";
 
 export type CustomerReceiptWithAllocations = CustomerReceipt & {
   allocations: CustomerReceiptAllocation[];
+};
+
+export type CustomerReceiptWithReversal = CustomerReceiptWithAllocations & {
+  reversal: ReversalInfo | null;
 };
 
 export interface ListCustomerReceiptsFilters {
@@ -87,6 +99,8 @@ export interface ListCustomerReceiptsFilters {
  */
 @Injectable()
 export class CustomerReceiptsService {
+  constructor(private readonly journalEntries: JournalEntriesService) {}
+
   async create(
     tenantId: string,
     legalEntityId: string,
@@ -192,13 +206,17 @@ export class CustomerReceiptsService {
     tenantId: string,
     legalEntityId: string,
     id: string,
-  ): Promise<CustomerReceiptWithAllocations> {
+  ): Promise<CustomerReceiptWithReversal> {
     return withTenant(tenantId, async (tx: TxClient) => {
       const found = await this.findByIdInTx(tx, tenantId, legalEntityId, id);
       if (!found) {
         throw new NotFoundException(`No customer receipt found with id ${id}.`);
       }
-      return found;
+      // Document-Level Reversal work item
+      // (docs/finance-work-item-document-reversal-proposal.md §17) —
+      // additive, computed field on single-document reads.
+      const reversal = await resolveReversalInfo(tx, found.journalEntryId);
+      return { ...found, reversal };
     });
   }
 
@@ -661,6 +679,150 @@ export class CustomerReceiptsService {
       ]);
 
       return after;
+    });
+  }
+
+  /**
+   * `POST /receipts/:id/reverse` — Document-Level Reversal for Posted
+   * AP & AR Documents work item
+   * (docs/finance-work-item-document-reversal-proposal.md §7/§9/§18,
+   * CTO-approved implementation authorization). Byte-mirror of
+   * SupplierPaymentsService.reverse() for the AR side: customer
+   * receipts are a "settlement" document (§7), never blocked, and
+   * unwind their own allocations against whatever invoices they settled
+   * via the shared `unsettleTarget()` helper — the mirror image of
+   * `post()`'s own step 14. Locks every allocated invoice first, in the
+   * same fixed ascending-id order `post()` itself uses.
+   */
+  async reverse(
+    tenantId: string,
+    legalEntityId: string,
+    actorUserId: string | null,
+    id: string,
+    dto: ReverseJournalEntryDto,
+  ): Promise<CustomerReceiptWithReversal> {
+    return withTenant(tenantId, async (tx: TxClient) => {
+      const before = await this.findByIdInTx(tx, tenantId, legalEntityId, id, {
+        forUpdate: true,
+      });
+      if (!before) {
+        throw new NotFoundException(`No customer receipt found with id ${id}.`);
+      }
+      if (before.status !== "POSTED") {
+        throw new UnprocessableEntityException(
+          "Only a posted customer receipt can be reversed.",
+        );
+      }
+      if (!before.journalEntryId) {
+        throw new UnprocessableEntityException(
+          "This customer receipt has no posted journal entry to reverse.",
+        );
+      }
+
+      const invoiceIds = before.allocations.map((a) => a.invoiceId);
+      const lockedInvoices = invoiceIds.length
+        ? await tx
+            .select()
+            .from(customerInvoices)
+            .where(
+              and(
+                inArray(customerInvoices.id, invoiceIds),
+                eq(customerInvoices.tenantId, tenantId),
+                eq(customerInvoices.legalEntityId, legalEntityId),
+              ),
+            )
+            .orderBy(asc(customerInvoices.id))
+            .for("update")
+        : [];
+      const invoicesById = new Map<string, CustomerInvoice>(
+        lockedInvoices.map((inv) => [inv.id, inv]),
+      );
+
+      const original =
+        await this.journalEntries.lockAndValidateOriginalForReversal(
+          tx,
+          tenantId,
+          legalEntityId,
+          before.journalEntryId,
+        );
+
+      const transactionDate =
+        dto.transactionDate ?? new Date().toISOString().slice(0, 10);
+      const memo =
+        dto.memo ?? `Reversal of customer receipt ${before.internalReference}`;
+
+      const period = await resolveOpenPeriodOrThrow(
+        this.journalEntries,
+        tx,
+        tenantId,
+        legalEntityId,
+        transactionDate,
+      );
+
+      await this.journalEntries.completeReversalPosting(
+        tx,
+        tenantId,
+        legalEntityId,
+        actorUserId,
+        original,
+        period,
+        transactionDate,
+        memo,
+      );
+
+      const invoiceAuditRows: {
+        tenantId: string;
+        legalEntityId: string;
+        actorUserId: string | undefined;
+        action: string;
+        entityType: string;
+        entityId: string;
+        beforeState: Record<string, unknown>;
+        afterState: Record<string, unknown>;
+      }[] = [];
+      for (const allocation of before.allocations) {
+        const invoice = invoicesById.get(allocation.invoiceId);
+        if (!invoice) {
+          throw new UnprocessableEntityException(
+            `Allocated invoice ${allocation.invoiceId} could not be found in this legal entity.`,
+          );
+        }
+        const updatedInvoice = await unsettleTarget(
+          tx,
+          customerInvoices,
+          invoice,
+          allocation.allocatedAmountMinor,
+        );
+        invoiceAuditRows.push({
+          tenantId,
+          legalEntityId,
+          actorUserId: actorUserId ?? undefined,
+          action: "UPDATE",
+          entityType: "customer_invoice",
+          entityId: invoice.id,
+          beforeState: invoice as unknown as Record<string, unknown>,
+          afterState: updatedInvoice as unknown as Record<string, unknown>,
+        });
+      }
+
+      const after = await this.findByIdInTx(tx, tenantId, legalEntityId, id);
+
+      await tx.insert(auditLogs).values([
+        {
+          tenantId,
+          legalEntityId,
+          actorUserId: actorUserId ?? undefined,
+          action: "REVERSE",
+          entityType: "customer_receipt",
+          entityId: id,
+          beforeState: before as unknown as Record<string, unknown>,
+          afterState: after as unknown as Record<string, unknown>,
+        },
+        ...invoiceAuditRows,
+      ]);
+
+      const reversal = await resolveReversalInfo(tx, after!.journalEntryId);
+      return { ...after!, reversal };
     });
   }
 

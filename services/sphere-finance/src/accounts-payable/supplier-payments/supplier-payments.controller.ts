@@ -22,6 +22,7 @@ import type { AuthenticatedRequestUser } from "@noryx/shared-types";
 import { SupplierPaymentsService } from "./supplier-payments.service";
 import { CreateSupplierPaymentDto } from "./dto/create-supplier-payment.dto";
 import { UpdateSupplierPaymentDto } from "./dto/update-supplier-payment.dto";
+import { ReverseJournalEntryDto } from "../../journal-entries/dto/reverse-journal-entry.dto";
 
 /**
  * docs/finance-work-item-1c-supplier-payments-proposal.md §10/§11.
@@ -129,5 +130,19 @@ export class SupplierPaymentsController {
       "Supplier payments require",
     );
     return this.payments.post(tenantId, legalEntityId, user.userId, id);
+  }
+
+  @Post(":id/reverse")
+  @Roles("finance.poster")
+  reverse(
+    @CurrentUser() user: AuthenticatedRequestUser,
+    @Param("id") id: string,
+    @Body() dto: ReverseJournalEntryDto,
+  ) {
+    const { tenantId, legalEntityId } = requireTenantContext(
+      user,
+      "Supplier payments require",
+    );
+    return this.payments.reverse(tenantId, legalEntityId, user.userId, id, dto);
   }
 }

@@ -1,6 +1,7 @@
 import { Module } from "@nestjs/common";
 import { AuthCoreModule } from "@noryx/auth-core";
 import { TaxConfigurationModule } from "../../tax-configuration/tax-configuration.module";
+import { JournalEntriesService } from "../../journal-entries/journal-entries.service";
 import { SupplierBillsController } from "./supplier-bills.controller";
 import { SupplierBillsService } from "./supplier-bills.service";
 
@@ -18,10 +19,21 @@ import { SupplierBillsService } from "./supplier-bills.service";
  * tax resolution is non-trivial, evolving business logic owned by its
  * own module, so it's consumed via DI here exactly as TaxRatesService
  * itself already consumes TaxCodesService.
+ *
+ * Document-Level Reversal work item
+ * (docs/finance-work-item-document-reversal-proposal.md §18, CTO-approved
+ * implementation authorization) — registers `JournalEntriesService` as a
+ * SECOND DI provider (not importing `JournalEntriesModule`), the exact
+ * same pattern `ScheduledReversalsModule` already established, so
+ * `SupplierBillsService.reverse()` can call
+ * `lockAndValidateOriginalForReversal()`/`completeReversalPosting()`/
+ * `resolvePeriodForDate()` directly within its own transaction. Safe for
+ * the identical reason: `JournalEntriesService` has no constructor-
+ * injected dependencies of its own.
  */
 @Module({
   imports: [AuthCoreModule, TaxConfigurationModule],
   controllers: [SupplierBillsController],
-  providers: [SupplierBillsService],
+  providers: [SupplierBillsService, JournalEntriesService],
 })
 export class SupplierBillsModule {}

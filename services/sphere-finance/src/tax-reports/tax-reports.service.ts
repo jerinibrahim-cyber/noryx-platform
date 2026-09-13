@@ -367,6 +367,15 @@ export class TaxReportsService {
     dateFrom: string,
     dateTo: string,
   ): Promise<RawCodeRow[]> {
+    // Document-Level Reversal work item
+    // (docs/finance-work-item-document-reversal-proposal.md §12/§23,
+    // CTO-approved implementation authorization) — any of the four
+    // tax-bearing document types can independently be reversed, and a
+    // reversed document stays status = 'POSTED' (§16), so it would
+    // otherwise still contribute its tax lines to this classified
+    // breakdown. Excluded via the same journal_entries.reversed_by_
+    // journal_entry_id linkage every other reversal-aware report query
+    // in this work item uses (ApReportsService/ArReportsService).
     const rows = (await tx.execute(sql`
       SELECT
         tc.id AS tax_code_id,
@@ -386,6 +395,11 @@ export class TaxReportsService {
         AND doc.${sql.raw(dateColumn)} >= ${dateFrom}::date
         AND doc.${sql.raw(dateColumn)} <= ${dateTo}::date
         AND ln.tax_code_id IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM journal_entries je
+          WHERE je.id = doc.journal_entry_id
+            AND je.reversed_by_journal_entry_id IS NOT NULL
+        )
       GROUP BY tc.id, tc.code, tc.name, tc.treatment
     `)) as unknown as RawCodeRow[];
     return rows;
@@ -406,6 +420,9 @@ export class TaxReportsService {
     dateFrom: string,
     dateTo: string,
   ): Promise<number> {
+    // Document-Level Reversal work item (§12/§23, CTO-approved) — same
+    // exclusion as `codeRows()` above, so the classified/unclassified
+    // reconciliation this total is checked against stays consistent.
     const rows = (await tx.execute(sql`
       SELECT COALESCE(SUM(ln.tax_amount_minor), 0) AS total_tax_minor
       FROM ${sql.raw(lineTable)} ln
@@ -416,6 +433,11 @@ export class TaxReportsService {
         AND doc.status = 'POSTED'
         AND doc.${sql.raw(dateColumn)} >= ${dateFrom}::date
         AND doc.${sql.raw(dateColumn)} <= ${dateTo}::date
+        AND NOT EXISTS (
+          SELECT 1 FROM journal_entries je
+          WHERE je.id = doc.journal_entry_id
+            AND je.reversed_by_journal_entry_id IS NOT NULL
+        )
     `)) as unknown as RawTotalsRow[];
     return this.toNumber(rows[0]?.total_tax_minor);
   }

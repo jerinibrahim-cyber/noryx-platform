@@ -1,5 +1,14 @@
 import { Injectable, NotFoundException } from "@nestjs/common";
-import { and, eq, gte, inArray, legalEntities, lte, sql } from "@noryx/db-core";
+import {
+  and,
+  eq,
+  gte,
+  inArray,
+  isNull,
+  legalEntities,
+  lte,
+  sql,
+} from "@noryx/db-core";
 import {
   arSettings,
   customers,
@@ -8,6 +17,7 @@ import {
   customerReceiptAllocations,
   customerCreditNotes,
   customerCreditNoteAllocations,
+  journalEntries,
   type ArSettings,
   type Customer,
 } from "../../db/schema";
@@ -494,6 +504,12 @@ export class ArReportsService {
           conditions.push(eq(customerInvoices.customerId, query.customerId));
         }
 
+        // Document-Level Reversal work item
+        // (docs/finance-work-item-document-reversal-proposal.md §12/§23,
+        // CTO-approved implementation authorization) — mirror of
+        // ApReportsService.getApAgeing()'s own fix: a reversed invoice
+        // stays status POSTED, so exclude it explicitly rather than
+        // let its full totalMinor leak into ageing buckets.
         const openInvoices = await tx
           .select({
             customerId: customerInvoices.customerId,
@@ -505,7 +521,13 @@ export class ArReportsService {
           })
           .from(customerInvoices)
           .innerJoin(customers, eq(customers.id, customerInvoices.customerId))
-          .where(and(...conditions));
+          .leftJoin(
+            journalEntries,
+            eq(journalEntries.id, customerInvoices.journalEntryId),
+          )
+          .where(
+            and(...conditions, isNull(journalEntries.reversedByJournalEntryId)),
+          );
 
         const byCustomer = new Map<
           string,
@@ -770,6 +792,8 @@ export class ArReportsService {
     const customerFilter = customerId
       ? sql`AND customer_id = ${customerId}`
       : sql``;
+    // Document-Level Reversal work item (proposal §12/§23, CTO-approved)
+    // — mirror of ApReportsService.currentTotals()'s own fix.
     const rows = (await tx.execute(sql`
       SELECT
         COALESCE(SUM(total_minor), 0) AS total_invoiced,
@@ -778,6 +802,11 @@ export class ArReportsService {
       WHERE tenant_id = ${tenantId}
         AND legal_entity_id = ${legalEntityId}
         AND status = 'POSTED'
+        AND NOT EXISTS (
+          SELECT 1 FROM journal_entries je
+          WHERE je.id = customer_invoices.journal_entry_id
+            AND je.reversed_by_journal_entry_id IS NOT NULL
+        )
         ${customerFilter}
     `)) as unknown as Array<{
       total_invoiced: unknown;
@@ -842,15 +871,29 @@ export class ArReportsService {
       ? sql`AND ccn.customer_id = ${customerId}`
       : sql``;
 
+    // Document-Level Reversal work item (proposal §12 point 5, §23,
+    // CTO-approved) — mirror of ApReportsService.asOfTotals()'s own
+    // bounded fix: an invoice reversed AFTER cutoffDate must still count
+    // toward this historical reconstruction; one reversed AT OR BEFORE
+    // cutoffDate must not. Same deliberate scoping (target document
+    // only, not the settlement-allocation subqueries below) and the
+    // same disclosed known limitation.
     const rows = (await tx.execute(sql`
       SELECT
         COALESCE((
           SELECT SUM(ci.total_minor)
           FROM customer_invoices ci
+          LEFT JOIN journal_entries je ON je.id = ci.journal_entry_id
+          LEFT JOIN journal_entries rev_je
+            ON rev_je.id = je.reversed_by_journal_entry_id
           WHERE ci.tenant_id = ${tenantId}
             AND ci.legal_entity_id = ${legalEntityId}
             AND ci.status = 'POSTED'
             AND ci.invoice_date ${cmp} ${cutoffDate}::date
+            AND (
+              je.reversed_by_journal_entry_id IS NULL
+              OR rev_je.transaction_date > ${cutoffDate}::date
+            )
             ${invoiceCustomerFilter}
         ), 0) AS total_invoiced,
         COALESCE((

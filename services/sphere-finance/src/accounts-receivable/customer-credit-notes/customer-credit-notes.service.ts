@@ -38,6 +38,14 @@ import {
 import { withTenant, type TxClient } from "../../db/db";
 import { TaxRatesService } from "../../tax-configuration/tax-rates.service";
 import { calculateTaxAmountMinor } from "../../tax-configuration/tax-calculation";
+import { JournalEntriesService } from "../../journal-entries/journal-entries.service";
+import type { ReverseJournalEntryDto } from "../../journal-entries/dto/reverse-journal-entry.dto";
+import {
+  resolveOpenPeriodOrThrow,
+  resolveReversalInfo,
+  unsettleTarget,
+  type ReversalInfo,
+} from "../../common/reversal/reversal.util";
 import type { CreateCustomerCreditNoteDto } from "./dto/create-customer-credit-note.dto";
 import type { CreateCustomerCreditNoteLineDto } from "./dto/create-customer-credit-note-line.dto";
 import type { CreateCustomerCreditNoteAllocationDto } from "./dto/create-customer-credit-note-allocation.dto";
@@ -46,6 +54,10 @@ import type { UpdateCustomerCreditNoteDto } from "./dto/update-customer-credit-n
 export type CustomerCreditNoteWithDetails = CustomerCreditNote & {
   lines: CustomerCreditNoteLine[];
   allocations: CustomerCreditNoteAllocation[];
+};
+
+export type CustomerCreditNoteWithReversal = CustomerCreditNoteWithDetails & {
+  reversal: ReversalInfo | null;
 };
 
 /** Tax/VAT Phase 3 — exact mirror of SupplierDebitNotesService's own
@@ -131,7 +143,10 @@ export interface ListCustomerCreditNotesFilters {
  */
 @Injectable()
 export class CustomerCreditNotesService {
-  constructor(private readonly taxRates: TaxRatesService) {}
+  constructor(
+    private readonly taxRates: TaxRatesService,
+    private readonly journalEntries: JournalEntriesService,
+  ) {}
 
   async create(
     tenantId: string,
@@ -263,7 +278,7 @@ export class CustomerCreditNotesService {
     tenantId: string,
     legalEntityId: string,
     id: string,
-  ): Promise<CustomerCreditNoteWithDetails> {
+  ): Promise<CustomerCreditNoteWithReversal> {
     return withTenant(tenantId, async (tx: TxClient) => {
       const found = await this.findByIdInTx(tx, tenantId, legalEntityId, id);
       if (!found) {
@@ -271,7 +286,11 @@ export class CustomerCreditNotesService {
           `No customer credit note found with id ${id}.`,
         );
       }
-      return found;
+      // Document-Level Reversal work item
+      // (docs/finance-work-item-document-reversal-proposal.md §17) —
+      // additive, computed field on single-document reads.
+      const reversal = await resolveReversalInfo(tx, found.journalEntryId);
+      return { ...found, reversal };
     });
   }
 
@@ -801,6 +820,153 @@ export class CustomerCreditNotesService {
       ]);
 
       return after;
+    });
+  }
+
+  /**
+   * `POST /credit-notes/:id/reverse` — Document-Level Reversal for
+   * Posted AP & AR Documents work item
+   * (docs/finance-work-item-document-reversal-proposal.md §7/§9/§18,
+   * CTO-approved implementation authorization). Byte-mirror of
+   * SupplierDebitNotesService.reverse() for the AR side: customer
+   * credit notes are a "settlement" document (§7), never blocked, and
+   * unwind their own allocations against whatever invoices they settled
+   * via the shared `unsettleTarget()` helper. Locks every allocated
+   * invoice first, in the same fixed ascending-id order `post()` itself
+   * uses.
+   */
+  async reverse(
+    tenantId: string,
+    legalEntityId: string,
+    actorUserId: string | null,
+    id: string,
+    dto: ReverseJournalEntryDto,
+  ): Promise<CustomerCreditNoteWithReversal> {
+    return withTenant(tenantId, async (tx: TxClient) => {
+      const before = await this.findByIdInTx(tx, tenantId, legalEntityId, id, {
+        forUpdate: true,
+      });
+      if (!before) {
+        throw new NotFoundException(
+          `No customer credit note found with id ${id}.`,
+        );
+      }
+      if (before.status !== "POSTED") {
+        throw new UnprocessableEntityException(
+          "Only a posted customer credit note can be reversed.",
+        );
+      }
+      if (!before.journalEntryId) {
+        throw new UnprocessableEntityException(
+          "This customer credit note has no posted journal entry to reverse.",
+        );
+      }
+
+      const invoiceIds = before.allocations.map((a) => a.invoiceId);
+      const lockedInvoices = invoiceIds.length
+        ? await tx
+            .select()
+            .from(customerInvoices)
+            .where(
+              and(
+                inArray(customerInvoices.id, invoiceIds),
+                eq(customerInvoices.tenantId, tenantId),
+                eq(customerInvoices.legalEntityId, legalEntityId),
+              ),
+            )
+            .orderBy(asc(customerInvoices.id))
+            .for("update")
+        : [];
+      const invoicesById = new Map<string, CustomerInvoice>(
+        lockedInvoices.map((inv) => [inv.id, inv]),
+      );
+
+      const original =
+        await this.journalEntries.lockAndValidateOriginalForReversal(
+          tx,
+          tenantId,
+          legalEntityId,
+          before.journalEntryId,
+        );
+
+      const transactionDate =
+        dto.transactionDate ?? new Date().toISOString().slice(0, 10);
+      const memo =
+        dto.memo ??
+        `Reversal of customer credit note ${before.internalReference}`;
+
+      const period = await resolveOpenPeriodOrThrow(
+        this.journalEntries,
+        tx,
+        tenantId,
+        legalEntityId,
+        transactionDate,
+      );
+
+      await this.journalEntries.completeReversalPosting(
+        tx,
+        tenantId,
+        legalEntityId,
+        actorUserId,
+        original,
+        period,
+        transactionDate,
+        memo,
+      );
+
+      const invoiceAuditRows: {
+        tenantId: string;
+        legalEntityId: string;
+        actorUserId: string | undefined;
+        action: string;
+        entityType: string;
+        entityId: string;
+        beforeState: Record<string, unknown>;
+        afterState: Record<string, unknown>;
+      }[] = [];
+      for (const allocation of before.allocations) {
+        const invoice = invoicesById.get(allocation.invoiceId);
+        if (!invoice) {
+          throw new UnprocessableEntityException(
+            `Allocated invoice ${allocation.invoiceId} could not be found in this legal entity.`,
+          );
+        }
+        const updatedInvoice = await unsettleTarget(
+          tx,
+          customerInvoices,
+          invoice,
+          allocation.allocatedAmountMinor,
+        );
+        invoiceAuditRows.push({
+          tenantId,
+          legalEntityId,
+          actorUserId: actorUserId ?? undefined,
+          action: "UPDATE",
+          entityType: "customer_invoice",
+          entityId: invoice.id,
+          beforeState: invoice as unknown as Record<string, unknown>,
+          afterState: updatedInvoice as unknown as Record<string, unknown>,
+        });
+      }
+
+      const after = await this.findByIdInTx(tx, tenantId, legalEntityId, id);
+
+      await tx.insert(auditLogs).values([
+        {
+          tenantId,
+          legalEntityId,
+          actorUserId: actorUserId ?? undefined,
+          action: "REVERSE",
+          entityType: "customer_credit_note",
+          entityId: id,
+          beforeState: before as unknown as Record<string, unknown>,
+          afterState: after as unknown as Record<string, unknown>,
+        },
+        ...invoiceAuditRows,
+      ]);
+
+      const reversal = await resolveReversalInfo(tx, after!.journalEntryId);
+      return { ...after!, reversal };
     });
   }
 

@@ -34,12 +34,23 @@ import {
 import { withTenant, type TxClient } from "../../db/db";
 import { TaxRatesService } from "../../tax-configuration/tax-rates.service";
 import { calculateTaxAmountMinor } from "../../tax-configuration/tax-calculation";
+import { JournalEntriesService } from "../../journal-entries/journal-entries.service";
+import type { ReverseJournalEntryDto } from "../../journal-entries/dto/reverse-journal-entry.dto";
+import {
+  resolveOpenPeriodOrThrow,
+  resolveReversalInfo,
+  type ReversalInfo,
+} from "../../common/reversal/reversal.util";
 import type { CreateSupplierBillDto } from "./dto/create-supplier-bill.dto";
 import type { CreateSupplierBillLineDto } from "./dto/create-supplier-bill-line.dto";
 import type { UpdateSupplierBillDto } from "./dto/update-supplier-bill.dto";
 
 export type SupplierBillWithLines = SupplierBill & {
   lines: SupplierBillLine[];
+};
+
+export type SupplierBillWithReversal = SupplierBillWithLines & {
+  reversal: ReversalInfo | null;
 };
 
 /** Tax/VAT Phase 2 — a line after tax resolution (discovery §3), ready
@@ -106,7 +117,10 @@ export interface ListSupplierBillsFilters {
  */
 @Injectable()
 export class SupplierBillsService {
-  constructor(private readonly taxRates: TaxRatesService) {}
+  constructor(
+    private readonly taxRates: TaxRatesService,
+    private readonly journalEntries: JournalEntriesService,
+  ) {}
 
   async create(
     tenantId: string,
@@ -230,13 +244,19 @@ export class SupplierBillsService {
     tenantId: string,
     legalEntityId: string,
     id: string,
-  ): Promise<SupplierBillWithLines> {
+  ): Promise<SupplierBillWithReversal> {
     return withTenant(tenantId, async (tx: TxClient) => {
       const found = await this.findByIdInTx(tx, tenantId, legalEntityId, id);
       if (!found) {
         throw new NotFoundException(`No supplier bill found with id ${id}.`);
       }
-      return found;
+      // Document-Level Reversal work item
+      // (docs/finance-work-item-document-reversal-proposal.md §17) —
+      // additive, computed field on single-document reads; never
+      // stored, always derived from journalEntryId ->
+      // journal_entries.reversedByJournalEntryId.
+      const reversal = await resolveReversalInfo(tx, found.journalEntryId);
+      return { ...found, reversal };
     });
   }
 
@@ -641,6 +661,120 @@ export class SupplierBillsService {
       ]);
 
       return after;
+    });
+  }
+
+  /**
+   * `POST /bills/:id/reverse` — Document-Level Reversal for Posted AP &
+   * AR Documents work item
+   * (docs/finance-work-item-document-reversal-proposal.md §7/§8/§18,
+   * CTO-approved implementation authorization). Supplier bills are a
+   * "target" document (§7): reversal is blocked while any payment
+   * allocation exists (`paidMinor > 0`) — unwind allocations first via
+   * the settlement document's own reversal, not here. Reversal state is
+   * never stored on the bill itself; it is always derived (§16) from
+   * this same `journalEntryId` -> `journal_entries.reversedByJournalEntryId`
+   * link that `post()` already establishes. The bill's own status stays
+   * POSTED — reversal only ever adds a second, opposite journal entry
+   * and links it, exactly as `JournalEntriesService.reverse()` already
+   * does for a bare journal entry.
+   *
+   * Reuses `JournalEntriesService.lockAndValidateOriginalForReversal()`
+   * and `completeReversalPosting()` directly (§15/§18 — no duplicated
+   * journal-reversal logic), plus this work item's own
+   * `resolveOpenPeriodOrThrow()` (the thin public wrapper over
+   * `resolvePeriodForDate()`, since the original's own
+   * `resolveAndLockOpenPeriod()` is private). Locks the bill row first
+   * (fixed lock order: own row, then the original journal entry via
+   * `lockAndValidateOriginalForReversal()`, then the reversal's covering
+   * period) — the same "lock the thing you're mutating before you lock
+   * anything downstream of it" ordering `post()` itself already uses.
+   */
+  async reverse(
+    tenantId: string,
+    legalEntityId: string,
+    actorUserId: string | null,
+    id: string,
+    dto: ReverseJournalEntryDto,
+  ): Promise<SupplierBillWithReversal> {
+    return withTenant(tenantId, async (tx: TxClient) => {
+      const before = await this.findByIdInTx(tx, tenantId, legalEntityId, id, {
+        forUpdate: true,
+      });
+      if (!before) {
+        throw new NotFoundException(`No supplier bill found with id ${id}.`);
+      }
+      if (before.status !== "POSTED") {
+        throw new UnprocessableEntityException(
+          "Only a posted supplier bill can be reversed.",
+        );
+      }
+      if (before.paidMinor > 0) {
+        throw new UnprocessableEntityException(
+          "Cannot reverse a supplier bill with payment allocations; unwind the allocating payment(s)/debit note(s) first.",
+        );
+      }
+      if (!before.journalEntryId) {
+        throw new UnprocessableEntityException(
+          "This supplier bill has no posted journal entry to reverse.",
+        );
+      }
+
+      // Lock + validate the original journal entry (exists, POSTED, not
+      // already reversed, not itself a reversal) — the same shared
+      // mechanism JournalEntriesService.reverse() and
+      // ScheduledReversalsService both already use.
+      const original =
+        await this.journalEntries.lockAndValidateOriginalForReversal(
+          tx,
+          tenantId,
+          legalEntityId,
+          before.journalEntryId,
+        );
+
+      const transactionDate =
+        dto.transactionDate ?? new Date().toISOString().slice(0, 10);
+      const memo =
+        dto.memo ?? `Reversal of supplier bill ${before.internalReference}`;
+
+      const period = await resolveOpenPeriodOrThrow(
+        this.journalEntries,
+        tx,
+        tenantId,
+        legalEntityId,
+        transactionDate,
+      );
+
+      await this.journalEntries.completeReversalPosting(
+        tx,
+        tenantId,
+        legalEntityId,
+        actorUserId,
+        original,
+        period,
+        transactionDate,
+        memo,
+      );
+
+      const after = await this.findByIdInTx(tx, tenantId, legalEntityId, id);
+
+      // The bill's own status/columns never change from reversal — the
+      // audit's before/after states are therefore the same row shape,
+      // documenting the event itself (the linkage), not a bill-side
+      // state transition.
+      await tx.insert(auditLogs).values({
+        tenantId,
+        legalEntityId,
+        actorUserId: actorUserId ?? undefined,
+        action: "REVERSE",
+        entityType: "supplier_bill",
+        entityId: id,
+        beforeState: before as unknown as Record<string, unknown>,
+        afterState: after as unknown as Record<string, unknown>,
+      });
+
+      const reversal = await resolveReversalInfo(tx, after!.journalEntryId);
+      return { ...after!, reversal };
     });
   }
 

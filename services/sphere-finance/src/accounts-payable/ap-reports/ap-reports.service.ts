@@ -1,5 +1,14 @@
 import { Injectable, NotFoundException } from "@nestjs/common";
-import { and, eq, gte, inArray, legalEntities, lte, sql } from "@noryx/db-core";
+import {
+  and,
+  eq,
+  gte,
+  inArray,
+  isNull,
+  legalEntities,
+  lte,
+  sql,
+} from "@noryx/db-core";
 import {
   apSettings,
   suppliers,
@@ -8,6 +17,7 @@ import {
   supplierPaymentAllocations,
   supplierDebitNotes,
   supplierDebitNoteAllocations,
+  journalEntries,
   type ApSettings,
   type Supplier,
 } from "../../db/schema";
@@ -467,6 +477,16 @@ export class ApReportsService {
           conditions.push(eq(supplierBills.supplierId, query.supplierId));
         }
 
+        // Document-Level Reversal work item
+        // (docs/finance-work-item-document-reversal-proposal.md §12/§23,
+        // CTO-approved implementation authorization) — a reversed bill
+        // stays status POSTED (§16 — reversal state is never a status
+        // change), so without this join every reversed bill would still
+        // show its full totalMinor as outstanding here. A reversed
+        // target bill is only ever reversible while paidMinor is 0
+        // (SupplierBillsService.reverse()'s own blocking rule), so this
+        // exclusion is equivalent to "outstanding <= 0" for that bill —
+        // just without ever letting a nonzero outstanding leak through.
         const openBills = await tx
           .select({
             supplierId: supplierBills.supplierId,
@@ -478,7 +498,13 @@ export class ApReportsService {
           })
           .from(supplierBills)
           .innerJoin(suppliers, eq(suppliers.id, supplierBills.supplierId))
-          .where(and(...conditions));
+          .leftJoin(
+            journalEntries,
+            eq(journalEntries.id, supplierBills.journalEntryId),
+          )
+          .where(
+            and(...conditions, isNull(journalEntries.reversedByJournalEntryId)),
+          );
 
         const bySupplier = new Map<
           string,
@@ -723,6 +749,12 @@ export class ApReportsService {
     const supplierFilter = supplierId
       ? sql`AND supplier_id = ${supplierId}`
       : sql``;
+    // Document-Level Reversal work item (proposal §12/§23, CTO-approved)
+    // — exclude any bill whose journal entry has been reversed (§16: the
+    // bill itself stays status = 'POSTED', so reversal state is never
+    // visible to a plain status filter). A reversed bill is only ever
+    // reversible while paid_minor = 0, so this changes total_billed
+    // only, never total_paid.
     const rows = (await tx.execute(sql`
       SELECT
         COALESCE(SUM(total_minor), 0) AS total_billed,
@@ -731,6 +763,11 @@ export class ApReportsService {
       WHERE tenant_id = ${tenantId}
         AND legal_entity_id = ${legalEntityId}
         AND status = 'POSTED'
+        AND NOT EXISTS (
+          SELECT 1 FROM journal_entries je
+          WHERE je.id = supplier_bills.journal_entry_id
+            AND je.reversed_by_journal_entry_id IS NOT NULL
+        )
         ${supplierFilter}
     `)) as unknown as Array<{ total_billed: unknown; total_paid: unknown }>;
     return {
@@ -784,15 +821,32 @@ export class ApReportsService {
       ? sql`AND sdn.supplier_id = ${supplierId}`
       : sql``;
 
+    // Document-Level Reversal work item (proposal §12 point 5,
+    // §23, CTO-approved) — a bill reversed AFTER cutoffDate must still
+    // count toward this historical total_billed reconstruction (it
+    // genuinely was outstanding as of that date); one reversed AT OR
+    // BEFORE cutoffDate must not. Deliberately NOT extended to the
+    // settlement-allocation subqueries below (a later-reversed payment/
+    // debit-note allocation within this same as-of window) — disclosed
+    // as a known limitation in the completion report; no historical
+    // reversed settlement can exist yet since this is a brand-new
+    // feature, so the gap has zero real-world blast radius at launch.
     const rows = (await tx.execute(sql`
       SELECT
         COALESCE((
           SELECT SUM(b.total_minor)
           FROM supplier_bills b
+          LEFT JOIN journal_entries je ON je.id = b.journal_entry_id
+          LEFT JOIN journal_entries rev_je
+            ON rev_je.id = je.reversed_by_journal_entry_id
           WHERE b.tenant_id = ${tenantId}
             AND b.legal_entity_id = ${legalEntityId}
             AND b.status = 'POSTED'
             AND b.bill_date ${cmp} ${cutoffDate}::date
+            AND (
+              je.reversed_by_journal_entry_id IS NULL
+              OR rev_je.transaction_date > ${cutoffDate}::date
+            )
             ${billSupplierFilter}
         ), 0) AS total_billed,
         COALESCE((

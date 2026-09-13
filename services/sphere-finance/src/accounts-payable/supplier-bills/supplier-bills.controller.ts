@@ -22,6 +22,7 @@ import type { AuthenticatedRequestUser } from "@noryx/shared-types";
 import { SupplierBillsService } from "./supplier-bills.service";
 import { CreateSupplierBillDto } from "./dto/create-supplier-bill.dto";
 import { UpdateSupplierBillDto } from "./dto/update-supplier-bill.dto";
+import { ReverseJournalEntryDto } from "../../journal-entries/dto/reverse-journal-entry.dto";
 
 /**
  * docs/finance-work-item-1b-supplier-bills-proposal.md §14/§16.
@@ -145,5 +146,19 @@ export class SupplierBillsController {
       "Supplier bills require",
     );
     return this.bills.post(tenantId, legalEntityId, user.userId, id);
+  }
+
+  @Post(":id/reverse")
+  @Roles("finance.poster")
+  reverse(
+    @CurrentUser() user: AuthenticatedRequestUser,
+    @Param("id") id: string,
+    @Body() dto: ReverseJournalEntryDto,
+  ) {
+    const { tenantId, legalEntityId } = requireTenantContext(
+      user,
+      "Supplier bills require",
+    );
+    return this.bills.reverse(tenantId, legalEntityId, user.userId, id, dto);
   }
 }

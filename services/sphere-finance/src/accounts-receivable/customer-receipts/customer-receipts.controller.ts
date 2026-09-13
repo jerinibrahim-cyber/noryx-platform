@@ -22,6 +22,7 @@ import type { AuthenticatedRequestUser } from "@noryx/shared-types";
 import { CustomerReceiptsService } from "./customer-receipts.service";
 import { CreateCustomerReceiptDto } from "./dto/create-customer-receipt.dto";
 import { UpdateCustomerReceiptDto } from "./dto/update-customer-receipt.dto";
+import { ReverseJournalEntryDto } from "../../journal-entries/dto/reverse-journal-entry.dto";
 
 /**
  * docs/finance-work-item-1c-customer-receipts-proposal.md §16/§18.
@@ -130,5 +131,19 @@ export class CustomerReceiptsController {
       "Customer receipts require",
     );
     return this.receipts.post(tenantId, legalEntityId, user.userId, id);
+  }
+
+  @Post(":id/reverse")
+  @Roles("finance.poster")
+  reverse(
+    @CurrentUser() user: AuthenticatedRequestUser,
+    @Param("id") id: string,
+    @Body() dto: ReverseJournalEntryDto,
+  ) {
+    const { tenantId, legalEntityId } = requireTenantContext(
+      user,
+      "Customer receipts require",
+    );
+    return this.receipts.reverse(tenantId, legalEntityId, user.userId, id, dto);
   }
 }

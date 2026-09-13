@@ -22,6 +22,7 @@ import type { AuthenticatedRequestUser } from "@noryx/shared-types";
 import { CustomerCreditNotesService } from "./customer-credit-notes.service";
 import { CreateCustomerCreditNoteDto } from "./dto/create-customer-credit-note.dto";
 import { UpdateCustomerCreditNoteDto } from "./dto/update-customer-credit-note.dto";
+import { ReverseJournalEntryDto } from "../../journal-entries/dto/reverse-journal-entry.dto";
 
 /**
  * docs/finance-work-item-credit-debit-notes-proposal.md §12/§13.
@@ -136,5 +137,25 @@ export class CustomerCreditNotesController {
       "Customer credit notes require",
     );
     return this.creditNotes.post(tenantId, legalEntityId, user.userId, id);
+  }
+
+  @Post(":id/reverse")
+  @Roles("finance.poster")
+  reverse(
+    @CurrentUser() user: AuthenticatedRequestUser,
+    @Param("id") id: string,
+    @Body() dto: ReverseJournalEntryDto,
+  ) {
+    const { tenantId, legalEntityId } = requireTenantContext(
+      user,
+      "Customer credit notes require",
+    );
+    return this.creditNotes.reverse(
+      tenantId,
+      legalEntityId,
+      user.userId,
+      id,
+      dto,
+    );
   }
 }

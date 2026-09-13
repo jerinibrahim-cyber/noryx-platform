@@ -22,6 +22,7 @@ import type { AuthenticatedRequestUser } from "@noryx/shared-types";
 import { CustomerInvoicesService } from "./customer-invoices.service";
 import { CreateCustomerInvoiceDto } from "./dto/create-customer-invoice.dto";
 import { UpdateCustomerInvoiceDto } from "./dto/update-customer-invoice.dto";
+import { ReverseJournalEntryDto } from "../../journal-entries/dto/reverse-journal-entry.dto";
 
 /**
  * docs/finance-work-item-ar-1b-customer-invoicing-proposal.md §5.
@@ -145,5 +146,19 @@ export class CustomerInvoicesController {
       "Customer invoices require",
     );
     return this.invoices.post(tenantId, legalEntityId, user.userId, id);
+  }
+
+  @Post(":id/reverse")
+  @Roles("finance.poster")
+  reverse(
+    @CurrentUser() user: AuthenticatedRequestUser,
+    @Param("id") id: string,
+    @Body() dto: ReverseJournalEntryDto,
+  ) {
+    const { tenantId, legalEntityId } = requireTenantContext(
+      user,
+      "Customer invoices require",
+    );
+    return this.invoices.reverse(tenantId, legalEntityId, user.userId, id, dto);
   }
 }
