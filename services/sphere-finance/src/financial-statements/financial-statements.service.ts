@@ -9,6 +9,7 @@ import {
 import { withTenant, type TxClient } from "../db/db";
 import type { ProfitAndLossQueryDto } from "./dto/profit-and-loss-query.dto";
 import type { BalanceSheetQueryDto } from "./dto/balance-sheet-query.dto";
+import type { CashFlowQueryDto } from "./dto/cash-flow-query.dto";
 
 /**
  * Financial Statements — Profit & Loss, Balance Sheet.
@@ -340,6 +341,266 @@ export class FinancialStatementsService {
             liabilitiesPlusEquityMinor,
             differenceMinor,
             reconciled: differenceMinor === 0,
+          },
+        };
+      },
+      undefined,
+      REPORT_TX_CONFIG,
+    );
+  }
+
+  // -------------------------------------------------------------------
+  // Cash Flow Statement (indirect method) — docs/finance-work-item-
+  // cash-flow-statement-proposal.md. A MOVEMENT statement, same DTO
+  // shape as Profit & Loss (no `asOf`). Approved architecture (proposal
+  // §5): account-level `cashFlowCategory` classification, gated by a
+  // computed, unstored, entry-level "reconciling vs. pure non-cash
+  // reclassification" eligibility test — an entry contributes to
+  // Operating/Investing/Financing only if at least one of its lines
+  // touches a cash account (§8) or a REVENUE/EXPENSE account; a pure
+  // non-cash reclassification entry (neither) contributes to none of
+  // the three and is instead surfaced in `nonCashReclassifications`
+  // (proposal §15.3, IAS 7.43). Proven in the proposal (§5.2) that
+  // excluding such entries changes nothing about the aggregate
+  // reconciling identity — both hard-failure checks below are therefore
+  // expected to always hold, exactly like Balance Sheet's own identity
+  // check, and are implemented the same way: `throw` rather than
+  // silently ship a wrong report.
+  // -------------------------------------------------------------------
+  async getCashFlow(
+    tenantId: string,
+    legalEntityId: string,
+    query: CashFlowQueryDto,
+  ): Promise<CashFlowResult> {
+    return withTenant(
+      tenantId,
+      async (tx: TxClient) => {
+        let dateFrom: string | null;
+        let dateTo: string;
+        let periodId: string | null;
+        if (query.periodId) {
+          const period = await this.resolvePeriodInScope(
+            tx,
+            tenantId,
+            legalEntityId,
+            query.periodId,
+          );
+          dateFrom = period.startDate;
+          dateTo = period.endDate;
+          periodId = period.id;
+        } else {
+          dateFrom = query.dateFrom ?? null;
+          dateTo = query.dateTo ?? this.todayUtc();
+          periodId = null;
+        }
+
+        // §5's cash-account identification (proposal §8) — ALL
+        // bank_cash_accounts rows for the legal entity, regardless of
+        // `isActive` (a reversible toggle, not a deletion — filtering on
+        // it would silently drop real historical cash movement from any
+        // window predating a deactivation, proposal §8).
+        const cashAccountIds = await this.fetchCashAccountIds(
+          tx,
+          tenantId,
+          legalEntityId,
+        );
+
+        // Opening/closing cash are independently queried (not merely
+        // derived by addition) so the identity check below is a genuine
+        // cross-check, matching Balance Sheet's own independent-query
+        // identity pattern rather than a tautology.
+        const openingCashMinor = dateFrom
+          ? await this.fetchCashTotalBefore(
+              tx,
+              tenantId,
+              legalEntityId,
+              cashAccountIds,
+              dateFrom,
+            )
+          : 0;
+        const netCashMovementMinor = await this.fetchCashTotalWithinRange(
+          tx,
+          tenantId,
+          legalEntityId,
+          cashAccountIds,
+          dateFrom,
+          dateTo,
+        );
+        const closingCashMinor = await this.fetchCashTotalAsOf(
+          tx,
+          tenantId,
+          legalEntityId,
+          cashAccountIds,
+          dateTo,
+        );
+
+        if (openingCashMinor + netCashMovementMinor !== closingCashMinor) {
+          throw new Error(
+            `Cash Flow Statement failed to reconcile: opening cash (${openingCashMinor}) + net cash movement (${netCashMovementMinor}) != closing cash (${closingCashMinor}). This should be impossible given the DB balance-invariant trigger — surfacing as a hard failure rather than returning a wrong report.`,
+          );
+        }
+
+        // Net income — reused exactly, unrestricted (proposal §5.1: any
+        // entry touching REVENUE/EXPENSE is automatically a reconciling
+        // entry, so no additional filtering is needed or correct here).
+        const revenueRows = await this.fetchTypeBalancesWithinRange(
+          tx,
+          tenantId,
+          legalEntityId,
+          "REVENUE",
+          dateFrom,
+          dateTo,
+        );
+        const expenseRows = await this.fetchTypeBalancesWithinRange(
+          tx,
+          tenantId,
+          legalEntityId,
+          "EXPENSE",
+          dateFrom,
+          dateTo,
+        );
+        const netIncomeMinor =
+          this.sumOwnBalance(revenueRows) - this.sumOwnBalance(expenseRows);
+
+        // Working-capital movement per non-cash ASSET/LIABILITY/EQUITY
+        // account, restricted to reconciling entries (proposal §5.1/§17).
+        const workingCapitalRows = await this.fetchCashFlowWorkingCapital(
+          tx,
+          tenantId,
+          legalEntityId,
+          cashAccountIds,
+          dateFrom,
+          dateTo,
+        );
+
+        let operatingMinor = netIncomeMinor;
+        let investingMinor = 0;
+        let financingMinor = 0;
+        let unclassifiedMinor = 0;
+        const unclassifiedAccounts: CashFlowUnclassifiedAccount[] = [];
+        for (const row of workingCapitalRows) {
+          // contribution(a) = -signedDelta for ASSET, +signedDelta for
+          // LIABILITY/EQUITY — algebraically equal to (credit - debit)
+          // uniformly across all three types (proposal's `contribution()`
+          // formula, simplified: sign(ASSET)=+1 so -signedDelta =
+          // -(debit-credit) = credit-debit; sign(LIABILITY/EQUITY)=-1 so
+          // +signedDelta = -(debit-credit) = credit-debit too).
+          const contribution =
+            row.reconcilingCreditMinor - row.reconcilingDebitMinor;
+          switch (row.cashFlowCategory) {
+            case "OPERATING":
+              operatingMinor += contribution;
+              break;
+            case "INVESTING":
+              investingMinor += contribution;
+              break;
+            case "FINANCING":
+              financingMinor += contribution;
+              break;
+            default:
+              unclassifiedMinor += contribution;
+              if (contribution !== 0) {
+                unclassifiedAccounts.push({
+                  accountId: row.accountId,
+                  code: row.accountCode,
+                  name: row.accountName,
+                  type: row.accountType,
+                  movementMinor: contribution,
+                });
+              }
+          }
+        }
+        unclassifiedAccounts.sort(
+          (a, b) => Math.abs(b.movementMinor) - Math.abs(a.movementMinor),
+        );
+
+        const bucketSumMinor =
+          operatingMinor + investingMinor + financingMinor + unclassifiedMinor;
+        if (bucketSumMinor !== netCashMovementMinor) {
+          throw new Error(
+            `Cash Flow Statement failed to reconcile: Operating (${operatingMinor}) + Investing (${investingMinor}) + Financing (${financingMinor}) + Unclassified (${unclassifiedMinor}) = ${bucketSumMinor} != net cash movement (${netCashMovementMinor}). This should be impossible given the reconciling-entry construction (proposal §5.2) — surfacing as a hard failure rather than returning a wrong report.`,
+          );
+        }
+
+        // Non-cash reclassifications (proposal §5.1/§15.3, IAS 7.43) —
+        // the itemized disclosure of every pure non-cash reclassification
+        // entry's lines, excluded from all four buckets above.
+        const reclassLines = await this.fetchNonCashReclassificationLines(
+          tx,
+          tenantId,
+          legalEntityId,
+          cashAccountIds,
+          dateFrom,
+          dateTo,
+        );
+        const entriesByJournalEntryId = new Map<
+          string,
+          CashFlowNonCashReclassificationEntry
+        >();
+        let reclassNetSumMinor = 0;
+        let reclassGrossAbsSumMinor = 0;
+        for (const line of reclassLines) {
+          const amountMinor = line.creditMinor - line.debitMinor;
+          reclassNetSumMinor += amountMinor;
+          reclassGrossAbsSumMinor += Math.abs(amountMinor);
+          let entry = entriesByJournalEntryId.get(line.journalEntryId);
+          if (!entry) {
+            entry = {
+              journalEntryId: line.journalEntryId,
+              journalNumber: line.journalNumber,
+              transactionDate: line.transactionDate,
+              lines: [],
+            };
+            entriesByJournalEntryId.set(line.journalEntryId, entry);
+          }
+          entry.lines.push({
+            accountId: line.accountId,
+            code: line.accountCode,
+            name: line.accountName,
+            type: line.accountType,
+            cashFlowCategory: line.cashFlowCategory,
+            amountMinor,
+          });
+        }
+
+        // §5.2's proof, checked defensively at runtime (proposal §13) —
+        // every pure non-cash reclassification entry's own lines sum to
+        // exactly zero by construction (the entry balances and touches
+        // no cash/income account), so the total across every such entry
+        // in the window must also be exactly zero. A nonzero result here
+        // indicates the query itself is miswritten, not a business
+        // condition — same "should be impossible, surface loudly"
+        // convention as every other identity check in this file.
+        if (reclassNetSumMinor !== 0) {
+          throw new Error(
+            `Non-cash reclassifications failed to net to zero: total (${reclassNetSumMinor}). This should be impossible by construction (proposal §5.2) — surfacing as a hard failure rather than returning a wrong report.`,
+          );
+        }
+
+        return {
+          dateFrom,
+          dateTo,
+          periodId,
+          legalEntityId,
+          openingCashMinor,
+          netCashMovementMinor,
+          closingCashMinor,
+          operatingMinor,
+          investingMinor,
+          financingMinor,
+          unclassifiedMinor,
+          hasUnclassifiedAccounts: unclassifiedAccounts.length > 0,
+          unclassifiedAccountCount: unclassifiedAccounts.length,
+          unclassifiedAccounts,
+          reconciled: true,
+          nonCashReclassifications: {
+            // Each dollar of a reclassification appears once on each
+            // (paired) side of the entries that make it up (proposal
+            // §15.3) — dividing the summed absolute contribution by 2
+            // yields the at-a-glance magnitude figure without double-
+            // counting the two legs of the same reclassification.
+            totalGrossMinor: reclassGrossAbsSumMinor / 2,
+            entries: Array.from(entriesByJournalEntryId.values()),
           },
         };
       },
@@ -703,6 +964,313 @@ export class FinancialStatementsService {
     }>;
     return this.mapRawRows(raw, type);
   }
+
+  // ---------------------------------------------------------------------
+  // Cash Flow Statement helpers — docs/finance-work-item-cash-flow-
+  // statement-proposal.md §5/§8/§17.
+  // ---------------------------------------------------------------------
+
+  /** §8 — the authoritative set of cash/bank GL account ids for a legal
+   * entity: every `bank_cash_accounts` row's `glAccountId`, regardless of
+   * `isActive` (a reversible toggle, not a deletion — filtering on it
+   * would silently drop real historical cash movement from any window
+   * predating a deactivation). `bank_cash_accounts_gl_account_unique`
+   * guarantees this is a clean set, never ambiguous. */
+  private async fetchCashAccountIds(
+    tx: TxClient,
+    tenantId: string,
+    legalEntityId: string,
+  ): Promise<string[]> {
+    const raw = (await tx.execute(sql`
+      SELECT DISTINCT gl_account_id AS account_id
+      FROM bank_cash_accounts
+      WHERE tenant_id = ${tenantId} AND legal_entity_id = ${legalEntityId}
+    `)) as unknown as Array<{ account_id: string }>;
+    return raw.map((r) => r.account_id);
+  }
+
+  /** Builds a `uuid[]`-typed SQL fragment from `cashAccountIds`, safe to
+   * splice directly into `ANY(...)`/set-membership predicates below.
+   *
+   * NOT `sql\`${cashAccountIds}::uuid[]\`` — drizzle-orm's postgres.js
+   * driver does not serialize a plain JS array parameter as a Postgres
+   * array literal the way the `postgres` package's OWN tagged-template
+   * does; passed through `db.execute()` it instead reaches Postgres as
+   * an anonymous composite (`record`), and `record::uuid[]` is not a
+   * valid cast — every call site that did this failed at the database
+   * with `cannot cast type record to uuid[]` (caught during this work
+   * item's own e2e verification, fixed here). Building the array
+   * explicitly via `ARRAY[$1::uuid, $2::uuid, ...]` (through
+   * `sql.join`) sidesteps the driver's array-serialization gap
+   * entirely — each element is bound as an ordinary scalar parameter,
+   * which the driver already serializes correctly. An empty
+   * `cashAccountIds` (a legal entity with zero configured Bank/Cash
+   * Accounts) needs its own explicit `ARRAY[]::uuid[]` literal —
+   * `ARRAY[]` with no elements has no type Postgres can infer on its
+   * own. */
+  private cashAccountIdsFragment(cashAccountIds: string[]) {
+    if (cashAccountIds.length === 0) {
+      return sql`ARRAY[]::uuid[]`;
+    }
+    return sql`ARRAY[${sql.join(
+      cashAccountIds.map((id) => sql`${id}::uuid`),
+      sql`, `,
+    )}]`;
+  }
+
+  /** Aggregate cash movement across every id in `cashAccountIds`,
+   * strictly before `beforeDate` — the exact `fetchTypeBalancesBefore`
+   * query shape, generalized from "every account of a type" to "every
+   * account in an explicit id set." Cash/bank accounts are always
+   * `ASSET`-typed (validated at `bank_cash_accounts` create/update time),
+   * so the sign is unconditionally `+1` (debit-normal) — no per-row
+   * `signFor` branching is needed here, unlike `fetchTypeBalancesBefore`. */
+  private async fetchCashTotalBefore(
+    tx: TxClient,
+    tenantId: string,
+    legalEntityId: string,
+    cashAccountIds: string[],
+    beforeDate: string,
+  ): Promise<number> {
+    const raw = (await tx.execute(sql`
+      SELECT COALESCE(SUM(jl.debit_minor), 0) AS raw_debit,
+             COALESCE(SUM(jl.credit_minor), 0) AS raw_credit
+      FROM journal_lines jl
+      INNER JOIN journal_entries je ON je.id = jl.journal_entry_id
+      WHERE jl.tenant_id = ${tenantId}
+        AND je.tenant_id = ${tenantId}
+        AND je.legal_entity_id = ${legalEntityId}
+        AND je.status = 'POSTED'
+        AND jl.account_id = ANY(${this.cashAccountIdsFragment(cashAccountIds)})
+        AND je.transaction_date < ${beforeDate}::date
+    `)) as unknown as Array<{ raw_debit: unknown; raw_credit: unknown }>;
+    return this.toNumber(raw[0]?.raw_debit) - this.toNumber(raw[0]?.raw_credit);
+  }
+
+  /** Aggregate cash movement across `cashAccountIds`, within the
+   * inclusive `[dateFrom, dateTo]` window (`dateFrom` may be null —
+   * "from account inception") — the exact `fetchTypeBalancesWithinRange`
+   * query shape, generalized to an explicit id set. */
+  private async fetchCashTotalWithinRange(
+    tx: TxClient,
+    tenantId: string,
+    legalEntityId: string,
+    cashAccountIds: string[],
+    dateFrom: string | null,
+    dateTo: string,
+  ): Promise<number> {
+    const lowerBound = dateFrom
+      ? sql`AND je.transaction_date >= ${dateFrom}::date`
+      : sql``;
+    const raw = (await tx.execute(sql`
+      SELECT COALESCE(SUM(jl.debit_minor), 0) AS raw_debit,
+             COALESCE(SUM(jl.credit_minor), 0) AS raw_credit
+      FROM journal_lines jl
+      INNER JOIN journal_entries je ON je.id = jl.journal_entry_id
+      WHERE jl.tenant_id = ${tenantId}
+        AND je.tenant_id = ${tenantId}
+        AND je.legal_entity_id = ${legalEntityId}
+        AND je.status = 'POSTED'
+        AND jl.account_id = ANY(${this.cashAccountIdsFragment(cashAccountIds)})
+        ${lowerBound}
+        AND je.transaction_date <= ${dateTo}::date
+    `)) as unknown as Array<{ raw_debit: unknown; raw_credit: unknown }>;
+    return this.toNumber(raw[0]?.raw_debit) - this.toNumber(raw[0]?.raw_credit);
+  }
+
+  /** Aggregate cash movement across `cashAccountIds`, cumulative (no
+   * lower bound) through `asOf` inclusive — the exact
+   * `fetchTypeBalancesAsOf` query shape, generalized to an explicit id
+   * set. Used for `closingCashMinor`, independently of
+   * `openingCashMinor + netCashMovementMinor`, so the identity check in
+   * `getCashFlow` is a genuine cross-check (matching Balance Sheet's own
+   * independent-query identity), not a tautology. */
+  private async fetchCashTotalAsOf(
+    tx: TxClient,
+    tenantId: string,
+    legalEntityId: string,
+    cashAccountIds: string[],
+    asOf: string,
+  ): Promise<number> {
+    const raw = (await tx.execute(sql`
+      SELECT COALESCE(SUM(jl.debit_minor), 0) AS raw_debit,
+             COALESCE(SUM(jl.credit_minor), 0) AS raw_credit
+      FROM journal_lines jl
+      INNER JOIN journal_entries je ON je.id = jl.journal_entry_id
+      WHERE jl.tenant_id = ${tenantId}
+        AND je.tenant_id = ${tenantId}
+        AND je.legal_entity_id = ${legalEntityId}
+        AND je.status = 'POSTED'
+        AND jl.account_id = ANY(${this.cashAccountIdsFragment(cashAccountIds)})
+        AND je.transaction_date <= ${asOf}::date
+    `)) as unknown as Array<{ raw_debit: unknown; raw_credit: unknown }>;
+    return this.toNumber(raw[0]?.raw_debit) - this.toNumber(raw[0]?.raw_credit);
+  }
+
+  /** Proposal §5.1/§17 — per non-cash ASSET/LIABILITY/EQUITY account,
+   * within `[dateFrom, dateTo]`, the debit/credit sum restricted to
+   * lines belonging to a "reconciling entry" (has ≥1 cash line, per
+   * `cashAccountIds`, or ≥1 REVENUE/EXPENSE line) — lines belonging to a
+   * pure non-cash reclassification entry are excluded here (they are
+   * fetched separately by `fetchNonCashReclassificationLines`). One
+   * additional CTE pass over the same window's `journal_lines` rows
+   * already being scanned (§17's performance analysis) — not a new
+   * per-account re-scan. `entry_flags` computes, once per journal entry
+   * in the window, whether it has a cash line and/or an income line;
+   * the outer query then sums only the lines of entries where at least
+   * one of those is true, via `FILTER`. */
+  private async fetchCashFlowWorkingCapital(
+    tx: TxClient,
+    tenantId: string,
+    legalEntityId: string,
+    cashAccountIds: string[],
+    dateFrom: string | null,
+    dateTo: string,
+  ): Promise<CashFlowWorkingCapitalRow[]> {
+    const lowerBound = dateFrom
+      ? sql`AND je.transaction_date >= ${dateFrom}::date`
+      : sql``;
+    const raw = (await tx.execute(sql`
+      WITH window_lines AS (
+        SELECT jl.journal_entry_id, jl.account_id, jl.debit_minor, jl.credit_minor
+        FROM journal_lines jl
+        INNER JOIN journal_entries je ON je.id = jl.journal_entry_id
+        WHERE jl.tenant_id = ${tenantId}
+          AND je.tenant_id = ${tenantId}
+          AND je.legal_entity_id = ${legalEntityId}
+          AND je.status = 'POSTED'
+          ${lowerBound}
+          AND je.transaction_date <= ${dateTo}::date
+      ),
+      entry_flags AS (
+        SELECT wl.journal_entry_id,
+               BOOL_OR(wl.account_id = ANY(${this.cashAccountIdsFragment(cashAccountIds)})) AS has_cash_line,
+               BOOL_OR(coa.type IN ('REVENUE', 'EXPENSE')) AS has_income_line
+        FROM window_lines wl
+        INNER JOIN chart_of_accounts coa ON coa.id = wl.account_id
+        GROUP BY wl.journal_entry_id
+      )
+      SELECT
+        coa.id AS account_id,
+        coa.code AS account_code,
+        coa.name AS account_name,
+        coa.type AS account_type,
+        coa.cash_flow_category AS cash_flow_category,
+        COALESCE(SUM(wl.debit_minor) FILTER (WHERE ef.has_cash_line OR ef.has_income_line), 0) AS reconciling_debit,
+        COALESCE(SUM(wl.credit_minor) FILTER (WHERE ef.has_cash_line OR ef.has_income_line), 0) AS reconciling_credit
+      FROM chart_of_accounts coa
+      LEFT JOIN window_lines wl ON wl.account_id = coa.id
+      LEFT JOIN entry_flags ef ON ef.journal_entry_id = wl.journal_entry_id
+      WHERE coa.tenant_id = ${tenantId}
+        AND coa.legal_entity_id = ${legalEntityId}
+        AND coa.type IN ('ASSET', 'LIABILITY', 'EQUITY')
+        AND NOT (coa.id = ANY(${this.cashAccountIdsFragment(cashAccountIds)}))
+      GROUP BY coa.id, coa.code, coa.name, coa.type, coa.cash_flow_category
+      ORDER BY coa.code ASC
+    `)) as unknown as Array<{
+      account_id: string;
+      account_code: string;
+      account_name: string;
+      account_type: ChartOfAccount["type"];
+      cash_flow_category: "OPERATING" | "INVESTING" | "FINANCING" | null;
+      reconciling_debit: unknown;
+      reconciling_credit: unknown;
+    }>;
+    return raw.map((r) => ({
+      accountId: r.account_id,
+      accountCode: r.account_code,
+      accountName: r.account_name,
+      accountType: r.account_type,
+      cashFlowCategory: r.cash_flow_category,
+      reconcilingDebitMinor: this.toNumber(r.reconciling_debit),
+      reconcilingCreditMinor: this.toNumber(r.reconciling_credit),
+    }));
+  }
+
+  /** Proposal §5.1/§15.3 — every line of every pure non-cash
+   * reclassification entry (zero cash lines, zero REVENUE/EXPENSE lines)
+   * within `[dateFrom, dateTo]`, for the itemized `nonCashReclassifications`
+   * disclosure. Same `entry_flags` CTE shape as
+   * `fetchCashFlowWorkingCapital`, but selecting the OPPOSITE entry set
+   * (`NOT has_cash_line AND NOT has_income_line`) and every line of each
+   * (not just ASSET/LIABILITY/EQUITY lines summed per account — by
+   * definition a pure reclassification entry has no REVENUE/EXPENSE or
+   * cash lines to exclude anyway). */
+  private async fetchNonCashReclassificationLines(
+    tx: TxClient,
+    tenantId: string,
+    legalEntityId: string,
+    cashAccountIds: string[],
+    dateFrom: string | null,
+    dateTo: string,
+  ): Promise<CashFlowReclassificationRawLine[]> {
+    const lowerBound = dateFrom
+      ? sql`AND je.transaction_date >= ${dateFrom}::date`
+      : sql``;
+    const raw = (await tx.execute(sql`
+      WITH window_entries AS (
+        SELECT je.id, je.journal_number, je.transaction_date
+        FROM journal_entries je
+        WHERE je.tenant_id = ${tenantId}
+          AND je.legal_entity_id = ${legalEntityId}
+          AND je.status = 'POSTED'
+          ${lowerBound}
+          AND je.transaction_date <= ${dateTo}::date
+      ),
+      entry_flags AS (
+        SELECT jl.journal_entry_id,
+               BOOL_OR(jl.account_id = ANY(${this.cashAccountIdsFragment(cashAccountIds)})) AS has_cash_line,
+               BOOL_OR(coa.type IN ('REVENUE', 'EXPENSE')) AS has_income_line
+        FROM journal_lines jl
+        INNER JOIN window_entries we ON we.id = jl.journal_entry_id
+        INNER JOIN chart_of_accounts coa ON coa.id = jl.account_id
+        WHERE jl.tenant_id = ${tenantId}
+        GROUP BY jl.journal_entry_id
+      )
+      SELECT
+        we.id AS journal_entry_id,
+        we.journal_number,
+        we.transaction_date,
+        jl.account_id,
+        coa.code AS account_code,
+        coa.name AS account_name,
+        coa.type AS account_type,
+        coa.cash_flow_category AS cash_flow_category,
+        jl.debit_minor,
+        jl.credit_minor
+      FROM entry_flags ef
+      INNER JOIN window_entries we ON we.id = ef.journal_entry_id
+      INNER JOIN journal_lines jl ON jl.journal_entry_id = ef.journal_entry_id
+      INNER JOIN chart_of_accounts coa ON coa.id = jl.account_id
+      WHERE ef.has_cash_line = false
+        AND ef.has_income_line = false
+        AND jl.tenant_id = ${tenantId}
+      ORDER BY we.transaction_date ASC, we.journal_number ASC, jl.line_number ASC
+    `)) as unknown as Array<{
+      journal_entry_id: string;
+      journal_number: string | null;
+      transaction_date: string;
+      account_id: string;
+      account_code: string;
+      account_name: string;
+      account_type: ChartOfAccount["type"];
+      cash_flow_category: "OPERATING" | "INVESTING" | "FINANCING" | null;
+      debit_minor: unknown;
+      credit_minor: unknown;
+    }>;
+    return raw.map((r) => ({
+      journalEntryId: r.journal_entry_id,
+      journalNumber: r.journal_number,
+      transactionDate: r.transaction_date,
+      accountId: r.account_id,
+      accountCode: r.account_code,
+      accountName: r.account_name,
+      accountType: r.account_type,
+      cashFlowCategory: r.cash_flow_category,
+      debitMinor: this.toNumber(r.debit_minor),
+      creditMinor: this.toNumber(r.credit_minor),
+    }));
+  }
 }
 
 // ---------------------------------------------------------------------
@@ -772,4 +1340,80 @@ export interface BalanceSheetResult {
   liabilities: StatementSection;
   equity: BalanceSheetEquitySection;
   identity: BalanceSheetIdentity;
+}
+
+// ---------------------------------------------------------------------
+// Cash Flow Statement result shapes — docs/finance-work-item-cash-flow-
+// statement-proposal.md §15.2.
+// ---------------------------------------------------------------------
+
+interface CashFlowWorkingCapitalRow {
+  accountId: string;
+  accountCode: string;
+  accountName: string;
+  accountType: ChartOfAccount["type"];
+  cashFlowCategory: "OPERATING" | "INVESTING" | "FINANCING" | null;
+  reconcilingDebitMinor: number;
+  reconcilingCreditMinor: number;
+}
+
+interface CashFlowReclassificationRawLine {
+  journalEntryId: string;
+  journalNumber: string | null;
+  transactionDate: string;
+  accountId: string;
+  accountCode: string;
+  accountName: string;
+  accountType: ChartOfAccount["type"];
+  cashFlowCategory: "OPERATING" | "INVESTING" | "FINANCING" | null;
+  debitMinor: number;
+  creditMinor: number;
+}
+
+export interface CashFlowUnclassifiedAccount {
+  accountId: string;
+  code: string;
+  name: string;
+  type: ChartOfAccount["type"];
+  movementMinor: number;
+}
+
+export interface CashFlowReclassificationLine {
+  accountId: string;
+  code: string;
+  name: string;
+  type: ChartOfAccount["type"];
+  cashFlowCategory: "OPERATING" | "INVESTING" | "FINANCING" | null;
+  amountMinor: number;
+}
+
+export interface CashFlowNonCashReclassificationEntry {
+  journalEntryId: string;
+  journalNumber: string | null;
+  transactionDate: string;
+  lines: CashFlowReclassificationLine[];
+}
+
+export interface CashFlowNonCashReclassifications {
+  totalGrossMinor: number;
+  entries: CashFlowNonCashReclassificationEntry[];
+}
+
+export interface CashFlowResult {
+  dateFrom: string | null;
+  dateTo: string;
+  periodId: string | null;
+  legalEntityId: string;
+  openingCashMinor: number;
+  netCashMovementMinor: number;
+  closingCashMinor: number;
+  operatingMinor: number;
+  investingMinor: number;
+  financingMinor: number;
+  unclassifiedMinor: number;
+  hasUnclassifiedAccounts: boolean;
+  unclassifiedAccountCount: number;
+  unclassifiedAccounts: CashFlowUnclassifiedAccount[];
+  reconciled: boolean;
+  nonCashReclassifications: CashFlowNonCashReclassifications;
 }

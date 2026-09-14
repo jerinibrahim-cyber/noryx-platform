@@ -10,6 +10,7 @@ import type { AuthenticatedRequestUser } from "@noryx/shared-types";
 import { FinancialStatementsService } from "./financial-statements.service";
 import { ProfitAndLossQueryDto } from "./dto/profit-and-loss-query.dto";
 import { BalanceSheetQueryDto } from "./dto/balance-sheet-query.dto";
+import { CashFlowQueryDto } from "./dto/cash-flow-query.dto";
 
 /**
  * Financial Statements — Profit & Loss, Balance Sheet.
@@ -57,5 +58,18 @@ export class FinancialStatementsController {
       "the balance sheet requires",
     );
     return this.statements.getBalanceSheet(tenantId, legalEntityId, query);
+  }
+
+  @Get("financial-statements/cash-flow")
+  @Roles("finance.viewer", "finance.poster", "finance.admin")
+  cashFlow(
+    @CurrentUser() user: AuthenticatedRequestUser,
+    @Query() query: CashFlowQueryDto,
+  ) {
+    const { tenantId, legalEntityId } = requireTenantContext(
+      user,
+      "the cash flow statement requires",
+    );
+    return this.statements.getCashFlow(tenantId, legalEntityId, query);
   }
 }

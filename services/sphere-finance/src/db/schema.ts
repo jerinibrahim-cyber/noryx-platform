@@ -57,6 +57,23 @@ export const accountTypeEnum = pgEnum("account_type", [
   "EXPENSE",
 ]);
 
+/// Cash Flow Statement work item (docs/finance-work-item-cash-flow-
+/// statement-proposal.md §5, §16) — nullable, no default. NULL means
+/// "Unclassified", surfaced honestly in the report (proposal §14), never
+/// silently defaulted to OPERATING. Only ASSET/LIABILITY/EQUITY accounts
+/// are meaningfully classified (REVENUE/EXPENSE fold into NetIncome
+/// directly, §9 of the proposal); a value set on a cash-linked account is
+/// harmless and unused (structurally excluded via the bank_cash_accounts
+/// join, not by this column, §9). This is the only schema change the
+/// approved proposal requires — the reconciling/pure-reclassification
+/// entry-eligibility gate that fixes the phantom-Investing/Financing
+/// defect (proposal §5) is computed at query time and stores nothing new.
+export const cashFlowCategoryEnum = pgEnum("cash_flow_category", [
+  "OPERATING",
+  "INVESTING",
+  "FINANCING",
+]);
+
 export const chartOfAccounts = pgTable(
   "chart_of_accounts",
   {
@@ -78,6 +95,7 @@ export const chartOfAccounts = pgTable(
     /// clean 400 rather than a raw constraint-violation error leaking to
     /// the client.
     parentId: uuid("parent_id"),
+    cashFlowCategory: cashFlowCategoryEnum("cash_flow_category"),
     isActive: boolean("is_active").notNull().default(true),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()

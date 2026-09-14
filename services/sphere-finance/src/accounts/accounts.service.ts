@@ -8,6 +8,7 @@ import { and, eq, auditLogs } from "@noryx/db-core";
 import { chartOfAccounts, type ChartOfAccount } from "../db/schema";
 import { withTenant, type TxClient } from "../db/db";
 import type { CreateAccountDto } from "./dto/create-account.dto";
+import type { UpdateCashFlowCategoryDto } from "./dto/update-cash-flow-category.dto";
 
 /**
  * Chart of Accounts, scoped by (tenantId, legalEntityId) since the 2a
@@ -150,6 +151,62 @@ export class AccountsService {
         legalEntityId,
         actorUserId: actorUserId ?? undefined,
         action: "ARCHIVE",
+        entityType: "chart_of_accounts",
+        entityId: id,
+        beforeState: before as unknown as Record<string, unknown>,
+        afterState: updated as unknown as Record<string, unknown>,
+      });
+
+      return updated!;
+    });
+  }
+
+  /**
+   * Cash Flow Statement work item (docs/finance-work-item-cash-flow-
+   * statement-proposal.md §7/§9/§14.3-equivalent — this revision's §15.1)
+   * — the sole write path for `chartOfAccounts.cashFlowCategory`. Same
+   * shape as `archive()` above and `BankCashAccountsService.update()`
+   * (bank-cash-accounts.service.ts) — locks/reads the account, updates
+   * the single column, writes an `audit_logs` row in the same
+   * transaction. `dto.cashFlowCategory` may be `null` (explicitly
+   * un-classifies the account) — this is a required field on the DTO,
+   * not `?? before.cashFlowCategory`, because this route's only purpose
+   * is setting this one column to whatever value was supplied, including
+   * `null`; there is no "leave unchanged" case for a route that always
+   * supplies the field.
+   */
+  async updateCashFlowCategory(
+    tenantId: string,
+    legalEntityId: string,
+    actorUserId: string | null,
+    id: string,
+    dto: UpdateCashFlowCategoryDto,
+  ): Promise<ChartOfAccount> {
+    return withTenant(tenantId, async (tx: TxClient) => {
+      const before = await this.findByIdInTx(tx, legalEntityId, id);
+      if (!before) {
+        throw new NotFoundException(`No account found with id ${id}.`);
+      }
+
+      const [updated] = await tx
+        .update(chartOfAccounts)
+        .set({
+          cashFlowCategory: dto.cashFlowCategory,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(chartOfAccounts.id, id),
+            eq(chartOfAccounts.legalEntityId, legalEntityId),
+          ),
+        )
+        .returning();
+
+      await tx.insert(auditLogs).values({
+        tenantId,
+        legalEntityId,
+        actorUserId: actorUserId ?? undefined,
+        action: "UPDATE",
         entityType: "chart_of_accounts",
         entityId: id,
         beforeState: before as unknown as Record<string, unknown>,

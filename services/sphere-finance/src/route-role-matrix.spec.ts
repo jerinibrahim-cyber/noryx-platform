@@ -250,7 +250,19 @@ function role(
  * §17/§18, CTO-approved implementation authorization) — finance.poster
  * only, the same write-side posture as every other mutation on those
  * six controllers: 133 routes total across the same 25 controllers
- * (still 25 — this work item added no new controller).
+ * (still 25 — this work item added no new controller), plus the Cash
+ * Flow Statement work item's addition of two routes (proposal
+ * docs/finance-work-item-cash-flow-statement-proposal.md §15,
+ * CTO-approved implementation authorization): `PATCH
+ * accounts/:id/cash-flow-category` on the EXISTING AccountsController
+ * (finance.admin only, same write-side posture as
+ * `PATCH accounts/:id/archive`), and `GET financial-statements/cash-flow`
+ * on the EXISTING FinancialStatementsController (finance.viewer/
+ * finance.poster/finance.admin, same read-side posture as
+ * `financial-statements/profit-and-loss` and
+ * `financial-statements/balance-sheet`): 135 routes total across the
+ * same 25 controllers (still 25 — this work item added no new
+ * controller).
  */
 const EXPECTED: DiscoveredRoute[] = [
   role("POST", "accounts", "AccountsController", ["finance.admin"]),
@@ -263,6 +275,9 @@ const EXPECTED: DiscoveredRoute[] = [
     "finance.admin",
   ]),
   role("PATCH", "accounts/:id/archive", "AccountsController", [
+    "finance.admin",
+  ]),
+  role("PATCH", "accounts/:id/cash-flow-category", "AccountsController", [
     "finance.admin",
   ]),
 
@@ -417,6 +432,12 @@ const EXPECTED: DiscoveredRoute[] = [
   role(
     "GET",
     "financial-statements/balance-sheet",
+    "FinancialStatementsController",
+    ["finance.viewer", "finance.poster", "finance.admin"],
+  ),
+  role(
+    "GET",
+    "financial-statements/cash-flow",
     "FinancialStatementsController",
     ["finance.viewer", "finance.poster", "finance.admin"],
   ),

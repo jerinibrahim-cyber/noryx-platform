@@ -18,6 +18,7 @@ import {
 import type { AuthenticatedRequestUser } from "@noryx/shared-types";
 import { AccountsService } from "./accounts.service";
 import { CreateAccountDto } from "./dto/create-account.dto";
+import { UpdateCashFlowCategoryDto } from "./dto/update-cash-flow-category.dto";
 
 /**
  * finance.viewer OR finance.admin can read; only finance.admin can write.
@@ -105,5 +106,30 @@ export class AccountsController {
       "Chart of Accounts requires",
     );
     return this.accounts.archive(tenantId, legalEntityId, user.userId, id);
+  }
+
+  /**
+   * Cash Flow Statement work item — sets or clears (`null`)
+   * `cashFlowCategory` for one account. `finance.admin`-only, same write
+   * gate as `create`/`archive` above (no new role introduced).
+   */
+  @Patch(":id/cash-flow-category")
+  @Roles("finance.admin")
+  updateCashFlowCategory(
+    @CurrentUser() user: AuthenticatedRequestUser,
+    @Param("id") id: string,
+    @Body() dto: UpdateCashFlowCategoryDto,
+  ) {
+    const { tenantId, legalEntityId } = requireTenantContext(
+      user,
+      "Chart of Accounts requires",
+    );
+    return this.accounts.updateCashFlowCategory(
+      tenantId,
+      legalEntityId,
+      user.userId,
+      id,
+      dto,
+    );
   }
 }

@@ -575,4 +575,154 @@ describe("Accounts (e2e) — RBAC, tenant + legal-entity isolation, audit immuta
       );
     });
   });
+
+  /**
+   * Cash Flow Statement work item — `PATCH accounts/:id/cash-flow-category`
+   * (docs/finance-work-item-cash-flow-statement-proposal.md §15.1). Same
+   * finance.admin-only write gate as `archive` above, and the same
+   * per-transaction audit-write pattern (§15.1's `updateCashFlowCategory`
+   * — modeled on `archive()`/`BankCashAccountsService.update()`).
+   */
+  describe("PATCH accounts/:id/cash-flow-category — RBAC + audit", () => {
+    async function createTestAccount(
+      token: string,
+      code: string,
+      type = "LIABILITY",
+    ): Promise<string> {
+      const res = await request(app.getHttpServer())
+        .post("/v1/finance/accounts")
+        .set("Authorization", `Bearer ${token}`)
+        .send({ code, name: `Cash-flow-category test — ${code}`, type })
+        .expect(201);
+      return res.body.data.id;
+    }
+
+    it("rejects a request with no token at all (401)", async () => {
+      const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.admin"]);
+      const accountId = await createTestAccount(token, `CFC-401-${Date.now()}`);
+      await request(app.getHttpServer())
+        .patch(`/v1/finance/accounts/${accountId}/cash-flow-category`)
+        .send({ cashFlowCategory: "OPERATING" })
+        .expect(401);
+    });
+
+    it("rejects finance.viewer (403) — read role cannot write", async () => {
+      const admin = tokenFor(tenantAId, legalEntityA1Id, ["finance.admin"]);
+      const accountId = await createTestAccount(
+        admin,
+        `CFC-VIEWER-${Date.now()}`,
+      );
+      const viewer = tokenFor(tenantAId, legalEntityA1Id, ["finance.viewer"]);
+      await request(app.getHttpServer())
+        .patch(`/v1/finance/accounts/${accountId}/cash-flow-category`)
+        .set("Authorization", `Bearer ${viewer}`)
+        .send({ cashFlowCategory: "OPERATING" })
+        .expect(403);
+    });
+
+    it("rejects finance.poster (403) — only finance.admin may classify accounts", async () => {
+      const admin = tokenFor(tenantAId, legalEntityA1Id, ["finance.admin"]);
+      const accountId = await createTestAccount(
+        admin,
+        `CFC-POSTER-${Date.now()}`,
+      );
+      const poster = tokenFor(tenantAId, legalEntityA1Id, ["finance.poster"]);
+      await request(app.getHttpServer())
+        .patch(`/v1/finance/accounts/${accountId}/cash-flow-category`)
+        .set("Authorization", `Bearer ${poster}`)
+        .send({ cashFlowCategory: "OPERATING" })
+        .expect(403);
+    });
+
+    it("allows finance.admin to set OPERATING/INVESTING/FINANCING and to clear back to null (200)", async () => {
+      const admin = tokenFor(tenantAId, legalEntityA1Id, ["finance.admin"]);
+      const accountId = await createTestAccount(
+        admin,
+        `CFC-ADMIN-${Date.now()}`,
+      );
+
+      let res = await request(app.getHttpServer())
+        .patch(`/v1/finance/accounts/${accountId}/cash-flow-category`)
+        .set("Authorization", `Bearer ${admin}`)
+        .send({ cashFlowCategory: "FINANCING" })
+        .expect(200);
+      expect(res.body.data.cashFlowCategory).toBe("FINANCING");
+
+      res = await request(app.getHttpServer())
+        .patch(`/v1/finance/accounts/${accountId}/cash-flow-category`)
+        .set("Authorization", `Bearer ${admin}`)
+        .send({ cashFlowCategory: "INVESTING" })
+        .expect(200);
+      expect(res.body.data.cashFlowCategory).toBe("INVESTING");
+
+      // Explicit null un-classifies — required field, not "leave unchanged".
+      res = await request(app.getHttpServer())
+        .patch(`/v1/finance/accounts/${accountId}/cash-flow-category`)
+        .set("Authorization", `Bearer ${admin}`)
+        .send({ cashFlowCategory: null })
+        .expect(200);
+      expect(res.body.data.cashFlowCategory).toBeNull();
+    });
+
+    it("rejects an invalid cashFlowCategory value (400)", async () => {
+      const admin = tokenFor(tenantAId, legalEntityA1Id, ["finance.admin"]);
+      const accountId = await createTestAccount(
+        admin,
+        `CFC-INVALID-${Date.now()}`,
+      );
+      await request(app.getHttpServer())
+        .patch(`/v1/finance/accounts/${accountId}/cash-flow-category`)
+        .set("Authorization", `Bearer ${admin}`)
+        .send({ cashFlowCategory: "NOT_A_REAL_CATEGORY" })
+        .expect(400);
+    });
+
+    it("404s for a cash-flow-category update against another legal entity's account", async () => {
+      const adminA1 = tokenFor(tenantAId, legalEntityA1Id, ["finance.admin"]);
+      const adminA2 = tokenFor(tenantAId, legalEntityA2Id, ["finance.admin"]);
+      const accountA2Id = await createTestAccount(
+        adminA2,
+        `CFC-CROSS-ENTITY-${Date.now()}`,
+      );
+      await request(app.getHttpServer())
+        .patch(`/v1/finance/accounts/${accountA2Id}/cash-flow-category`)
+        .set("Authorization", `Bearer ${adminA1}`)
+        .send({ cashFlowCategory: "OPERATING" })
+        .expect(404);
+    });
+
+    it("records a real audit_logs UPDATE row with before/after cashFlowCategory, in the same transaction as the write", async () => {
+      const admin = tokenFor(tenantAId, legalEntityA1Id, ["finance.admin"]);
+      const accountId = await createTestAccount(
+        admin,
+        `CFC-AUDIT-${Date.now()}`,
+      );
+
+      await request(app.getHttpServer())
+        .patch(`/v1/finance/accounts/${accountId}/cash-flow-category`)
+        .set("Authorization", `Bearer ${admin}`)
+        .send({ cashFlowCategory: "OPERATING" })
+        .expect(200);
+
+      const db = getPlatformDb();
+      const rows = await db
+        .select()
+        .from(auditLogs)
+        .where(eq(auditLogs.entityId, accountId));
+
+      const updateRow = rows.find((r) => r.action === "UPDATE");
+      expect(updateRow).toBeDefined();
+      expect(updateRow!.entityType).toBe("chart_of_accounts");
+      expect(updateRow!.tenantId).toBe(tenantAId);
+      expect(updateRow!.legalEntityId).toBe(legalEntityA1Id);
+      expect(
+        (updateRow!.beforeState as { cashFlowCategory: string | null })
+          .cashFlowCategory,
+      ).toBeNull();
+      expect(
+        (updateRow!.afterState as { cashFlowCategory: string | null })
+          .cashFlowCategory,
+      ).toBe("OPERATING");
+    });
+  });
 });
