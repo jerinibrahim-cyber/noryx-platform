@@ -14,7 +14,7 @@
   "dependencies": {
     "@noryx/shared-types": "workspace:*",
     "@azure/service-bus": "^7.9.0",
-    "@azure/identity": "^4.4.0"
+    "@azure/identity": "^4.13.2"
   },
   "devDependencies": {
     "@noryx/eslint-config": "workspace:*",
