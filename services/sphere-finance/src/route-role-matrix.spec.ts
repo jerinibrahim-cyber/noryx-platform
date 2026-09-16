@@ -262,7 +262,15 @@ function role(
  * `financial-statements/profit-and-loss` and
  * `financial-statements/balance-sheet`): 135 routes total across the
  * same 25 controllers (still 25 — this work item added no new
- * controller).
+ * controller), plus the On-Account (Unapplied) Supplier Payments &
+ * Customer Receipts work item's addition of one
+ * `POST .../:id/allocations` route to each of SupplierPaymentsController
+ * and CustomerReceiptsController (docs/finance-work-item-on-account-
+ * payments-proposal.md §13, CTO Architecture Gate, approved
+ * implementation authorization) — finance.poster only, the same
+ * write-side posture as `/post` and `/reverse` on the same two
+ * controllers: 137 routes total across the same 25 controllers (still
+ * 25 — this work item added no new controller).
  */
 const EXPECTED: DiscoveredRoute[] = [
   role("POST", "accounts", "AccountsController", ["finance.admin"]),
@@ -523,6 +531,13 @@ const EXPECTED: DiscoveredRoute[] = [
   role("POST", "payments/:id/reverse", "SupplierPaymentsController", [
     "finance.poster",
   ]),
+  // On-Account (Unapplied) Supplier Payments & Customer Receipts work
+  // item (docs/finance-work-item-on-account-payments-proposal.md §13,
+  // CTO Architecture Gate, approved). Same finance.poster-only posture
+  // as /post and /reverse on the same resource.
+  role("POST", "payments/:id/allocations", "SupplierPaymentsController", [
+    "finance.poster",
+  ]),
 
   // AP-1d — docs/finance-work-item-1d-supplier-balance-statement-ageing-
   // proposal.md §5. Pure reads, no write-side split to make — same
@@ -632,6 +647,12 @@ const EXPECTED: DiscoveredRoute[] = [
   ]),
   // Document-Level Reversal work item (§17/§18, CTO-approved).
   role("POST", "receipts/:id/reverse", "CustomerReceiptsController", [
+    "finance.poster",
+  ]),
+  // On-Account (Unapplied) Supplier Payments & Customer Receipts work
+  // item (docs/finance-work-item-on-account-payments-proposal.md §13,
+  // CTO Architecture Gate, approved). Byte-mirror of the AP-side entry.
+  role("POST", "receipts/:id/allocations", "CustomerReceiptsController", [
     "finance.poster",
   ]),
 

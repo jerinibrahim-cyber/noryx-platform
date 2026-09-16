@@ -86,9 +86,9 @@ describe("CreateSupplierPaymentDto", () => {
     expect(errors).toHaveLength(0);
   });
 
-  it("rejects an empty allocations array", async () => {
+  it("accepts an empty allocations array (on-account / zero-allocation posting — proposal §9/§15.2, Discrepancy #2)", async () => {
     const errors = await validateDto({ ...BASE, allocations: [] });
-    expect(errors.some((e) => e.property === "allocations")).toBe(true);
+    expect(errors).toHaveLength(0);
   });
 
   it("rejects a missing allocations array", async () => {

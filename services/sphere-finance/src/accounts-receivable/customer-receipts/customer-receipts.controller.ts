@@ -22,6 +22,7 @@ import type { AuthenticatedRequestUser } from "@noryx/shared-types";
 import { CustomerReceiptsService } from "./customer-receipts.service";
 import { CreateCustomerReceiptDto } from "./dto/create-customer-receipt.dto";
 import { UpdateCustomerReceiptDto } from "./dto/update-customer-receipt.dto";
+import { ApplyCustomerReceiptAllocationDto } from "./dto/apply-customer-receipt-allocation.dto";
 import { ReverseJournalEntryDto } from "../../journal-entries/dto/reverse-journal-entry.dto";
 
 /**
@@ -145,5 +146,35 @@ export class CustomerReceiptsController {
       "Customer receipts require",
     );
     return this.receipts.reverse(tenantId, legalEntityId, user.userId, id, dto);
+  }
+
+  /**
+   * On-Account (Unapplied) Supplier Payments & Customer Receipts work
+   * item (docs/finance-work-item-on-account-payments-proposal.md
+   * §8.2/§9.1, CTO Architecture Gate, approved). Applies one or more
+   * NEW allocations to an already-POSTED customer receipt. `finance.
+   * poster` only — same write-role posture as `/post` and `/reverse`;
+   * `@HttpCode(200)` since this mutates an existing resource rather
+   * than creating one.
+   */
+  @Post(":id/allocations")
+  @HttpCode(200)
+  @Roles("finance.poster")
+  applyAllocation(
+    @CurrentUser() user: AuthenticatedRequestUser,
+    @Param("id") id: string,
+    @Body() dto: ApplyCustomerReceiptAllocationDto,
+  ) {
+    const { tenantId, legalEntityId } = requireTenantContext(
+      user,
+      "Customer receipts require",
+    );
+    return this.receipts.applyAllocation(
+      tenantId,
+      legalEntityId,
+      user.userId,
+      id,
+      dto,
+    );
   }
 }

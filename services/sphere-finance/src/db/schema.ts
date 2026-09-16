@@ -870,15 +870,29 @@ export const supplierPaymentAllocations = pgTable(
     allocatedAmountMinor: bigint("allocated_amount_minor", {
       mode: "number",
     }).notNull(),
+    /// On-Account (Unapplied) Supplier Payments & Customer Receipts work
+    /// item (docs/finance-work-item-on-account-payments-proposal.md
+    /// §15.1, CTO Architecture Gate, approved). The date THIS allocation
+    /// row itself became effective — distinct from the parent payment's
+    /// own paymentDate. Every pre-existing row was backfilled from its
+    /// parent's paymentDate by migration 0022; every row inserted going
+    /// forward (create/update full-replace, or applyAllocation()) always
+    /// supplies one explicitly (proposal §9.4).
+    allocationDate: date("allocation_date").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
   },
   (t) => [
-    // At most one allocation row per (payment, bill) pair — an edit to
-    // an existing allocation changes this row's amount rather than
-    // adding a second row for the same pair.
-    unique("supplier_payment_allocations_payment_bill_unique").on(
+    // On-Account work item (§15.1, CTO Architecture Gate, approved):
+    // RELAXED from a unique(payment, bill) constraint to a plain
+    // non-unique index — a posted payment may now receive multiple,
+    // separate applyAllocation() calls against the SAME bill over time
+    // (append-only rows, never merged/updated), so the pair is no
+    // longer unique. The original unique constraint is exactly what
+    // On-Account's "multiple subsequent allocations" scenario must be
+    // able to violate.
+    index("supplier_payment_allocations_payment_bill_idx").on(
       t.paymentId,
       t.billId,
     ),
@@ -1404,15 +1418,29 @@ export const customerReceiptAllocations = pgTable(
     allocatedAmountMinor: bigint("allocated_amount_minor", {
       mode: "number",
     }).notNull(),
+    /// On-Account (Unapplied) Supplier Payments & Customer Receipts work
+    /// item (docs/finance-work-item-on-account-payments-proposal.md
+    /// §15.1, CTO Architecture Gate, approved). Byte-mirror of
+    /// supplierPaymentAllocations.allocationDate for the AR side — the
+    /// date THIS allocation row itself became effective, distinct from
+    /// the parent receipt's own receiptDate. Every pre-existing row was
+    /// backfilled from its parent's receiptDate by migration 0022; every
+    /// row inserted going forward (create/update full-replace, or
+    /// applyAllocation()) always supplies one explicitly (proposal
+    /// §9.4).
+    allocationDate: date("allocation_date").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
   },
   (t) => [
-    // At most one allocation row per (receipt, invoice) pair — an edit to
-    // an existing allocation changes this row's amount rather than
-    // adding a second row for the same pair.
-    unique("customer_receipt_allocations_receipt_invoice_unique").on(
+    // On-Account work item (§15.1, CTO Architecture Gate, approved):
+    // RELAXED from a unique(receipt, invoice) constraint to a plain
+    // non-unique index — a posted receipt may now receive multiple,
+    // separate applyAllocation() calls against the SAME invoice over
+    // time (append-only rows, never merged/updated), so the pair is no
+    // longer unique. Byte-mirror of the AP-side relaxation.
+    index("customer_receipt_allocations_receipt_invoice_idx").on(
       t.receiptId,
       t.invoiceId,
     ),

@@ -1,6 +1,5 @@
 import { Type } from "class-transformer";
 import {
-  ArrayMinSize,
   IsArray,
   IsDateString,
   IsIn,
@@ -27,10 +26,24 @@ const PAYMENT_METHODS = [
  *
  * currencyCode/status/internalReference/journalEntryId/periodId are
  * deliberately absent — all server-resolved, never client input, same
- * convention as every existing Finance DTO. `allocations` requires at
- * least 1 entry (§8 step 3 — a payment must allocate to post; no bare
- * unapplied payment in this Work Item), same posture as
- * CreateSupplierBillDto.lines' ArrayMinSize(1).
+ * convention as every existing Finance DTO.
+ *
+ * `allocations` is a required array field but MAY be empty
+ * (`allocations: []`) — the original AP-1c convention required at least
+ * one entry (`@ArrayMinSize(1)`, matching CreateSupplierBillDto.lines),
+ * because a payment was required to allocate in full to post at all.
+ * The On-Account (Unapplied) Supplier Payments & Customer Receipts work
+ * item (docs/finance-work-item-on-account-payments-proposal.md, CTO
+ * Architecture Gate, approved) explicitly requires supporting "initial
+ * zero-allocation posting" — a payment created and posted with no
+ * allocations at all — which this DTO-level `ArrayMinSize(1)` would
+ * reject with a 400 before `post()`'s own (now-relaxed) Step 3 guard is
+ * ever reached. Removing it here is the smallest adjustment that makes
+ * the approved architecture reachable through the standard create->post
+ * flow; `post()`'s own guards remain the authoritative posting-time
+ * business rules (proposal §3.3/§9.2). Matches
+ * UpdateSupplierPaymentDto.allocations' existing (already-unrestricted)
+ * shape.
  */
 export class CreateSupplierPaymentDto {
   @IsUUID()
@@ -63,7 +76,6 @@ export class CreateSupplierPaymentDto {
   memo?: string;
 
   @IsArray()
-  @ArrayMinSize(1)
   @ValidateNested({ each: true })
   @Type(() => CreateSupplierPaymentAllocationDto)
   allocations!: CreateSupplierPaymentAllocationDto[];

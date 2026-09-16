@@ -45,6 +45,7 @@ import {
 import type { CreateSupplierPaymentDto } from "./dto/create-supplier-payment.dto";
 import type { CreateSupplierPaymentAllocationDto } from "./dto/create-supplier-payment-allocation.dto";
 import type { UpdateSupplierPaymentDto } from "./dto/update-supplier-payment.dto";
+import type { ApplySupplierPaymentAllocationDto } from "./dto/apply-supplier-payment-allocation.dto";
 
 export type SupplierPaymentWithAllocations = SupplierPayment & {
   allocations: SupplierPaymentAllocation[];
@@ -136,6 +137,7 @@ export class SupplierPaymentsService {
         tenantId,
         createdPayment!.id,
         dto.allocations,
+        createdPayment!.paymentDate,
       );
 
       const full: SupplierPaymentWithAllocations = {
@@ -277,10 +279,21 @@ export class SupplierPaymentsService {
       if (dto.allocations) {
         // Full-array replacement, not allocation-level add/remove — same
         // convention as SupplierBillsService.update()'s line handling.
+        // allocation_date for every row this full-replace writes is the
+        // payment's own (possibly just-patched) paymentDate — these rows
+        // are, by construction, contemporaneous with the payment's own
+        // date, exactly like every pre-existing allocation row the
+        // on-account migration backfilled (proposal §15.1).
         await tx
           .delete(supplierPaymentAllocations)
           .where(eq(supplierPaymentAllocations.paymentId, id));
-        await this.insertAllocations(tx, tenantId, id, dto.allocations);
+        await this.insertAllocations(
+          tx,
+          tenantId,
+          id,
+          dto.allocations,
+          headerPatch.paymentDate ?? before.paymentDate,
+        );
       }
 
       const after = await this.findByIdInTx(tx, tenantId, legalEntityId, id);
@@ -345,17 +358,24 @@ export class SupplierPaymentsService {
   }
 
   /**
-   * `POST /payments/:id/post` — DRAFT -> POSTED. Proposal §8's 13-step
-   * shape: lock, status, allocation-count, bank/cash account
-   * re-validation, AP settings load, period resolution+lock, fixed-order
-   * multi-bill locking, per-bill re-validation, exact-allocation-sum
-   * check, payment-number allocation, journal-number allocation, direct
-   * journal_entries/journal_lines insertion (DRAFT-then-POST ordering —
-   * see the inline note below), commit, per-bill paid_minor/
+   * `POST /payments/:id/post` — DRAFT -> POSTED. Proposal §8's step
+   * shape: lock, status, bank/cash account re-validation, AP settings
+   * load, period resolution+lock, fixed-order multi-bill locking,
+   * per-bill re-validation, allocated-total-does-not-exceed-header-
+   * amount check, payment-number allocation, journal-number allocation,
+   * direct journal_entries/journal_lines insertion (DRAFT-then-POST
+   * ordering — see the inline note below), commit, per-bill paid_minor/
    * payment_status updates, N+2-row audit. A failure at any step rolls
    * the whole transaction back — no burned payment number, no burned
    * journal number, no orphaned journal entry, no partial bill update,
    * from a failed post.
+   *
+   * On-Account (Unapplied) Supplier Payments & Customer Receipts work
+   * item (docs/finance-work-item-on-account-payments-proposal.md, CTO
+   * Architecture Gate, approved): a payment with zero or partial
+   * allocations may now post — see the inline notes on Steps 3, 7, and 9
+   * below — and may receive further allocations afterward via
+   * `applyAllocation()`.
    */
   async post(
     tenantId: string,
@@ -377,13 +397,15 @@ export class SupplierPaymentsService {
         throw new ConflictException("This supplier payment is already posted.");
       }
 
-      // Step 3: a payment must allocate to post — no bare unapplied
-      // payment in this Work Item (proposal §7).
-      if (before.allocations.length < 1) {
-        throw new UnprocessableEntityException(
-          "A supplier payment must have at least 1 allocation to be posted.",
-        );
-      }
+      // Step 3 (RELAXED — On-Account (Unapplied) Supplier Payments &
+      // Customer Receipts work item, CTO Architecture Gate, approved):
+      // the original AP-1c guard required at least 1 allocation to
+      // post. That guard is removed — a payment may now post with zero
+      // allocations and later receive one or more via
+      // applyAllocation() (§9 of the proposal). No replacement check is
+      // needed here: Invariant 2 (allocated total never exceeds the
+      // header amount) is enforced below (Step 9, now an inequality),
+      // and zero allocations trivially satisfies it.
 
       // Step 4: re-validate the bank/cash account, independently of
       // whatever passed at create/edit time — an account can be
@@ -415,20 +437,26 @@ export class SupplierPaymentsService {
       // ascending-id order — two concurrent payments touching an
       // overlapping bill set always acquire row locks in the same
       // relative order, so neither can deadlock the other (proposal §8
-      // step 7).
+      // step 7). Guarded for the empty-array case (`billIds.length ?
+      // ... : []`) — required the instant Step 3's floor is removed,
+      // since `before.allocations` may now legitimately be `[]`; mirrors
+      // the identical, already-proven-safe guard `reverse()` already
+      // uses for the same reason (proposal §3.4/self-critique).
       const billIds = before.allocations.map((a) => a.billId);
-      const lockedBills = await tx
-        .select()
-        .from(supplierBills)
-        .where(
-          and(
-            inArray(supplierBills.id, billIds),
-            eq(supplierBills.tenantId, tenantId),
-            eq(supplierBills.legalEntityId, legalEntityId),
-          ),
-        )
-        .orderBy(asc(supplierBills.id))
-        .for("update");
+      const lockedBills = billIds.length
+        ? await tx
+            .select()
+            .from(supplierBills)
+            .where(
+              and(
+                inArray(supplierBills.id, billIds),
+                eq(supplierBills.tenantId, tenantId),
+                eq(supplierBills.legalEntityId, legalEntityId),
+              ),
+            )
+            .orderBy(asc(supplierBills.id))
+            .for("update")
+        : [];
       const billsById = new Map<string, SupplierBill>(
         lockedBills.map((b) => [b.id, b]),
       );
@@ -462,15 +490,19 @@ export class SupplierPaymentsService {
         }
       }
 
-      // Step 9: full-allocation requirement — no "payment on account"
-      // in this Work Item (proposal §1/§7/§19 of the AP-1a proposal).
+      // Step 9 (RELAXED from an exact-equality check to an upper-bound
+      // check — On-Account work item, CTO Architecture Gate, approved).
+      // Invariant 2 (proposal §6.2): 0 <= appliedMinor(p) <=
+      // paymentAmountMinor at all times. Zero and partial allocation are
+      // now valid posting states; only exceeding the header amount is
+      // still rejected.
       const allocatedTotal = before.allocations.reduce(
         (sum, a) => sum + a.allocatedAmountMinor,
         0,
       );
-      if (allocatedTotal !== before.paymentAmountMinor) {
+      if (allocatedTotal > before.paymentAmountMinor) {
         throw new UnprocessableEntityException(
-          `Total allocated amount (${allocatedTotal}) must equal the payment amount (${before.paymentAmountMinor}) to post.`,
+          `Total allocated amount (${allocatedTotal}) exceeds the payment amount (${before.paymentAmountMinor}).`,
         );
       }
 
@@ -646,6 +678,271 @@ export class SupplierPaymentsService {
         ...billAuditRows,
       ]);
 
+      return after;
+    });
+  }
+
+  /**
+   * `POST /payments/:id/allocations` — applies one or more NEW
+   * allocations to an already-POSTED supplier payment. On-Account
+   * (Unapplied) Supplier Payments & Customer Receipts work item
+   * (docs/finance-work-item-on-account-payments-proposal.md §9.1/§9.4,
+   * CTO Architecture Gate, approved implementation authorization).
+   * Append-only: no existing allocation row is ever read, merged into,
+   * or updated — every call inserts brand-new row(s), each carrying its
+   * own `allocationDate` (§9.4). A reversed payment permanently rejects
+   * this call (Step 5) — both at the application layer here and,
+   * independently, at the database layer via the relaxed immutability
+   * trigger (§15.3), as defense-in-depth.
+   */
+  async applyAllocation(
+    tenantId: string,
+    legalEntityId: string,
+    actorUserId: string | null,
+    id: string,
+    dto: ApplySupplierPaymentAllocationDto,
+  ): Promise<SupplierPaymentWithAllocations> {
+    return withTenant(tenantId, async (tx: TxClient) => {
+      // Step 1-2: load + lock + scope — the very first statement.
+      const before = await this.findByIdInTx(tx, tenantId, legalEntityId, id, {
+        forUpdate: true,
+      });
+      if (!before) {
+        throw new NotFoundException(`No supplier payment found with id ${id}.`);
+      }
+
+      // Step 3: only a POSTED payment can receive a new allocation.
+      if (before.status !== "POSTED") {
+        throw new UnprocessableEntityException(
+          "Only a posted supplier payment can receive a new allocation.",
+        );
+      }
+      // Step 4: structurally unreachable once Step 3 passes (a POSTED
+      // payment always has a journalEntryId, per post()'s own Step 12-13)
+      // — kept for parity with reverse()'s own defensive check.
+      if (!before.journalEntryId) {
+        throw new UnprocessableEntityException(
+          "This supplier payment has no posted journal entry.",
+        );
+      }
+
+      // Step 5: a reversed payment can never receive a further
+      // allocation — its cash movement has been accounting-reversed
+      // (§9.3). Checked directly against the journal entry's own
+      // reversedByJournalEntryId, the single source of truth for
+      // reversal state (no REVERSED status value exists on this table).
+      const [journalEntry] = await tx
+        .select({
+          reversedByJournalEntryId: journalEntries.reversedByJournalEntryId,
+        })
+        .from(journalEntries)
+        .where(eq(journalEntries.id, before.journalEntryId));
+      if (journalEntry?.reversedByJournalEntryId != null) {
+        throw new ConflictException(
+          "This supplier payment has already been reversed and cannot receive further allocations.",
+        );
+      }
+
+      // Step 6: appliedMinor(p) — the true, current, cumulative applied
+      // amount, over ALL existing allocation rows (create-time and
+      // every prior applyAllocation() call alike).
+      const currentlyAppliedMinor = before.allocations.reduce(
+        (sum, a) => sum + a.allocatedAmountMinor,
+        0,
+      );
+
+      // Step 7: reused unmodified — rejects a duplicate billId within
+      // this request, and any billId not belonging to this payment's own
+      // supplier in this legal entity.
+      await this.validateAllocationsShapeOrThrow(
+        tx,
+        tenantId,
+        legalEntityId,
+        before.supplierId,
+        dto.allocations,
+      );
+
+      // Step 8: the incremental, always-enforced form of Invariant 2
+      // (§6.2/§9.2) — currentlyAppliedMinor + this request's total must
+      // not exceed the payment's own header amount.
+      const requestedTotal = dto.allocations.reduce(
+        (sum, a) => sum + a.allocatedAmountMinor,
+        0,
+      );
+      if (currentlyAppliedMinor + requestedTotal > before.paymentAmountMinor) {
+        throw new UnprocessableEntityException(
+          `Applying ${requestedTotal} would bring this payment's total applied amount to ${
+            currentlyAppliedMinor + requestedTotal
+          }, exceeding its amount of ${before.paymentAmountMinor}.`,
+        );
+      }
+
+      // Step 9 (§9.4 Rules 1-2): effectiveAllocationDate defaults to
+      // today (Rule 5), must not be earlier than the payment's own
+      // paymentDate (Rule 1), and must not be later than today — no
+      // future-effective allocation (Rule 2, CTO Architecture Gate
+      // Option A; see reversal.util.ts's scheduled-reversals precedent
+      // discussion in the proposal for why this codebase's only
+      // established future-effective mechanism is a deferred-execution
+      // design this endpoint deliberately does not replicate).
+      const todayUtc = new Date().toISOString().slice(0, 10);
+      const effectiveAllocationDate = dto.allocationDate ?? todayUtc;
+      if (effectiveAllocationDate > todayUtc) {
+        throw new UnprocessableEntityException(
+          `Allocation date ${effectiveAllocationDate} cannot be later than today (${todayUtc}) — this endpoint does not support a future-effective allocation.`,
+        );
+      }
+      if (effectiveAllocationDate < before.paymentDate) {
+        throw new UnprocessableEntityException(
+          `Allocation date ${effectiveAllocationDate} cannot be earlier than this payment's own payment date ${before.paymentDate}.`,
+        );
+      }
+
+      // Step 10 (§9.4 Rules 3-4/6-7): resolve + lock the OPEN period
+      // covering the allocation event's OWN date — never before.
+      // paymentDate's period — reusing the exact shared helper
+      // reverse() itself already uses (resolveOpenPeriodOrThrow, backed
+      // by JournalEntriesService.resolvePeriodForDate(), which locks the
+      // period row via SELECT ... FOR UPDATE). Enforced even though this
+      // call inserts no journal_entries row (Rule 7).
+      await resolveOpenPeriodOrThrow(
+        this.journalEntries,
+        tx,
+        tenantId,
+        legalEntityId,
+        effectiveAllocationDate,
+      );
+
+      // Step 11: lock every targeted bill, fixed ascending-id order —
+      // identical pattern to post() Step 7 / reverse().
+      const billIds = dto.allocations.map((a) => a.billId);
+      const lockedBills = billIds.length
+        ? await tx
+            .select()
+            .from(supplierBills)
+            .where(
+              and(
+                inArray(supplierBills.id, billIds),
+                eq(supplierBills.tenantId, tenantId),
+                eq(supplierBills.legalEntityId, legalEntityId),
+              ),
+            )
+            .orderBy(asc(supplierBills.id))
+            .for("update")
+        : [];
+      const billsById = new Map<string, SupplierBill>(
+        lockedBills.map((b) => [b.id, b]),
+      );
+
+      // Step 12: re-validate each targeted bill under lock — identical
+      // checks to post() Step 8.
+      for (const allocation of dto.allocations) {
+        const bill = billsById.get(allocation.billId);
+        if (!bill) {
+          throw new UnprocessableEntityException(
+            `Allocated bill ${allocation.billId} could not be found in this legal entity.`,
+          );
+        }
+        if (bill.status !== "POSTED") {
+          throw new UnprocessableEntityException(
+            `Bill ${allocation.billId} is not posted and cannot receive a payment allocation.`,
+          );
+        }
+        if (bill.supplierId !== before.supplierId) {
+          throw new UnprocessableEntityException(
+            `Bill ${allocation.billId} does not belong to this payment's supplier.`,
+          );
+        }
+        const outstanding = bill.totalMinor - bill.paidMinor;
+        if (allocation.allocatedAmountMinor > outstanding) {
+          throw new UnprocessableEntityException(
+            `Allocation of ${allocation.allocatedAmountMinor} to bill ${allocation.billId} exceeds its outstanding balance of ${outstanding}.`,
+          );
+        }
+      }
+
+      // Step 13: INSERT one new row per dto.allocations[*] — append-only,
+      // each with allocationDate = effectiveAllocationDate. No existing
+      // row is ever read, merged into, or updated.
+      const insertedAllocations = await tx
+        .insert(supplierPaymentAllocations)
+        .values(
+          dto.allocations.map((allocation) => ({
+            tenantId,
+            paymentId: id,
+            billId: allocation.billId,
+            allocatedAmountMinor: allocation.allocatedAmountMinor,
+            allocationDate: effectiveAllocationDate,
+          })),
+        )
+        .returning();
+
+      // Step 14: settle each newly-allocated bill — identical arithmetic
+      // to post() Step 14, including the same "never set updated_at"
+      // caveat (the immutability trigger rejects it alongside
+      // paid_minor/payment_status).
+      const billAuditRows: {
+        tenantId: string;
+        legalEntityId: string;
+        actorUserId: string | undefined;
+        action: string;
+        entityType: string;
+        entityId: string;
+        beforeState: Record<string, unknown>;
+        afterState: Record<string, unknown>;
+      }[] = [];
+      for (const allocation of dto.allocations) {
+        const bill = billsById.get(allocation.billId)!;
+        const newPaidMinor = bill.paidMinor + allocation.allocatedAmountMinor;
+        const newPaymentStatus =
+          newPaidMinor === bill.totalMinor
+            ? "PAID"
+            : newPaidMinor > 0
+              ? "PARTIALLY_PAID"
+              : "UNPAID";
+        const [updatedBill] = await tx
+          .update(supplierBills)
+          .set({
+            paidMinor: newPaidMinor,
+            paymentStatus: newPaymentStatus,
+          })
+          .where(eq(supplierBills.id, bill.id))
+          .returning();
+        billAuditRows.push({
+          tenantId,
+          legalEntityId,
+          actorUserId: actorUserId ?? undefined,
+          action: "UPDATE",
+          entityType: "supplier_bill",
+          entityId: bill.id,
+          beforeState: bill as unknown as Record<string, unknown>,
+          afterState: updatedBill as unknown as Record<string, unknown>,
+        });
+      }
+
+      const after: SupplierPaymentWithAllocations = {
+        ...before,
+        allocations: [...before.allocations, ...insertedAllocations],
+      };
+
+      // Step 15: audit — one UPDATE row on the payment (before/after
+      // allocation list), one UPDATE row per settled bill.
+      await tx.insert(auditLogs).values([
+        {
+          tenantId,
+          legalEntityId,
+          actorUserId: actorUserId ?? undefined,
+          action: "UPDATE",
+          entityType: "supplier_payment",
+          entityId: id,
+          beforeState: before as unknown as Record<string, unknown>,
+          afterState: after as unknown as Record<string, unknown>,
+        },
+        ...billAuditRows,
+      ]);
+
+      // Step 16: return the payment with its full current allocation
+      // list.
       return after;
     });
   }
@@ -1057,11 +1354,18 @@ export class SupplierPaymentsService {
     return `JE-${String(lastAssignedNumber).padStart(6, "0")}`;
   }
 
+  /** `allocationDate` is required on every inserted row (schema.ts,
+   * proposal §15.1) — create()/update() both pass the payment's own
+   * (possibly just-patched) paymentDate, since every row created through
+   * this path is, by construction, contemporaneous with the payment
+   * itself (only applyAllocation()'s own INSERT, §9.1 Step 13, ever
+   * writes a materially different allocationDate). */
   private async insertAllocations(
     tx: TxClient,
     tenantId: string,
     paymentId: string,
     allocations: CreateSupplierPaymentAllocationDto[],
+    allocationDate: string,
   ): Promise<SupplierPaymentAllocation[]> {
     return tx
       .insert(supplierPaymentAllocations)
@@ -1071,6 +1375,7 @@ export class SupplierPaymentsService {
           paymentId,
           billId: allocation.billId,
           allocatedAmountMinor: allocation.allocatedAmountMinor,
+          allocationDate,
         })),
       )
       .returning();

@@ -1,6 +1,5 @@
 import { Type } from "class-transformer";
 import {
-  ArrayMinSize,
   IsArray,
   IsDateString,
   IsIn,
@@ -31,10 +30,17 @@ const RECEIPT_METHODS = [
  *
  * currencyCode/status/internalReference/journalEntryId/periodId are
  * deliberately absent — all server-resolved, never client input, same
- * convention as every existing Finance DTO. `allocations` requires at
- * least 1 entry (§13 step 3 — a receipt must allocate to post; no bare
- * unapplied receipt in this Work Item), same posture as
- * CreateSupplierPaymentDto.allocations' ArrayMinSize(1).
+ * convention as every existing Finance DTO.
+ *
+ * `allocations` is a required array field but MAY be empty
+ * (`allocations: []`) — see `CreateSupplierPaymentDto.allocations`'s own
+ * comment for the full reasoning (byte-mirror on the AR side): the
+ * On-Account (Unapplied) Supplier Payments & Customer Receipts work item
+ * (docs/finance-work-item-on-account-payments-proposal.md, CTO
+ * Architecture Gate, approved) requires "initial zero-allocation
+ * posting" to be reachable through the standard create->post flow, which
+ * the original `ArrayMinSize(1)` here would have blocked with a 400
+ * before `post()`'s own (now-relaxed) Step 3 guard is ever reached.
  */
 export class CreateCustomerReceiptDto {
   @IsUUID()
@@ -67,7 +73,6 @@ export class CreateCustomerReceiptDto {
   memo?: string;
 
   @IsArray()
-  @ArrayMinSize(1)
   @ValidateNested({ each: true })
   @Type(() => CreateCustomerReceiptAllocationDto)
   allocations!: CreateCustomerReceiptAllocationDto[];

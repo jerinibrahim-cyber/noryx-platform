@@ -155,6 +155,13 @@
       "when": 1789422803702,
       "tag": "0021_chart_of_accounts_cash_flow_category",
       "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1789502391602,
+      "tag": "0022_on_account_allocation_date",
+      "breakpoints": true
     }
   ]
 }

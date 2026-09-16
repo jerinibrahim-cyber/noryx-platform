@@ -45,6 +45,7 @@ import {
 import type { CreateCustomerReceiptDto } from "./dto/create-customer-receipt.dto";
 import type { CreateCustomerReceiptAllocationDto } from "./dto/create-customer-receipt-allocation.dto";
 import type { UpdateCustomerReceiptDto } from "./dto/update-customer-receipt.dto";
+import type { ApplyCustomerReceiptAllocationDto } from "./dto/apply-customer-receipt-allocation.dto";
 
 export type CustomerReceiptWithAllocations = CustomerReceipt & {
   allocations: CustomerReceiptAllocation[];
@@ -151,6 +152,7 @@ export class CustomerReceiptsService {
         tenantId,
         createdReceipt!.id,
         dto.allocations,
+        createdReceipt!.receiptDate,
       );
 
       const full: CustomerReceiptWithAllocations = {
@@ -292,11 +294,22 @@ export class CustomerReceiptsService {
       if (dto.allocations) {
         // Full-array replacement, not allocation-level add/remove — same
         // convention as SupplierPaymentsService.update()'s allocation
-        // handling.
+        // handling. allocation_date for every row this full-replace
+        // writes is the receipt's own (possibly just-patched)
+        // receiptDate — these rows are, by construction, contemporaneous
+        // with the receipt's own date, exactly like every pre-existing
+        // allocation row the on-account migration backfilled (proposal
+        // §15.1).
         await tx
           .delete(customerReceiptAllocations)
           .where(eq(customerReceiptAllocations.receiptId, id));
-        await this.insertAllocations(tx, tenantId, id, dto.allocations);
+        await this.insertAllocations(
+          tx,
+          tenantId,
+          id,
+          dto.allocations,
+          headerPatch.receiptDate ?? before.receiptDate,
+        );
       }
 
       const after = await this.findByIdInTx(tx, tenantId, legalEntityId, id);
@@ -361,11 +374,11 @@ export class CustomerReceiptsService {
   }
 
   /**
-   * `POST /receipts/:id/post` — DRAFT -> POSTED. Proposal §13's 14-step
-   * shape: lock, status, allocation-count, bank/cash account
-   * re-validation, AR settings load, period resolution+lock, fixed-order
-   * multi-invoice locking, per-invoice re-validation, exact-allocation-
-   * sum check, receipt-number allocation, journal-number allocation,
+   * `POST /receipts/:id/post` — DRAFT -> POSTED. Proposal §13's step
+   * shape: lock, status, bank/cash account re-validation, AR settings
+   * load, period resolution+lock, fixed-order multi-invoice locking,
+   * per-invoice re-validation, allocated-total-does-not-exceed-header-
+   * amount check, receipt-number allocation, journal-number allocation,
    * direct journal_entries/journal_lines insertion (DRAFT-then-POST
    * ordering — see the inline note below), the receipt's own status
    * update, per-invoice paid_minor/payment_status updates, and the audit
@@ -374,6 +387,13 @@ export class CustomerReceiptsService {
    * failure at any step rolls the whole transaction back — no burned
    * receipt number, no burned journal number, no orphaned journal entry,
    * no partial invoice update, from a failed post.
+   *
+   * On-Account (Unapplied) Supplier Payments & Customer Receipts work
+   * item (docs/finance-work-item-on-account-payments-proposal.md, CTO
+   * Architecture Gate, approved): a receipt with zero or partial
+   * allocations may now post — see the inline notes on Steps 3, 7, and 9
+   * below — and may receive further allocations afterward via
+   * `applyAllocation()`.
    */
   async post(
     tenantId: string,
@@ -395,13 +415,15 @@ export class CustomerReceiptsService {
         throw new ConflictException("This customer receipt is already posted.");
       }
 
-      // Step 3: a receipt must allocate to post — no bare unapplied
-      // receipt in this Work Item (proposal §10).
-      if (before.allocations.length < 1) {
-        throw new UnprocessableEntityException(
-          "A customer receipt must have at least 1 allocation to be posted.",
-        );
-      }
+      // Step 3 (RELAXED — On-Account (Unapplied) Supplier Payments &
+      // Customer Receipts work item, CTO Architecture Gate, approved):
+      // the original AR-1c guard required at least 1 allocation to
+      // post. That guard is removed — a receipt may now post with zero
+      // allocations and later receive one or more via
+      // applyAllocation() (§9 of the proposal). No replacement check is
+      // needed here: Invariant 2 (allocated total never exceeds the
+      // header amount) is enforced below (Step 9, now an inequality),
+      // and zero allocations trivially satisfies it.
 
       // Step 4: re-validate the bank/cash account, independently of
       // whatever passed at create/edit time — an account can be
@@ -433,20 +455,26 @@ export class CustomerReceiptsService {
       // fixed ascending-id order — two concurrent receipts touching an
       // overlapping invoice set always acquire row locks in the same
       // relative order, so neither can deadlock the other (proposal §13
-      // step 7).
+      // step 7). Guarded for the empty-array case (`invoiceIds.length ?
+      // ... : []`) — required the instant Step 3's floor is removed,
+      // since `before.allocations` may now legitimately be `[]`; mirrors
+      // the identical, already-proven-safe guard `reverse()` already
+      // uses for the same reason (proposal §3.4/self-critique).
       const invoiceIds = before.allocations.map((a) => a.invoiceId);
-      const lockedInvoices = await tx
-        .select()
-        .from(customerInvoices)
-        .where(
-          and(
-            inArray(customerInvoices.id, invoiceIds),
-            eq(customerInvoices.tenantId, tenantId),
-            eq(customerInvoices.legalEntityId, legalEntityId),
-          ),
-        )
-        .orderBy(asc(customerInvoices.id))
-        .for("update");
+      const lockedInvoices = invoiceIds.length
+        ? await tx
+            .select()
+            .from(customerInvoices)
+            .where(
+              and(
+                inArray(customerInvoices.id, invoiceIds),
+                eq(customerInvoices.tenantId, tenantId),
+                eq(customerInvoices.legalEntityId, legalEntityId),
+              ),
+            )
+            .orderBy(asc(customerInvoices.id))
+            .for("update")
+        : [];
       const invoicesById = new Map<string, CustomerInvoice>(
         lockedInvoices.map((inv) => [inv.id, inv]),
       );
@@ -480,15 +508,19 @@ export class CustomerReceiptsService {
         }
       }
 
-      // Step 9: full-allocation requirement — no "receipt on account" in
-      // this Work Item (proposal §4/§10).
+      // Step 9 (RELAXED from an exact-equality check to an upper-bound
+      // check — On-Account work item, CTO Architecture Gate, approved).
+      // Invariant 2 (proposal §6.2): 0 <= appliedMinor(r) <=
+      // receiptAmountMinor at all times. Zero and partial allocation are
+      // now valid posting states; only exceeding the header amount is
+      // still rejected.
       const allocatedTotal = before.allocations.reduce(
         (sum, a) => sum + a.allocatedAmountMinor,
         0,
       );
-      if (allocatedTotal !== before.receiptAmountMinor) {
+      if (allocatedTotal > before.receiptAmountMinor) {
         throw new UnprocessableEntityException(
-          `Total allocated amount (${allocatedTotal}) must equal the receipt amount (${before.receiptAmountMinor}) to post.`,
+          `Total allocated amount (${allocatedTotal}) exceeds the receipt amount (${before.receiptAmountMinor}).`,
         );
       }
 
@@ -678,6 +710,273 @@ export class CustomerReceiptsService {
         ...invoiceAuditRows,
       ]);
 
+      return after;
+    });
+  }
+
+  /**
+   * `POST /receipts/:id/allocations` — applies one or more NEW
+   * allocations to an already-POSTED customer receipt. On-Account
+   * (Unapplied) Supplier Payments & Customer Receipts work item
+   * (docs/finance-work-item-on-account-payments-proposal.md §9.1/§9.4,
+   * CTO Architecture Gate, approved implementation authorization).
+   * Byte-mirror of `SupplierPaymentsService.applyAllocation()` for the
+   * AR side. Append-only: no existing allocation row is ever read,
+   * merged into, or updated — every call inserts brand-new row(s), each
+   * carrying its own `allocationDate` (§9.4). A reversed receipt
+   * permanently rejects this call (Step 5) — both at the application
+   * layer here and, independently, at the database layer via the
+   * relaxed immutability trigger (§15.3), as defense-in-depth.
+   */
+  async applyAllocation(
+    tenantId: string,
+    legalEntityId: string,
+    actorUserId: string | null,
+    id: string,
+    dto: ApplyCustomerReceiptAllocationDto,
+  ): Promise<CustomerReceiptWithAllocations> {
+    return withTenant(tenantId, async (tx: TxClient) => {
+      // Step 1-2: load + lock + scope — the very first statement.
+      const before = await this.findByIdInTx(tx, tenantId, legalEntityId, id, {
+        forUpdate: true,
+      });
+      if (!before) {
+        throw new NotFoundException(`No customer receipt found with id ${id}.`);
+      }
+
+      // Step 3: only a POSTED receipt can receive a new allocation.
+      if (before.status !== "POSTED") {
+        throw new UnprocessableEntityException(
+          "Only a posted customer receipt can receive a new allocation.",
+        );
+      }
+      // Step 4: structurally unreachable once Step 3 passes (a POSTED
+      // receipt always has a journalEntryId, per post()'s own Step
+      // 12-13) — kept for parity with reverse()'s own defensive check.
+      if (!before.journalEntryId) {
+        throw new UnprocessableEntityException(
+          "This customer receipt has no posted journal entry.",
+        );
+      }
+
+      // Step 5: a reversed receipt can never receive a further
+      // allocation — its cash movement has been accounting-reversed
+      // (§9.3). Checked directly against the journal entry's own
+      // reversedByJournalEntryId, the single source of truth for
+      // reversal state (no REVERSED status value exists on this table).
+      const [journalEntry] = await tx
+        .select({
+          reversedByJournalEntryId: journalEntries.reversedByJournalEntryId,
+        })
+        .from(journalEntries)
+        .where(eq(journalEntries.id, before.journalEntryId));
+      if (journalEntry?.reversedByJournalEntryId != null) {
+        throw new ConflictException(
+          "This customer receipt has already been reversed and cannot receive further allocations.",
+        );
+      }
+
+      // Step 6: appliedMinor(r) — the true, current, cumulative applied
+      // amount, over ALL existing allocation rows (create-time and
+      // every prior applyAllocation() call alike).
+      const currentlyAppliedMinor = before.allocations.reduce(
+        (sum, a) => sum + a.allocatedAmountMinor,
+        0,
+      );
+
+      // Step 7: reused unmodified — rejects a duplicate invoiceId within
+      // this request, and any invoiceId not belonging to this receipt's
+      // own customer in this legal entity.
+      await this.validateAllocationsShapeOrThrow(
+        tx,
+        tenantId,
+        legalEntityId,
+        before.customerId,
+        dto.allocations,
+      );
+
+      // Step 8: the incremental, always-enforced form of Invariant 2
+      // (§6.2/§9.2) — currentlyAppliedMinor + this request's total must
+      // not exceed the receipt's own header amount.
+      const requestedTotal = dto.allocations.reduce(
+        (sum, a) => sum + a.allocatedAmountMinor,
+        0,
+      );
+      if (currentlyAppliedMinor + requestedTotal > before.receiptAmountMinor) {
+        throw new UnprocessableEntityException(
+          `Applying ${requestedTotal} would bring this receipt's total applied amount to ${
+            currentlyAppliedMinor + requestedTotal
+          }, exceeding its amount of ${before.receiptAmountMinor}.`,
+        );
+      }
+
+      // Step 9 (§9.4 Rules 1-2): effectiveAllocationDate defaults to
+      // today (Rule 5), must not be earlier than the receipt's own
+      // receiptDate (Rule 1), and must not be later than today — no
+      // future-effective allocation (Rule 2, CTO Architecture Gate
+      // Option A; see reversal.util.ts's scheduled-reversals precedent
+      // discussion in the proposal for why this codebase's only
+      // established future-effective mechanism is a deferred-execution
+      // design this endpoint deliberately does not replicate).
+      const todayUtc = new Date().toISOString().slice(0, 10);
+      const effectiveAllocationDate = dto.allocationDate ?? todayUtc;
+      if (effectiveAllocationDate > todayUtc) {
+        throw new UnprocessableEntityException(
+          `Allocation date ${effectiveAllocationDate} cannot be later than today (${todayUtc}) — this endpoint does not support a future-effective allocation.`,
+        );
+      }
+      if (effectiveAllocationDate < before.receiptDate) {
+        throw new UnprocessableEntityException(
+          `Allocation date ${effectiveAllocationDate} cannot be earlier than this receipt's own receipt date ${before.receiptDate}.`,
+        );
+      }
+
+      // Step 10 (§9.4 Rules 3-4/6-7): resolve + lock the OPEN period
+      // covering the allocation event's OWN date — never before.
+      // receiptDate's period — reusing the exact shared helper
+      // reverse() itself already uses (resolveOpenPeriodOrThrow, backed
+      // by JournalEntriesService.resolvePeriodForDate(), which locks the
+      // period row via SELECT ... FOR UPDATE). Enforced even though this
+      // call inserts no journal_entries row (Rule 7).
+      await resolveOpenPeriodOrThrow(
+        this.journalEntries,
+        tx,
+        tenantId,
+        legalEntityId,
+        effectiveAllocationDate,
+      );
+
+      // Step 11: lock every targeted invoice, fixed ascending-id order —
+      // identical pattern to post() Step 7 / reverse().
+      const invoiceIds = dto.allocations.map((a) => a.invoiceId);
+      const lockedInvoices = invoiceIds.length
+        ? await tx
+            .select()
+            .from(customerInvoices)
+            .where(
+              and(
+                inArray(customerInvoices.id, invoiceIds),
+                eq(customerInvoices.tenantId, tenantId),
+                eq(customerInvoices.legalEntityId, legalEntityId),
+              ),
+            )
+            .orderBy(asc(customerInvoices.id))
+            .for("update")
+        : [];
+      const invoicesById = new Map<string, CustomerInvoice>(
+        lockedInvoices.map((inv) => [inv.id, inv]),
+      );
+
+      // Step 12: re-validate each targeted invoice under lock — identical
+      // checks to post() Step 8.
+      for (const allocation of dto.allocations) {
+        const invoice = invoicesById.get(allocation.invoiceId);
+        if (!invoice) {
+          throw new UnprocessableEntityException(
+            `Allocated invoice ${allocation.invoiceId} could not be found in this legal entity.`,
+          );
+        }
+        if (invoice.status !== "POSTED") {
+          throw new UnprocessableEntityException(
+            `Invoice ${allocation.invoiceId} is not posted and cannot receive a receipt allocation.`,
+          );
+        }
+        if (invoice.customerId !== before.customerId) {
+          throw new UnprocessableEntityException(
+            `Invoice ${allocation.invoiceId} does not belong to this receipt's customer.`,
+          );
+        }
+        const outstanding = invoice.totalMinor - invoice.paidMinor;
+        if (allocation.allocatedAmountMinor > outstanding) {
+          throw new UnprocessableEntityException(
+            `Allocation of ${allocation.allocatedAmountMinor} to invoice ${allocation.invoiceId} exceeds its outstanding balance of ${outstanding}.`,
+          );
+        }
+      }
+
+      // Step 13: INSERT one new row per dto.allocations[*] — append-only,
+      // each with allocationDate = effectiveAllocationDate. No existing
+      // row is ever read, merged into, or updated.
+      const insertedAllocations = await tx
+        .insert(customerReceiptAllocations)
+        .values(
+          dto.allocations.map((allocation) => ({
+            tenantId,
+            receiptId: id,
+            invoiceId: allocation.invoiceId,
+            allocatedAmountMinor: allocation.allocatedAmountMinor,
+            allocationDate: effectiveAllocationDate,
+          })),
+        )
+        .returning();
+
+      // Step 14: settle each newly-allocated invoice — identical
+      // arithmetic to post() Step 14, including the same "never set
+      // updated_at" caveat (the immutability trigger rejects it
+      // alongside paid_minor/payment_status).
+      const invoiceAuditRows: {
+        tenantId: string;
+        legalEntityId: string;
+        actorUserId: string | undefined;
+        action: string;
+        entityType: string;
+        entityId: string;
+        beforeState: Record<string, unknown>;
+        afterState: Record<string, unknown>;
+      }[] = [];
+      for (const allocation of dto.allocations) {
+        const invoice = invoicesById.get(allocation.invoiceId)!;
+        const newPaidMinor =
+          invoice.paidMinor + allocation.allocatedAmountMinor;
+        const newPaymentStatus =
+          newPaidMinor === invoice.totalMinor
+            ? "PAID"
+            : newPaidMinor > 0
+              ? "PARTIALLY_PAID"
+              : "UNPAID";
+        const [updatedInvoice] = await tx
+          .update(customerInvoices)
+          .set({
+            paidMinor: newPaidMinor,
+            paymentStatus: newPaymentStatus,
+          })
+          .where(eq(customerInvoices.id, invoice.id))
+          .returning();
+        invoiceAuditRows.push({
+          tenantId,
+          legalEntityId,
+          actorUserId: actorUserId ?? undefined,
+          action: "UPDATE",
+          entityType: "customer_invoice",
+          entityId: invoice.id,
+          beforeState: invoice as unknown as Record<string, unknown>,
+          afterState: updatedInvoice as unknown as Record<string, unknown>,
+        });
+      }
+
+      const after: CustomerReceiptWithAllocations = {
+        ...before,
+        allocations: [...before.allocations, ...insertedAllocations],
+      };
+
+      // Step 15: audit — one UPDATE row on the receipt (before/after
+      // allocation list), one UPDATE row per settled invoice.
+      await tx.insert(auditLogs).values([
+        {
+          tenantId,
+          legalEntityId,
+          actorUserId: actorUserId ?? undefined,
+          action: "UPDATE",
+          entityType: "customer_receipt",
+          entityId: id,
+          beforeState: before as unknown as Record<string, unknown>,
+          afterState: after as unknown as Record<string, unknown>,
+        },
+        ...invoiceAuditRows,
+      ]);
+
+      // Step 16: return the receipt with its full current allocation
+      // list.
       return after;
     });
   }
@@ -1086,11 +1385,18 @@ export class CustomerReceiptsService {
     return `JE-${String(lastAssignedNumber).padStart(6, "0")}`;
   }
 
+  /** `allocationDate` is required on every inserted row (schema.ts,
+   * proposal §15.1) — create()/update() both pass the receipt's own
+   * (possibly just-patched) receiptDate, since every row created through
+   * this path is, by construction, contemporaneous with the receipt
+   * itself (only applyAllocation()'s own INSERT, §9.1 Step 13, ever
+   * writes a materially different allocationDate). */
   private async insertAllocations(
     tx: TxClient,
     tenantId: string,
     receiptId: string,
     allocations: CreateCustomerReceiptAllocationDto[],
+    allocationDate: string,
   ): Promise<CustomerReceiptAllocation[]> {
     return tx
       .insert(customerReceiptAllocations)
@@ -1100,6 +1406,7 @@ export class CustomerReceiptsService {
           receiptId,
           invoiceId: allocation.invoiceId,
           allocatedAmountMinor: allocation.allocatedAmountMinor,
+          allocationDate,
         })),
       )
       .returning();

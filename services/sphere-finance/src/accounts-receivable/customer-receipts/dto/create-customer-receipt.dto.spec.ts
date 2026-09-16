@@ -115,7 +115,7 @@ describe("CreateCustomerReceiptDto", () => {
     expect(errors.some((e) => e.property === "bankCashAccountId")).toBe(true);
   });
 
-  it("rejects an empty allocations array", async () => {
+  it("accepts an empty allocations array (on-account / zero-allocation posting — proposal §9/§15.2, Discrepancy #2)", async () => {
     const errors = await validateDto({
       customerId: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
       receiptDate: "2026-01-15",
@@ -124,7 +124,7 @@ describe("CreateCustomerReceiptDto", () => {
       bankCashAccountId: "3fa85f64-5717-4562-b3fc-2c963f66afa6",
       allocations: [],
     });
-    expect(errors.some((e) => e.property === "allocations")).toBe(true);
+    expect(errors).toHaveLength(0);
   });
 
   it("rejects a missing allocations array", async () => {

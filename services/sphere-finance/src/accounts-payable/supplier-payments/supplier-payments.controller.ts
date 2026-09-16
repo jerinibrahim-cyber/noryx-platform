@@ -22,6 +22,7 @@ import type { AuthenticatedRequestUser } from "@noryx/shared-types";
 import { SupplierPaymentsService } from "./supplier-payments.service";
 import { CreateSupplierPaymentDto } from "./dto/create-supplier-payment.dto";
 import { UpdateSupplierPaymentDto } from "./dto/update-supplier-payment.dto";
+import { ApplySupplierPaymentAllocationDto } from "./dto/apply-supplier-payment-allocation.dto";
 import { ReverseJournalEntryDto } from "../../journal-entries/dto/reverse-journal-entry.dto";
 
 /**
@@ -144,5 +145,35 @@ export class SupplierPaymentsController {
       "Supplier payments require",
     );
     return this.payments.reverse(tenantId, legalEntityId, user.userId, id, dto);
+  }
+
+  /**
+   * On-Account (Unapplied) Supplier Payments & Customer Receipts work
+   * item (docs/finance-work-item-on-account-payments-proposal.md
+   * §8.2/§9.1, CTO Architecture Gate, approved). Applies one or more
+   * NEW allocations to an already-POSTED supplier payment. `finance.
+   * poster` only — same write-role posture as `/post` and `/reverse`;
+   * `@HttpCode(200)` since this mutates an existing resource rather
+   * than creating one.
+   */
+  @Post(":id/allocations")
+  @HttpCode(200)
+  @Roles("finance.poster")
+  applyAllocation(
+    @CurrentUser() user: AuthenticatedRequestUser,
+    @Param("id") id: string,
+    @Body() dto: ApplySupplierPaymentAllocationDto,
+  ) {
+    const { tenantId, legalEntityId } = requireTenantContext(
+      user,
+      "Supplier payments require",
+    );
+    return this.payments.applyAllocation(
+      tenantId,
+      legalEntityId,
+      user.userId,
+      id,
+      dto,
+    );
   }
 }

@@ -37,6 +37,14 @@ export interface CustomerBalanceResult {
   totalInvoicedMinor: number;
   totalReceivedMinor: number;
   totalOutstandingMinor: number;
+  /** On-Account (Unapplied) Supplier Payments & Customer Receipts work
+   * item (docs/finance-work-item-on-account-payments-proposal.md §11.3,
+   * CTO Architecture Gate, approved). Additive field — byte-mirror of
+   * SupplierBalanceResult.unappliedPaymentsMinor for the AR side: the
+   * portion of this customer's POSTED, not-(yet-as-of-`asOfDate`)-
+   * reversed receipts that has not been allocated to any invoice as of
+   * `asOfDate`. `totalOutstandingMinor` is unchanged in meaning. */
+  unappliedReceiptsMinor: number;
   currencyCode: string;
 }
 
@@ -116,6 +124,11 @@ export interface ArReconciliationResult {
   legalEntityId: string;
   arControlAccountId: string;
   subLedgerTotalOutstandingMinor: number;
+  /** On-Account (Unapplied) Supplier Payments & Customer Receipts work
+   * item (docs/finance-work-item-on-account-payments-proposal.md §11.2,
+   * CTO Architecture Gate, approved). Additive field — byte-mirror of
+   * ApReconciliationResult.unappliedPaymentsMinor for the AR side. */
+  unappliedReceiptsMinor: number;
   glArControlAccountBalanceMinor: number;
   differenceMinor: number;
   reconciled: boolean;
@@ -196,6 +209,17 @@ export class ArReportsService {
             )
           : await this.currentTotals(tx, tenantId, legalEntityId, customerId);
 
+        // On-Account work item (§11.3, CTO Architecture Gate, approved)
+        // — byte-mirror of ApReportsService.getSupplierBalance()'s own
+        // unappliedCashMinor() call.
+        const unappliedReceiptsMinor = await this.unappliedCashMinor(
+          tx,
+          tenantId,
+          legalEntityId,
+          customerId,
+          asOfDate,
+        );
+
         return {
           customerId: customer.id,
           customerCode: customer.code,
@@ -206,6 +230,7 @@ export class ArReportsService {
           totalReceivedMinor: totals.totalReceivedMinor,
           totalOutstandingMinor:
             totals.totalInvoicedMinor - totals.totalReceivedMinor,
+          unappliedReceiptsMinor,
           currencyCode,
         };
       },
@@ -664,6 +689,20 @@ export class ArReportsService {
         const subLedgerTotalOutstandingMinor =
           subLedger.totalInvoicedMinor - subLedger.totalReceivedMinor;
 
+        // On-Account (Unapplied) Supplier Payments & Customer Receipts
+        // work item (docs/finance-work-item-on-account-payments-
+        // proposal.md §11.2, CTO Architecture Gate, approved).
+        // Byte-mirror of ApReportsService.getApReconciliation()'s own
+        // unappliedCashMinor() call — one formula, reused identically
+        // whether or not the caller supplied `asOf`.
+        const unappliedReceiptsMinor = await this.unappliedCashMinor(
+          tx,
+          tenantId,
+          legalEntityId,
+          null,
+          asOf,
+        );
+
         const glArControlAccountBalanceMinor = await this.glAssetBalance(
           tx,
           tenantId,
@@ -672,14 +711,19 @@ export class ArReportsService {
           asOf,
         );
 
+        // On-Account work item (§11.2, CTO Architecture Gate, approved)
+        // — corrected formula, byte-mirror of the AP side.
         const differenceMinor =
-          subLedgerTotalOutstandingMinor - glArControlAccountBalanceMinor;
+          subLedgerTotalOutstandingMinor -
+          unappliedReceiptsMinor -
+          glArControlAccountBalanceMinor;
 
         return {
           asOf,
           legalEntityId,
           arControlAccountId: settings.arControlAccountId,
           subLedgerTotalOutstandingMinor,
+          unappliedReceiptsMinor,
           glArControlAccountBalanceMinor,
           differenceMinor,
           reconciled: differenceMinor === 0,
@@ -841,6 +885,18 @@ export class ArReportsService {
    * plus the same tenant/legal-entity/optional-customer filters). This
    * is additive only — the receipt subquery itself is untouched.
    *
+   * On-Account (Unapplied) Supplier Payments & Customer Receipts work
+   * item (docs/finance-work-item-on-account-payments-proposal.md §11.4,
+   * CTO Architecture Gate, approved). Byte-mirror of
+   * ApReportsService.asOfTotals()'s own rewrite: the receipt-allocation
+   * subquery's predicate changed from
+   * `cr.receipt_date ${cmp} cutoffDate` to
+   * `cra.allocation_date ${cmp} cutoffDate` (an allocation row's own
+   * event date, independent of its parent receipt's date), plus a
+   * reversal-timing gate identical in shape to the AP side. The
+   * credit-note-allocation subquery below is deliberately UNTOUCHED —
+   * out of scope for this work item.
+   *
    * Selected for ANY explicit `asOf` value the caller supplies —
    * whether before, equal to, or after today (§9.1's CTO correction).
    * This does NOT rely on `paid_minor`'s current value at all — that is
@@ -901,11 +957,18 @@ export class ArReportsService {
           FROM customer_receipt_allocations cra
           INNER JOIN customer_receipts cr ON cr.id = cra.receipt_id
           INNER JOIN customer_invoices ci2 ON ci2.id = cra.invoice_id
+          LEFT JOIN journal_entries je ON je.id = cr.journal_entry_id
+          LEFT JOIN journal_entries rev_je
+            ON rev_je.id = je.reversed_by_journal_entry_id
           WHERE cra.tenant_id = ${tenantId}
             AND cr.tenant_id = ${tenantId}
             AND cr.legal_entity_id = ${legalEntityId}
             AND cr.status = 'POSTED'
-            AND cr.receipt_date ${cmp} ${cutoffDate}::date
+            AND cra.allocation_date ${cmp} ${cutoffDate}::date
+            AND (
+              je.reversed_by_journal_entry_id IS NULL
+              OR rev_je.transaction_date > ${cutoffDate}::date
+            )
             AND ci2.tenant_id = ${tenantId}
             AND ci2.legal_entity_id = ${legalEntityId}
             AND ci2.status = 'POSTED'
@@ -937,6 +1000,45 @@ export class ArReportsService {
       totalInvoicedMinor: this.toNumber(rows[0]?.total_invoiced),
       totalReceivedMinor: this.toNumber(rows[0]?.total_received),
     };
+  }
+
+  /** On-Account (Unapplied) Supplier Payments & Customer Receipts work
+   * item (docs/finance-work-item-on-account-payments-proposal.md
+   * §11.2/§11.3, CTO Architecture Gate, approved). Byte-mirror of
+   * ApReportsService.unappliedCashMinor() for the AR side. Shared
+   * helper reused by `getArReconciliation()` and `getCustomerBalance()`
+   * — the SAME predicate `asOfTotals()`'s own receipt-allocation
+   * subquery now uses. `customerId: null` aggregates across the whole
+   * legal entity (reconciliation's own call shape). */
+  private async unappliedCashMinor(
+    tx: TxClient,
+    tenantId: string,
+    legalEntityId: string,
+    customerId: string | null,
+    cutoffDate: string,
+  ): Promise<number> {
+    const customerFilter = customerId
+      ? sql`AND cr.customer_id = ${customerId}`
+      : sql``;
+    const rows = (await tx.execute(sql`
+      SELECT COALESCE(SUM(cr.receipt_amount_minor - COALESCE(applied.amt, 0)), 0) AS unapplied
+      FROM customer_receipts cr
+      LEFT JOIN journal_entries je ON je.id = cr.journal_entry_id
+      LEFT JOIN journal_entries rev_je ON rev_je.id = je.reversed_by_journal_entry_id
+      LEFT JOIN LATERAL (
+        SELECT SUM(cra.allocated_amount_minor) AS amt
+        FROM customer_receipt_allocations cra
+        WHERE cra.receipt_id = cr.id
+          AND cra.allocation_date <= ${cutoffDate}::date
+      ) applied ON true
+      WHERE cr.tenant_id = ${tenantId}
+        AND cr.legal_entity_id = ${legalEntityId}
+        AND cr.status = 'POSTED'
+        AND cr.receipt_date <= ${cutoffDate}::date
+        AND (je.reversed_by_journal_entry_id IS NULL OR rev_je.transaction_date > ${cutoffDate}::date)
+        ${customerFilter}
+    `)) as unknown as Array<{ unapplied: unknown }>;
+    return this.toNumber(rows[0]?.unapplied);
   }
 
   /** The GL side of the reconciliation invariant (proposal §9.2) — the

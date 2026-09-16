@@ -37,6 +37,16 @@ export interface SupplierBalanceResult {
   totalBilledMinor: number;
   totalPaidMinor: number;
   totalOutstandingMinor: number;
+  /** On-Account (Unapplied) Supplier Payments & Customer Receipts work
+   * item (docs/finance-work-item-on-account-payments-proposal.md §11.3,
+   * CTO Architecture Gate, approved). Additive field — the portion of
+   * this supplier's POSTED, not-(yet-as-of-`asOfDate`)-reversed payments
+   * that has not been allocated to any bill as of `asOfDate`.
+   * `totalOutstandingMinor` is unchanged in meaning: it continues to
+   * mean only the sum of open bill balances (§6.1/§11.1) — cash paid
+   * but not yet matched is a deliberately separate concept, not folded
+   * into it. */
+  unappliedPaymentsMinor: number;
   currencyCode: string;
 }
 
@@ -116,6 +126,18 @@ export interface ApReconciliationResult {
   legalEntityId: string;
   apControlAccountId: string;
   subLedgerTotalOutstandingMinor: number;
+  /** On-Account (Unapplied) Supplier Payments & Customer Receipts work
+   * item (docs/finance-work-item-on-account-payments-proposal.md §11.2,
+   * CTO Architecture Gate, approved). Additive field — the portion of
+   * every POSTED, not-(yet-as-of-`asOf`)-reversed supplier payment in
+   * this legal entity that has not been allocated to any bill as of
+   * `asOf`. Subtracted from `subLedgerTotalOutstandingMinor` before
+   * comparing against `glApControlAccountBalanceMinor` (see
+   * `differenceMinor` below) — the GL side already reflects every
+   * posted payment's full cash amount whether or not it has been
+   * matched to a bill yet, so the sub-ledger side must remove the same
+   * unmatched amount to stay comparable. */
+  unappliedPaymentsMinor: number;
   glApControlAccountBalanceMinor: number;
   differenceMinor: number;
   reconciled: boolean;
@@ -188,6 +210,19 @@ export class ApReportsService {
             )
           : await this.currentTotals(tx, tenantId, legalEntityId, supplierId);
 
+        // On-Account work item (§11.3, CTO Architecture Gate, approved)
+        // — the identical unappliedCashMinor() helper §11.2's
+        // getApReconciliation() uses, scoped to this one supplier via
+        // the existing supplierId parameter, at the same effective
+        // cutoff this method already resolves for asOfDate above.
+        const unappliedPaymentsMinor = await this.unappliedCashMinor(
+          tx,
+          tenantId,
+          legalEntityId,
+          supplierId,
+          asOfDate,
+        );
+
         return {
           supplierId: supplier.id,
           supplierCode: supplier.code,
@@ -198,6 +233,7 @@ export class ApReportsService {
           totalPaidMinor: totals.totalPaidMinor,
           totalOutstandingMinor:
             totals.totalBilledMinor - totals.totalPaidMinor,
+          unappliedPaymentsMinor,
           currencyCode,
         };
       },
@@ -625,6 +661,20 @@ export class ApReportsService {
         const subLedgerTotalOutstandingMinor =
           subLedger.totalBilledMinor - subLedger.totalPaidMinor;
 
+        // On-Account (Unapplied) Supplier Payments & Customer Receipts
+        // work item (docs/finance-work-item-on-account-payments-
+        // proposal.md §11.2, CTO Architecture Gate, approved). One
+        // formula, reused identically whether or not the caller
+        // supplied `asOf` — no separate "live" formula (§11.2's
+        // definitive-formula reasoning).
+        const unappliedPaymentsMinor = await this.unappliedCashMinor(
+          tx,
+          tenantId,
+          legalEntityId,
+          null,
+          asOf,
+        );
+
         const glApControlAccountBalanceMinor = await this.glLiabilityBalance(
           tx,
           tenantId,
@@ -633,14 +683,24 @@ export class ApReportsService {
           asOf,
         );
 
+        // On-Account work item (§11.2, CTO Architecture Gate, approved)
+        // — corrected formula: glApControlAccountBalanceMinor already
+        // reflects every posted payment's full cash amount, applied or
+        // not; subtracting unappliedPaymentsMinor from the sub-ledger
+        // side removes exactly the amount that has left the bank but
+        // not yet been matched to a specific bill, bringing both sides
+        // back to provable equality at every cutoff.
         const differenceMinor =
-          subLedgerTotalOutstandingMinor - glApControlAccountBalanceMinor;
+          subLedgerTotalOutstandingMinor -
+          unappliedPaymentsMinor -
+          glApControlAccountBalanceMinor;
 
         return {
           asOf,
           legalEntityId,
           apControlAccountId: settings.apControlAccountId,
           subLedgerTotalOutstandingMinor,
+          unappliedPaymentsMinor,
           glApControlAccountBalanceMinor,
           differenceMinor,
           reconciled: differenceMinor === 0,
@@ -797,7 +857,24 @@ export class ApReportsService {
    * note's own `status = 'POSTED'` and `debit_note_date` qualifying
    * against `cutoffDate` under the same `cmp`/`strict` flag, plus the
    * same tenant/legal-entity/optional-supplier filters). This is
-   * additive only — the payment subquery itself is untouched. */
+   * additive only — the payment subquery itself is untouched.
+   *
+   * On-Account (Unapplied) Supplier Payments & Customer Receipts work
+   * item (docs/finance-work-item-on-account-payments-proposal.md §11.4,
+   * CTO Architecture Gate, approved). The payment-allocation subquery's
+   * predicate changed from `sp.payment_date ${cmp} cutoffDate` to
+   * `spa.allocation_date ${cmp} cutoffDate` (an allocation row's own
+   * event date, independent of its parent payment's date — a payment
+   * may now post with zero/partial allocations and be allocated later),
+   * plus a reversal-timing gate: an allocation contributes only if its
+   * parent payment's journal entry has not been reversed on or before
+   * `cutoffDate` (`reversed_by_journal_entry_id IS NULL`, or the
+   * reversal's own `transaction_date > cutoffDate`) — otherwise a
+   * report run after a reversal could still show a bill as settled by
+   * cash the ledger says was returned. The debit-note-allocation
+   * subquery below is deliberately UNTOUCHED — out of scope for this
+   * work item; it has no `allocation_date` column and no reversal-aware
+   * requirement was raised for it. */
   private async asOfTotals(
     tx: TxClient,
     tenantId: string,
@@ -854,11 +931,18 @@ export class ApReportsService {
           FROM supplier_payment_allocations spa
           INNER JOIN supplier_payments sp ON sp.id = spa.payment_id
           INNER JOIN supplier_bills b2 ON b2.id = spa.bill_id
+          LEFT JOIN journal_entries je ON je.id = sp.journal_entry_id
+          LEFT JOIN journal_entries rev_je
+            ON rev_je.id = je.reversed_by_journal_entry_id
           WHERE spa.tenant_id = ${tenantId}
             AND sp.tenant_id = ${tenantId}
             AND sp.legal_entity_id = ${legalEntityId}
             AND sp.status = 'POSTED'
-            AND sp.payment_date ${cmp} ${cutoffDate}::date
+            AND spa.allocation_date ${cmp} ${cutoffDate}::date
+            AND (
+              je.reversed_by_journal_entry_id IS NULL
+              OR rev_je.transaction_date > ${cutoffDate}::date
+            )
             AND b2.tenant_id = ${tenantId}
             AND b2.legal_entity_id = ${legalEntityId}
             AND b2.status = 'POSTED'
@@ -887,6 +971,52 @@ export class ApReportsService {
       totalBilledMinor: this.toNumber(rows[0]?.total_billed),
       totalPaidMinor: this.toNumber(rows[0]?.total_paid),
     };
+  }
+
+  /** On-Account (Unapplied) Supplier Payments & Customer Receipts work
+   * item (docs/finance-work-item-on-account-payments-proposal.md
+   * §11.2/§11.3, CTO Architecture Gate, approved). Shared helper reused
+   * by `getApReconciliation()` and `getSupplierBalance()` — the SAME
+   * predicate `asOfTotals()`'s own payment-allocation subquery now uses
+   * (`allocation_date <= cutoffDate`, plus "not reversed as of
+   * `cutoffDate`"), applied at the payment level instead of the
+   * per-bill level, plus one additional outer gate
+   * (`sp.payment_date <= cutoffDate`) needed because this query is
+   * payment-driven and must also count a POSTED, not-yet-allocated
+   * payment. Reusing one predicate for both this term and
+   * `asOfTotals()`'s bill-side reconstruction is required for temporal
+   * consistency (§11.5) — two independently-written date/reversal
+   * conditions could silently disagree. `supplierId: null` aggregates
+   * across the whole legal entity (reconciliation's own call shape). */
+  private async unappliedCashMinor(
+    tx: TxClient,
+    tenantId: string,
+    legalEntityId: string,
+    supplierId: string | null,
+    cutoffDate: string,
+  ): Promise<number> {
+    const supplierFilter = supplierId
+      ? sql`AND sp.supplier_id = ${supplierId}`
+      : sql``;
+    const rows = (await tx.execute(sql`
+      SELECT COALESCE(SUM(sp.payment_amount_minor - COALESCE(applied.amt, 0)), 0) AS unapplied
+      FROM supplier_payments sp
+      LEFT JOIN journal_entries je ON je.id = sp.journal_entry_id
+      LEFT JOIN journal_entries rev_je ON rev_je.id = je.reversed_by_journal_entry_id
+      LEFT JOIN LATERAL (
+        SELECT SUM(spa.allocated_amount_minor) AS amt
+        FROM supplier_payment_allocations spa
+        WHERE spa.payment_id = sp.id
+          AND spa.allocation_date <= ${cutoffDate}::date
+      ) applied ON true
+      WHERE sp.tenant_id = ${tenantId}
+        AND sp.legal_entity_id = ${legalEntityId}
+        AND sp.status = 'POSTED'
+        AND sp.payment_date <= ${cutoffDate}::date
+        AND (je.reversed_by_journal_entry_id IS NULL OR rev_je.transaction_date > ${cutoffDate}::date)
+        ${supplierFilter}
+    `)) as unknown as Array<{ unapplied: unknown }>;
+    return this.toNumber(rows[0]?.unapplied);
   }
 
   /** The GL side of the reconciliation invariant (proposal §6.4) — the AP
