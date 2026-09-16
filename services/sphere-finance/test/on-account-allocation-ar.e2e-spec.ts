@@ -9,8 +9,6 @@ import {
   closeDb as closePlatformDb,
   tenants,
   legalEntities,
-  auditLogs,
-  and,
   eq,
   sql,
 } from "@noryx/db-core";

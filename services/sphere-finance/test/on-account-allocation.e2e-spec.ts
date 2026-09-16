@@ -20,7 +20,6 @@ import {
   withTenant,
 } from "../src/db/db";
 import {
-  apSettings,
   chartOfAccounts,
   journalEntries,
   supplierBills,
