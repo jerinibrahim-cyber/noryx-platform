@@ -1194,4 +1194,350 @@ describe("On-Account — Customer Receipts: zero/partial posting, applyAllocatio
       );
     });
   });
+
+  // -------------------------------------------------------------------
+  // NORYX CTO — final closure round. AR byte-mirror of the AP file's own
+  // "second legal entity" describe block (Table 19.1 #14, #24),
+  // previously disclosed as a deliberate, reasoned scope reduction
+  // (the AP-side fixtures already proved the identical, byte-mirrored
+  // findByIdInTx()/resolveOpenPeriodOrThrow() code path) but now closed
+  // per the CTO's explicit requirement that every Table 19.1 scenario
+  // have dedicated coverage on both sides. #24 needs a second legal
+  // entity with a genuine gap between two OPEN accounting periods — the
+  // main describe block's own wide-open 2024-2028 period fixture makes
+  // that structurally impossible to construct. #14 reuses the same
+  // second-legal-entity fixture, since both need one anyway.
+  // -------------------------------------------------------------------
+  describe("second legal entity — cross-entity applyAllocation() and no-covering-period allocationDate (Table 19.1 #14, #24, AR)", () => {
+    function daysAgo(n: number): string {
+      const d = new Date();
+      d.setUTCDate(d.getUTCDate() - n);
+      return d.toISOString().slice(0, 10);
+    }
+
+    let legalEntity2Id: string;
+    let le2RevenueAccountId: string;
+    let le2BankAccountId: string;
+    let le2CustomerId: string;
+
+    function le2TokenFor(roles: string[]) {
+      return jwt.sign({
+        sub: randomUUID(),
+        tenantId,
+        legalEntityId: legalEntity2Id,
+        tier: "TENANT_INTERNAL",
+        roles,
+        modules: ["sphere-finance"],
+      });
+    }
+
+    beforeAll(async () => {
+      const platformDb = getPlatformDb();
+      const [entity2] = await platformDb
+        .insert(legalEntities)
+        .values({
+          tenantId,
+          name: "On-Account AR E2E Entity 2 (cross-LE / period-gap fixture)",
+          code: `OAAAR2-${suffix}`,
+          countryCode: "AE",
+          currencyCode: "AED",
+          isDefault: false,
+        })
+        .returning();
+      legalEntity2Id = entity2!.id;
+
+      const financeDb = getFinanceDb();
+      const [revenue2] = await financeDb
+        .insert(chartOfAccounts)
+        .values({
+          tenantId,
+          legalEntityId: legalEntity2Id,
+          code: `OAAAR2-REV-${suffix}`,
+          name: "Sales Revenue (LE2)",
+          type: "REVENUE",
+        })
+        .returning();
+      const [arControl2] = await financeDb
+        .insert(chartOfAccounts)
+        .values({
+          tenantId,
+          legalEntityId: legalEntity2Id,
+          code: `OAAAR2-AR-${suffix}`,
+          name: "Accounts Receivable (LE2)",
+          type: "ASSET",
+        })
+        .returning();
+      const [bank2] = await financeDb
+        .insert(chartOfAccounts)
+        .values({
+          tenantId,
+          legalEntityId: legalEntity2Id,
+          code: `OAAAR2-BANK-${suffix}`,
+          name: "Main Bank (LE2)",
+          type: "ASSET",
+        })
+        .returning();
+      le2RevenueAccountId = revenue2!.id;
+      le2BankAccountId = bank2!.id;
+
+      const le2AdminToken = le2TokenFor(["finance.admin"]);
+      await request(app.getHttpServer())
+        .post("/v1/finance/ar/settings")
+        .set("Authorization", `Bearer ${le2AdminToken}`)
+        .send({ arControlAccountId: arControl2!.id })
+        .expect(201);
+
+      const customer2 = await request(app.getHttpServer())
+        .post("/v1/finance/customers")
+        .set("Authorization", `Bearer ${le2AdminToken}`)
+        .send({ code: `OAAAR2-CUST-${suffix}`, name: "LE2 Test Customer" })
+        .expect(201);
+      le2CustomerId = customer2.body.data.id;
+
+      // Two OPEN periods with a genuine, deliberate gap between them:
+      // daysAgo(39) through daysAgo(10) is covered by neither period.
+      await request(app.getHttpServer())
+        .post("/v1/finance/accounting-periods")
+        .set("Authorization", `Bearer ${le2AdminToken}`)
+        .send({
+          code: `OAAAR2-EARLY-${suffix}`,
+          startDate: daysAgo(90),
+          endDate: daysAgo(40),
+        })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post("/v1/finance/accounting-periods")
+        .set("Authorization", `Bearer ${le2AdminToken}`)
+        .send({
+          code: `OAAAR2-LATE-${suffix}`,
+          startDate: daysAgo(9),
+          endDate: "2028-12-31",
+        })
+        .expect(201);
+    });
+
+    it("#24 — applyAllocation() rejects an allocationDate falling in NO covering accounting period (422, AR)", async () => {
+      const token = le2TokenFor(["finance.poster"]);
+      const invoice = await request(app.getHttpServer())
+        .post("/v1/finance/invoices")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          customerId: le2CustomerId,
+          invoiceDate: daysAgo(80),
+          lines: [{ accountId: le2RevenueAccountId, amountMinor: 500 }],
+        })
+        .expect(201);
+      const invoicePosted = await request(app.getHttpServer())
+        .post(`/v1/finance/invoices/${invoice.body.data.id}/post`)
+        .set("Authorization", `Bearer ${token}`)
+        .expect(200);
+
+      const receipt = await request(app.getHttpServer())
+        .post("/v1/finance/receipts")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          customerId: le2CustomerId,
+          receiptDate: daysAgo(80),
+          receiptAmountMinor: 500,
+          receiptMethod: "BANK_TRANSFER",
+          bankCashAccountId: le2BankAccountId,
+          allocations: [],
+        })
+        .expect(201);
+      const receiptPosted = await request(app.getHttpServer())
+        .post(`/v1/finance/receipts/${receipt.body.data.id}/post`)
+        .set("Authorization", `Bearer ${token}`)
+        .expect(200);
+
+      await request(app.getHttpServer())
+        .post(`/v1/finance/receipts/${receiptPosted.body.data.id}/allocations`)
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          allocations: [
+            {
+              invoiceId: invoicePosted.body.data.id,
+              allocatedAmountMinor: 500,
+            },
+          ],
+          allocationDate: daysAgo(25), // inside the deliberate period gap
+        })
+        .expect(422);
+    });
+
+    it("#14 — applyAllocation() against a receipt from a DIFFERENT legal entity is rejected (404, existing tenant/legal-entity scoping, AR)", async () => {
+      // Uses the main describe block's own primary-legal-entity fixture
+      // (customerId, bankAccountId, ...) but calls through a token
+      // scoped to THIS describe block's second legal entity —
+      // ArCustomerReceiptsService's own findByIdInTx() (the exact byte-
+      // mirror of the AP service's own method) scopes its lookup by
+      // (tenantId, legalEntityId) taken from the caller's own JWT, so a
+      // receipt that genuinely exists (in a different legal entity,
+      // same tenant) is correctly reported not-found, never allowing a
+      // cross-entity write.
+      const mainToken = tokenFor(["finance.poster"]);
+      const invoice = await postInvoice(mainToken, 500, daysAgo(30));
+      const posted = await createAndPostReceipt(
+        mainToken,
+        500,
+        daysAgo(30),
+        [],
+      );
+
+      const le2Token = le2TokenFor(["finance.poster"]);
+      await request(app.getHttpServer())
+        .post(`/v1/finance/receipts/${posted.id}/allocations`)
+        .set("Authorization", `Bearer ${le2Token}`)
+        .send({
+          allocations: [{ invoiceId: invoice.id, allocatedAmountMinor: 500 }],
+          allocationDate: daysAgo(20),
+        })
+        .expect(404);
+
+      const rows = await withTenant(tenantId, (tx) =>
+        tx
+          .select()
+          .from(customerReceiptAllocations)
+          .where(eq(customerReceiptAllocations.receiptId, posted.id)),
+      );
+      expect(rows).toHaveLength(0);
+    });
+  });
+
+  // -------------------------------------------------------------------
+  // NORYX CTO — final closure round. AR byte-mirror of the AP file's own
+  // "third legal entity" describe block (Table 19.1 #35): a legal
+  // entity whose ENTIRE receipt population is fully-allocated, so
+  // unappliedReceiptsMinor is genuinely 0 — impossible to prove against
+  // the main describe block's own shared legal entity, which by now
+  // carries dozens of on-account/partial receipts from every other test
+  // in this file.
+  // -------------------------------------------------------------------
+  describe("third legal entity — reconciliation with ONLY fully-allocated receipts (Table 19.1 #35, AR)", () => {
+    it("#35 — getArReconciliation() for a legal entity containing exclusively fully-allocated receipts stays reconciled (unappliedReceiptsMinor === 0, regression, AR)", async () => {
+      const platformDb = getPlatformDb();
+      const [entity3] = await platformDb
+        .insert(legalEntities)
+        .values({
+          tenantId,
+          name: "On-Account AR E2E Entity 3 (fully-allocated-only fixture)",
+          code: `OAAAR3-${suffix}`,
+          countryCode: "AE",
+          currencyCode: "AED",
+          isDefault: false,
+        })
+        .returning();
+      const legalEntity3Id = entity3!.id;
+
+      const financeDb = getFinanceDb();
+      const [revenue3] = await financeDb
+        .insert(chartOfAccounts)
+        .values({
+          tenantId,
+          legalEntityId: legalEntity3Id,
+          code: `OAAAR3-REV-${suffix}`,
+          name: "Sales Revenue (LE3)",
+          type: "REVENUE",
+        })
+        .returning();
+      const [arControl3] = await financeDb
+        .insert(chartOfAccounts)
+        .values({
+          tenantId,
+          legalEntityId: legalEntity3Id,
+          code: `OAAAR3-AR-${suffix}`,
+          name: "Accounts Receivable (LE3)",
+          type: "ASSET",
+        })
+        .returning();
+      const [bank3] = await financeDb
+        .insert(chartOfAccounts)
+        .values({
+          tenantId,
+          legalEntityId: legalEntity3Id,
+          code: `OAAAR3-BANK-${suffix}`,
+          name: "Main Bank (LE3)",
+          type: "ASSET",
+        })
+        .returning();
+
+      function le3TokenFor(roles: string[]) {
+        return jwt.sign({
+          sub: randomUUID(),
+          tenantId,
+          legalEntityId: legalEntity3Id,
+          tier: "TENANT_INTERNAL",
+          roles,
+          modules: ["sphere-finance"],
+        });
+      }
+      const le3AdminToken = le3TokenFor(["finance.admin"]);
+      await request(app.getHttpServer())
+        .post("/v1/finance/ar/settings")
+        .set("Authorization", `Bearer ${le3AdminToken}`)
+        .send({ arControlAccountId: arControl3!.id })
+        .expect(201);
+      const customer3 = await request(app.getHttpServer())
+        .post("/v1/finance/customers")
+        .set("Authorization", `Bearer ${le3AdminToken}`)
+        .send({ code: `OAAAR3-CUST-${suffix}`, name: "LE3 Test Customer" })
+        .expect(201);
+      const le3CustomerId = customer3.body.data.id;
+      await request(app.getHttpServer())
+        .post("/v1/finance/accounting-periods")
+        .set("Authorization", `Bearer ${le3AdminToken}`)
+        .send({
+          code: `OAAAR3-OPEN-${suffix}`,
+          startDate: "2024-01-01",
+          endDate: "2028-12-31",
+        })
+        .expect(201);
+
+      const token = le3TokenFor(["finance.poster"]);
+      const invoice = await request(app.getHttpServer())
+        .post("/v1/finance/invoices")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          customerId: le3CustomerId,
+          invoiceDate: "2026-03-01",
+          lines: [{ accountId: revenue3!.id, amountMinor: 800 }],
+        })
+        .expect(201);
+      const invoicePosted = await request(app.getHttpServer())
+        .post(`/v1/finance/invoices/${invoice.body.data.id}/post`)
+        .set("Authorization", `Bearer ${token}`)
+        .expect(200);
+      // Fully-allocated at post time — the only receipt this legal
+      // entity will ever have.
+      await request(app.getHttpServer())
+        .post("/v1/finance/receipts")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          customerId: le3CustomerId,
+          receiptDate: "2026-03-01",
+          receiptAmountMinor: 800,
+          receiptMethod: "BANK_TRANSFER",
+          bankCashAccountId: bank3!.id,
+          allocations: [
+            {
+              invoiceId: invoicePosted.body.data.id,
+              allocatedAmountMinor: 800,
+            },
+          ],
+        })
+        .expect(201)
+        .then((created) =>
+          request(app.getHttpServer())
+            .post(`/v1/finance/receipts/${created.body.data.id}/post`)
+            .set("Authorization", `Bearer ${token}`)
+            .expect(200),
+        );
+
+      const recon = await request(app.getHttpServer())
+        .get("/v1/finance/ar/reconciliation")
+        .set("Authorization", `Bearer ${token}`)
+        .expect(200);
+      expect(recon.body.data.unappliedReceiptsMinor).toBe(0);
+      expect(recon.body.data.reconciled).toBe(true);
+    });
+  });
 });
