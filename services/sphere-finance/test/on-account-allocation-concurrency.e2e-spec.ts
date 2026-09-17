@@ -523,4 +523,68 @@ describe("On-Account — applyAllocation() concurrency invariant (§14.2a)", () 
     expect(billRow!.paidMinor).toBe(0);
     expect(allocationRows).toHaveLength(0);
   });
+
+  it("#50 — Invariant 2 (appliedMinor <= paymentAmountMinor) holds when a post()-time (create-time) allocation and two later concurrent applyAllocation() calls all combine against the same payment", async () => {
+    // NORYX SPHERE finalization round — newly written to close a
+    // previously-disclosed NOT EXECUTED gap. Distinct from #42/#43
+    // above: those two start from a ZERO-allocation payment, so a
+    // ceiling bug that only miscounts a post()-time-seeded starting
+    // balance (as opposed to a starting balance built entirely from
+    // prior applyAllocation() calls) would not be caught by either.
+    // This payment's own SUM(allocatedAmountMinor) starts at 400 —
+    // written by post() itself, in the payment's own creation
+    // transaction, via the ordinary create()-time allocation path —
+    // before either concurrent applyAllocation() call ever runs.
+    const token = tokenFor(["finance.poster"]);
+    const billSeed = await postBill(token, 400, "2026-04-25");
+    const billTwo = await postBill(token, 400, "2026-04-25");
+    const billThree = await postBill(token, 400, "2026-04-25");
+
+    const created = await request(app.getHttpServer())
+      .post("/v1/finance/payments")
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        supplierId,
+        paymentDate: "2026-04-25",
+        paymentAmountMinor: 1000,
+        paymentMethod: "BANK_TRANSFER",
+        bankCashAccountId: bankAccountId,
+        allocations: [{ billId: billSeed.id, allocatedAmountMinor: 400 }],
+      })
+      .expect(201);
+    const posted = await request(app.getHttpServer())
+      .post(`/v1/finance/payments/${created.body.data.id}/post`)
+      .set("Authorization", `Bearer ${token}`)
+      .expect(200);
+    const payment = posted.body.data as { id: string };
+
+    // Remaining balance is 1000 - 400 = 600. Two concurrent
+    // applyAllocation() calls each request 400 (together 800 > 600
+    // remaining, and 400 + 800 = 1200 > 1000 total) — the same
+    // exactly-one-wins shape as #43, but starting from a nonzero,
+    // create-time-seeded balance instead of zero.
+    const [resX, resY] = await Promise.all([
+      postAllocation(payment.id, token, billTwo.id, 400, "2026-04-26"),
+      postAllocation(payment.id, token, billThree.id, 400, "2026-04-26"),
+    ]);
+    const statuses = [resX.status, resY.status].sort();
+    expect(statuses).toEqual([200, 422]);
+
+    const allocationRows = await withTenant(tenantId, (tx) =>
+      tx
+        .select()
+        .from(supplierPaymentAllocations)
+        .where(eq(supplierPaymentAllocations.paymentId, payment.id)),
+    );
+    const totalApplied = allocationRows.reduce(
+      (s, a) => s + a.allocatedAmountMinor,
+      0,
+    );
+    // Invariant 2 holds at the final state: never exceeds the header
+    // amount, and correctly accounts for the post()-time seed (400)
+    // plus exactly one winning concurrent call (400) — never both.
+    expect(totalApplied).toBeLessThanOrEqual(1000);
+    expect(totalApplied).toBe(800);
+    expect(allocationRows).toHaveLength(2); // the seed row + the one winner
+  });
 });

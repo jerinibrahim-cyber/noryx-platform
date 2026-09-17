@@ -300,6 +300,30 @@ describe("On-Account — Customer Receipts: zero/partial posting, applyAllocatio
       expect(invoiceRow!.paymentStatus).toBe("PAID");
     });
 
+    it("#46 — applyAllocation() with allocationDate EXPLICITLY equal to todayUtc() succeeds (Rule 2's own ceiling is inclusive)", async () => {
+      const token = tokenFor(["finance.poster"]);
+      const invoice = await postInvoice(token, 150, "2026-01-07");
+      const posted = await createAndPostReceipt(token, 150, "2026-01-08", []);
+      const todayUtc = new Date().toISOString().slice(0, 10);
+
+      await request(app.getHttpServer())
+        .post(`/v1/finance/receipts/${posted.id}/allocations`)
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          allocations: [{ invoiceId: invoice.id, allocatedAmountMinor: 150 }],
+          allocationDate: todayUtc,
+        })
+        .expect(200);
+
+      const [invoiceRow] = await withTenant(tenantId, (tx) =>
+        tx
+          .select()
+          .from(customerInvoices)
+          .where(eq(customerInvoices.id, invoice.id)),
+      );
+      expect(invoiceRow!.paidMinor).toBe(150);
+    });
+
     it("#13 — cross-customer invoiceId rejected (422), no row written", async () => {
       const token = tokenFor(["finance.poster"]);
       const otherCustomerInvoice = await postInvoice(
@@ -322,6 +346,77 @@ describe("On-Account — Customer Receipts: zero/partial posting, applyAllocatio
           ],
         })
         .expect(422);
+    });
+
+    it("#15 — applyAllocation() targeting the wrong document type (a supplier_bills id passed as invoiceId) is rejected (422), no row written", async () => {
+      // AR mirror of the AP file's own #15 test — here the wrong-table
+      // id comes from the AP side instead (a supplier bill's id passed
+      // as invoiceId). ArCustomerReceiptsService's own
+      // validateAllocationsShapeOrThrow() looks it up against
+      // `customer_invoices` only.
+      const adminToken = tokenFor(["finance.admin"]);
+      const financeDb = getFinanceDb();
+      const [expense] = await financeDb
+        .insert(chartOfAccounts)
+        .values({
+          tenantId,
+          legalEntityId,
+          code: `OAA-EXP15-${suffix}`,
+          name: "Office Supplies (AR #15 fixture)",
+          type: "EXPENSE",
+        })
+        .returning();
+      const [apControl] = await financeDb
+        .insert(chartOfAccounts)
+        .values({
+          tenantId,
+          legalEntityId,
+          code: `OAA-AP15-${suffix}`,
+          name: "Accounts Payable (AR #15 fixture)",
+          type: "LIABILITY",
+        })
+        .returning();
+      await request(app.getHttpServer())
+        .post("/v1/finance/ap/settings")
+        .set("Authorization", `Bearer ${adminToken}`)
+        .send({ apControlAccountId: apControl!.id })
+        .expect(201);
+      const supplier = await request(app.getHttpServer())
+        .post("/v1/finance/suppliers")
+        .set("Authorization", `Bearer ${adminToken}`)
+        .send({ code: `OAA-SUP15-${suffix}`, name: "Wrong-Type Supplier" })
+        .expect(201);
+      const bill = await request(app.getHttpServer())
+        .post("/v1/finance/bills")
+        .set("Authorization", `Bearer ${tokenFor(["finance.poster"])}`)
+        .send({
+          supplierId: supplier.body.data.id,
+          supplierBillNumber: `OAA-BILL15-${randomUUID()}`,
+          billDate: "2026-04-01",
+          lines: [{ accountId: expense!.id, amountMinor: 500 }],
+        })
+        .expect(201);
+
+      const token = tokenFor(["finance.poster"]);
+      const posted = await createAndPostReceipt(token, 500, "2026-04-02", []);
+
+      await request(app.getHttpServer())
+        .post(`/v1/finance/receipts/${posted.id}/allocations`)
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          allocations: [
+            { invoiceId: bill.body.data.id, allocatedAmountMinor: 500 },
+          ],
+        })
+        .expect(422);
+
+      const rows = await withTenant(tenantId, (tx) =>
+        tx
+          .select()
+          .from(customerReceiptAllocations)
+          .where(eq(customerReceiptAllocations.receiptId, posted.id)),
+      );
+      expect(rows).toHaveLength(0);
     });
 
     it("#10 — allocation exceeding the receipt's own remaining unapplied balance rejected (422)", async () => {
@@ -400,6 +495,23 @@ describe("On-Account — Customer Receipts: zero/partial posting, applyAllocatio
         .send({
           allocations: [{ invoiceId: invoice.id, allocatedAmountMinor: 500 }],
         })
+        .expect(409);
+    });
+
+    it("#28 — a repeated reversal attempt on the same receipt is rejected (409), now also reachable via the on-account path", async () => {
+      const token = tokenFor(["finance.poster"]);
+      const posted = await createAndPostReceipt(token, 200, "2026-06-10", []);
+
+      await request(app.getHttpServer())
+        .post(`/v1/finance/receipts/${posted.id}/reverse`)
+        .set("Authorization", `Bearer ${token}`)
+        .send({})
+        .expect(201);
+
+      await request(app.getHttpServer())
+        .post(`/v1/finance/receipts/${posted.id}/reverse`)
+        .set("Authorization", `Bearer ${token}`)
+        .send({})
         .expect(409);
     });
   });
@@ -481,6 +593,20 @@ describe("On-Account — Customer Receipts: zero/partial posting, applyAllocatio
           allocationDate: "2026-08-04",
         }),
       ).resolves.not.toThrow();
+
+      // NORYX SPHERE finalization round — test-isolation fix, byte-
+      // mirror of the AP file's own item-1 fix (see that file's comment
+      // for the full analysis): this raw-SQL INSERT bypasses
+      // applyAllocation(), so the invoice's own paidMinor/paymentStatus
+      // was never updated, silently polluting the shared, tenant-wide
+      // getArReconciliation() aggregate for later tests (Table 19.1
+      // #36) whenever this file ran as a whole. Fixed by keeping the
+      // invoice row in sync with the raw-inserted allocation, exactly
+      // as applyAllocation() would have left it.
+      await financeDb
+        .update(customerInvoices)
+        .set({ paidMinor: 500, paymentStatus: "PAID" })
+        .where(eq(customerInvoices.id, invoice.id));
     });
 
     it("item 3 — INSERT against a REVERSED receipt is rejected by the trigger", async () => {
@@ -555,6 +681,15 @@ describe("On-Account — Customer Receipts: zero/partial posting, applyAllocatio
       );
       expect(rows).toHaveLength(2);
       expect(new Set(rows.map((r) => r.invoiceId)).size).toBe(1);
+
+      // NORYX SPHERE finalization round — same test-isolation fix as
+      // item 1 above: keep the invoice's own paidMinor/paymentStatus in
+      // sync with the two raw-inserted allocation rows (300 + 200 =
+      // 500 of the invoice's 1000 total).
+      await financeDb
+        .update(customerInvoices)
+        .set({ paidMinor: 500, paymentStatus: "PARTIALLY_PAID" })
+        .where(eq(customerInvoices.id, invoice.id));
     });
 
     it("item 6 — a raw INSERT under a session bound to a DIFFERENT tenant is rejected by Postgres' own RLS policy, not by this trigger", async () => {
@@ -658,9 +793,25 @@ describe("On-Account — Customer Receipts: zero/partial posting, applyAllocatio
     });
 
     it("§19.2 item 2 — independent raw-SQL cross-check: unappliedReceiptsMinor equals a structurally independent computation, never reusing unappliedCashMinor()", async () => {
+      // NORYX SPHERE finalization round — date-fixture fix. Originally
+      // hardcoded to fixed calendar literals (invoice/receipt
+      // 2026-09-17, allocation 2026-09-18, cutoff 2026-09-30) that were
+      // already in the future relative to real wall-clock time the
+      // moment this suite was first run against Postgres, tripping
+      // applyAllocation()'s Rule 2 future-date ceiling before this
+      // test's own assertion was ever reached. Rewritten to dates
+      // computed relative to the real current date (same `daysAgo()`
+      // convention as the #32/#33 describe block below), so this test
+      // can never go future-dated-stale again regardless of when the
+      // suite runs.
+      function daysAgo(n: number): string {
+        const d = new Date();
+        d.setUTCDate(d.getUTCDate() - n);
+        return d.toISOString().slice(0, 10);
+      }
       const token = tokenFor(["finance.poster"]);
-      const invoiceOne = await postInvoice(token, 400, "2026-09-17");
-      const posted = await createAndPostReceipt(token, 400, "2026-09-17", []);
+      const invoiceOne = await postInvoice(token, 400, daysAgo(10));
+      const posted = await createAndPostReceipt(token, 400, daysAgo(10), []);
       await request(app.getHttpServer())
         .post(`/v1/finance/receipts/${posted.id}/allocations`)
         .set("Authorization", `Bearer ${token}`)
@@ -668,11 +819,11 @@ describe("On-Account — Customer Receipts: zero/partial posting, applyAllocatio
           allocations: [
             { invoiceId: invoiceOne.id, allocatedAmountMinor: 150 },
           ],
-          allocationDate: "2026-09-18",
+          allocationDate: daysAgo(5),
         })
         .expect(200);
 
-      const cutoffDate = "2026-09-30";
+      const cutoffDate = daysAgo(0);
       const financeDb = getFinanceDb();
 
       const receiptRows = (await financeDb.execute(sql`
@@ -814,6 +965,233 @@ describe("On-Account — Customer Receipts: zero/partial posting, applyAllocatio
           .where(eq(customerReceiptAllocations.receiptId, posted.id)),
       );
       expect(allocRow).toBeUndefined();
+    });
+  });
+
+  // -------------------------------------------------------------------
+  // NORYX SPHERE finalization round — byte-mirror of the AP file's own
+  // identically-named describe block (Table 19.1 #34, #37, #38,
+  // #47-49), adapted to receipts/invoices/customers.
+  // -------------------------------------------------------------------
+  describe("reporting surfaces — mixed state, ageing, and temporal consistency (Table 19.1 #34, #37, #38, #47-49)", () => {
+    async function freshCustomer(label: string) {
+      const res = await request(app.getHttpServer())
+        .post("/v1/finance/customers")
+        .set("Authorization", `Bearer ${tokenFor(["finance.admin"])}`)
+        .send({ code: `OAA-${label}-${suffix}`, name: `${label} Customer` })
+        .expect(201);
+      return res.body.data.id as string;
+    }
+
+    it("#37 — getCustomerBalance() for a mix of one fully-allocated and one on-account document computes unappliedReceiptsMinor/totalOutstandingMinor correctly", async () => {
+      const cust = await freshCustomer("CUST37");
+      const token = tokenFor(["finance.poster"]);
+      const invoiceFull = await postInvoice(token, 300, "2026-02-01", cust);
+      await createAndPostReceipt(
+        token,
+        300,
+        "2026-02-01",
+        [{ invoiceId: invoiceFull.id, allocatedAmountMinor: 300 }],
+        cust,
+      );
+      const invoiceOnAccount = await postInvoice(
+        token,
+        500,
+        "2026-02-02",
+        cust,
+      );
+      await createAndPostReceipt(token, 700, "2026-02-02", [], cust);
+
+      const balance = await request(app.getHttpServer())
+        .get(`/v1/finance/customers/${cust}/balance`)
+        .set("Authorization", `Bearer ${token}`)
+        .expect(200);
+      expect(balance.body.data.unappliedReceiptsMinor).toBe(700);
+      expect(balance.body.data.totalOutstandingMinor).toBe(
+        invoiceOnAccount.totalMinor,
+      );
+    });
+
+    it("#34 — current-mode (non-as-of) reconciliation for a mix of on-account and fully-allocated documents stays reconciled via live paidMinor", async () => {
+      const cust = await freshCustomer("CUST34");
+      const token = tokenFor(["finance.poster"]);
+      const invoiceFull = await postInvoice(token, 250, "2026-02-05", cust);
+      await createAndPostReceipt(
+        token,
+        250,
+        "2026-02-05",
+        [{ invoiceId: invoiceFull.id, allocatedAmountMinor: 250 }],
+        cust,
+      );
+      await createAndPostReceipt(token, 400, "2026-02-06", [], cust);
+
+      const before = await request(app.getHttpServer())
+        .get("/v1/finance/ar/reconciliation")
+        .set("Authorization", `Bearer ${token}`)
+        .expect(200);
+      expect(before.body.data.reconciled).toBe(true);
+
+      const bal = await request(app.getHttpServer())
+        .get(`/v1/finance/customers/${cust}/balance`)
+        .set("Authorization", `Bearer ${token}`)
+        .expect(200);
+      expect(bal.body.data.totalReceivedMinor).toBe(250);
+    });
+
+    it("#38 — an on-account receipt does not change an invoice's ageing bucket until actually allocated", async () => {
+      const cust = await freshCustomer("CUST38");
+      const token = tokenFor(["finance.poster"]);
+      const created = await request(app.getHttpServer())
+        .post("/v1/finance/invoices")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          customerId: cust,
+          invoiceDate: "2026-02-10",
+          dueDate: "2026-02-10",
+          lines: [{ accountId: revenueAccountId, amountMinor: 600 }],
+        })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`/v1/finance/invoices/${created.body.data.id}/post`)
+        .set("Authorization", `Bearer ${token}`)
+        .expect(200);
+
+      const onAccountReceipt = await createAndPostReceipt(
+        token,
+        600,
+        "2026-02-11",
+        [],
+        cust,
+      );
+
+      const beforeAllocation = await request(app.getHttpServer())
+        .get("/v1/finance/ar/ageing")
+        .query({ customerId: cust, asOf: "2026-03-01" })
+        .set("Authorization", `Bearer ${token}`)
+        .expect(200);
+      const rowBefore = (
+        beforeAllocation.body.data as Array<{
+          customerId: string;
+          totalOutstandingMinor: number;
+        }>
+      ).find((r) => r.customerId === cust);
+      expect(rowBefore).toBeDefined();
+      expect(rowBefore!.totalOutstandingMinor).toBe(600);
+
+      await request(app.getHttpServer())
+        .post(`/v1/finance/receipts/${onAccountReceipt.id}/allocations`)
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          allocations: [
+            { invoiceId: created.body.data.id, allocatedAmountMinor: 600 },
+          ],
+          allocationDate: "2026-02-12",
+        })
+        .expect(200);
+
+      const afterAllocation = await request(app.getHttpServer())
+        .get("/v1/finance/ar/ageing")
+        .query({ customerId: cust, asOf: "2026-03-01" })
+        .set("Authorization", `Bearer ${token}`)
+        .expect(200);
+      const rowAfter = (
+        afterAllocation.body.data as Array<{ customerId: string }>
+      ).find((r) => r.customerId === cust);
+      expect(rowAfter).toBeUndefined();
+    });
+
+    it("#47/#48 — reconciliation unappliedReceiptsMinor before vs. after a later reversal of an already-allocated receipt matches asOfTotals()'s own #30/#31 for the identical cutoffs (§11.5 Case 2a/2b)", async () => {
+      const cust = await freshCustomer("CUST4748");
+      const token = tokenFor(["finance.poster"]);
+      const invoice = await postInvoice(token, 500, "2026-02-15", cust);
+      const posted = await createAndPostReceipt(
+        token,
+        500,
+        "2026-02-15",
+        [],
+        cust,
+      );
+      await request(app.getHttpServer())
+        .post(`/v1/finance/receipts/${posted.id}/allocations`)
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          allocations: [{ invoiceId: invoice.id, allocatedAmountMinor: 500 }],
+          allocationDate: "2026-02-16",
+        })
+        .expect(200);
+      await request(app.getHttpServer())
+        .post(`/v1/finance/receipts/${posted.id}/reverse`)
+        .set("Authorization", `Bearer ${token}`)
+        .send({ transactionDate: "2026-02-20" })
+        .expect(201);
+
+      const beforeReversalRecon = await request(app.getHttpServer())
+        .get("/v1/finance/ar/reconciliation")
+        .query({ asOf: "2026-02-18" })
+        .set("Authorization", `Bearer ${token}`)
+        .expect(200);
+      expect(beforeReversalRecon.body.data.reconciled).toBe(true);
+      const beforeReversalBalance = await request(app.getHttpServer())
+        .get(`/v1/finance/customers/${cust}/balance`)
+        .query({ asOf: "2026-02-18" })
+        .set("Authorization", `Bearer ${token}`)
+        .expect(200);
+      expect(beforeReversalBalance.body.data.totalReceivedMinor).toBe(500);
+
+      const afterReversalRecon = await request(app.getHttpServer())
+        .get("/v1/finance/ar/reconciliation")
+        .query({ asOf: "2026-02-25" })
+        .set("Authorization", `Bearer ${token}`)
+        .expect(200);
+      expect(afterReversalRecon.body.data.reconciled).toBe(true);
+      const afterReversalBalance = await request(app.getHttpServer())
+        .get(`/v1/finance/customers/${cust}/balance`)
+        .query({ asOf: "2026-02-25" })
+        .set("Authorization", `Bearer ${token}`)
+        .expect(200);
+      expect(afterReversalBalance.body.data.totalReceivedMinor).toBe(0);
+    });
+
+    it("#49 — a live (no asOf) balance query immediately after an applyAllocation() dated todayUtc() is byte-identical to the same query with asOf=todayUtc() explicit", async () => {
+      const cust = await freshCustomer("CUST49");
+      const token = tokenFor(["finance.poster"]);
+      const invoice = await postInvoice(token, 350, "2026-01-01", cust);
+      const posted = await createAndPostReceipt(
+        token,
+        350,
+        "2026-01-01",
+        [],
+        cust,
+      );
+      const todayUtc = new Date().toISOString().slice(0, 10);
+      await request(app.getHttpServer())
+        .post(`/v1/finance/receipts/${posted.id}/allocations`)
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          allocations: [{ invoiceId: invoice.id, allocatedAmountMinor: 350 }],
+          allocationDate: todayUtc,
+        })
+        .expect(200);
+
+      const live = await request(app.getHttpServer())
+        .get(`/v1/finance/customers/${cust}/balance`)
+        .set("Authorization", `Bearer ${token}`)
+        .expect(200);
+      const explicit = await request(app.getHttpServer())
+        .get(`/v1/finance/customers/${cust}/balance`)
+        .query({ asOf: todayUtc })
+        .set("Authorization", `Bearer ${token}`)
+        .expect(200);
+
+      expect(live.body.data.totalReceivedMinor).toBe(
+        explicit.body.data.totalReceivedMinor,
+      );
+      expect(live.body.data.totalOutstandingMinor).toBe(
+        explicit.body.data.totalOutstandingMinor,
+      );
+      expect(live.body.data.unappliedReceiptsMinor).toBe(
+        explicit.body.data.unappliedReceiptsMinor,
+      );
     });
   });
 });
