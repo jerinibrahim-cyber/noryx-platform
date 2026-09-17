@@ -228,7 +228,7 @@ describe("On-Account — Customer Receipts: zero/partial posting, applyAllocatio
   });
 
   describe("posting with zero and partial allocation", () => {
-    it("posts with ZERO allocations: 200, full 2-line JE, zero allocation rows, invoice untouched", async () => {
+    it("#1 — posts with ZERO allocations: 200, full 2-line JE, zero allocation rows, invoice untouched", async () => {
       const token = tokenFor(["finance.poster"]);
       const invoice = await postInvoice(token, 1000, "2026-02-01");
       const posted = await createAndPostReceipt(token, 1000, "2026-02-05", []);
@@ -258,7 +258,7 @@ describe("On-Account — Customer Receipts: zero/partial posting, applyAllocatio
       expect(invoiceRow!.paidMinor).toBe(0);
     });
 
-    it("posts with PARTIAL allocation: 200, invoice correctly partially settled", async () => {
+    it("#2 — posts with PARTIAL allocation: 200, invoice correctly partially settled", async () => {
       const token = tokenFor(["finance.poster"]);
       const invoice = await postInvoice(token, 1000, "2026-02-02");
       await createAndPostReceipt(token, 1000, "2026-02-06", [
@@ -276,7 +276,7 @@ describe("On-Account — Customer Receipts: zero/partial posting, applyAllocatio
   });
 
   describe("applyAllocation() — happy path and validation", () => {
-    it("zero-allocation receipt -> later full allocation via applyAllocation()", async () => {
+    it("#6 — zero-allocation receipt -> later full allocation via applyAllocation()", async () => {
       const token = tokenFor(["finance.poster"]);
       const invoice = await postInvoice(token, 800, "2026-03-01");
       const posted = await createAndPostReceipt(token, 800, "2026-03-02", []);
@@ -300,7 +300,7 @@ describe("On-Account — Customer Receipts: zero/partial posting, applyAllocatio
       expect(invoiceRow!.paymentStatus).toBe("PAID");
     });
 
-    it("cross-customer invoiceId rejected (422), no row written", async () => {
+    it("#13 — cross-customer invoiceId rejected (422), no row written", async () => {
       const token = tokenFor(["finance.poster"]);
       const otherCustomerInvoice = await postInvoice(
         token,
@@ -324,7 +324,7 @@ describe("On-Account — Customer Receipts: zero/partial posting, applyAllocatio
         .expect(422);
     });
 
-    it("allocation exceeding the receipt's own remaining amount rejected (422)", async () => {
+    it("#10 — allocation exceeding the receipt's own remaining unapplied balance rejected (422)", async () => {
       const token = tokenFor(["finance.poster"]);
       const invoice = await postInvoice(token, 1000, "2026-04-05");
       const posted = await createAndPostReceipt(token, 500, "2026-04-06", [
@@ -339,7 +339,7 @@ describe("On-Account — Customer Receipts: zero/partial posting, applyAllocatio
         .expect(422);
     });
 
-    it("rejects a future-dated allocation (422)", async () => {
+    it("#23 — rejects a future-dated allocation (422) — Option A, no future-effective allocation", async () => {
       const token = tokenFor(["finance.poster"]);
       const invoice = await postInvoice(token, 500, "2026-05-01");
       const posted = await createAndPostReceipt(token, 500, "2026-05-02", []);
@@ -355,7 +355,7 @@ describe("On-Account — Customer Receipts: zero/partial posting, applyAllocatio
   });
 
   describe("reversal interaction with on-account allocation state", () => {
-    it("reversing a partially-allocated receipt unwinds the invoice's paidMinor, allocation row remains as history", async () => {
+    it("#26 — reversing a partially-allocated receipt unwinds the invoice's paidMinor, allocation row remains as history", async () => {
       const token = tokenFor(["finance.poster"]);
       const invoice = await postInvoice(token, 1000, "2026-06-02");
       const posted = await createAndPostReceipt(token, 1000, "2026-06-03", [
@@ -366,7 +366,7 @@ describe("On-Account — Customer Receipts: zero/partial posting, applyAllocatio
         .post(`/v1/finance/receipts/${posted.id}/reverse`)
         .set("Authorization", `Bearer ${token}`)
         .send({})
-        .expect(200);
+        .expect(201);
 
       const [invoiceRow] = await withTenant(tenantId, (tx) =>
         tx
@@ -385,7 +385,7 @@ describe("On-Account — Customer Receipts: zero/partial posting, applyAllocatio
       expect(allocationRows).toHaveLength(1);
     });
 
-    it("a reversed receipt permanently rejects further applyAllocation() calls (409)", async () => {
+    it("#17 — a reversed receipt permanently rejects further applyAllocation() calls (409)", async () => {
       const token = tokenFor(["finance.poster"]);
       const invoice = await postInvoice(token, 500, "2026-06-08");
       const posted = await createAndPostReceipt(token, 500, "2026-06-09", []);
@@ -393,7 +393,7 @@ describe("On-Account — Customer Receipts: zero/partial posting, applyAllocatio
         .post(`/v1/finance/receipts/${posted.id}/reverse`)
         .set("Authorization", `Bearer ${token}`)
         .send({})
-        .expect(200);
+        .expect(201);
       await request(app.getHttpServer())
         .post(`/v1/finance/receipts/${posted.id}/allocations`)
         .set("Authorization", `Bearer ${token}`)
@@ -405,7 +405,7 @@ describe("On-Account — Customer Receipts: zero/partial posting, applyAllocatio
   });
 
   describe("RBAC on POST /receipts/:id/allocations", () => {
-    it("finance.viewer is rejected (403); finance.poster succeeds (200)", async () => {
+    it("#18/#19 — finance.viewer is rejected (403); finance.poster succeeds (200)", async () => {
       const posterToken = tokenFor(["finance.poster"]);
       const invoice = await postInvoice(posterToken, 500, "2026-07-01");
       const posted = await createAndPostReceipt(
@@ -432,8 +432,15 @@ describe("On-Account — Customer Receipts: zero/partial posting, applyAllocatio
     });
   });
 
-  describe("customer_receipt_allocations_immutable trigger — raw SQL verification (§15.3/§19.2)", () => {
-    it("check 1 — INSERT against a DRAFT receipt is rejected by the trigger", async () => {
+  describe("customer_receipt_allocations_immutable trigger — raw SQL verification (§15.3/§19.2 item 3)", () => {
+    it("item 2 — INSERT against a DRAFT receipt succeeds (corrected during CTO remediation — byte-mirror of the AP-side fix; see on-account-allocation.e2e-spec.ts's item 2 and 027's header comment)", async () => {
+      // Originally written expecting rejection, matching the proposal's
+      // §19.2 item 3 checklist text as first transcribed. Actually
+      // running this against a real Postgres instance showed that
+      // literal behavior makes create()/update() themselves impossible
+      // (they insert allocation rows into this table while the parent
+      // receipt is still DRAFT, in the very same transaction). Corrected:
+      // DRAFT-parent INSERT is permitted (027's trigger fix).
       const token = tokenFor(["finance.poster"]);
       const invoice = await postInvoice(token, 500, "2026-08-01");
       const draft = await request(app.getHttpServer())
@@ -457,10 +464,10 @@ describe("On-Account — Customer Receipts: zero/partial posting, applyAllocatio
           allocatedAmountMinor: 500,
           allocationDate: "2026-08-02",
         }),
-      ).rejects.toThrow(/may only be inserted against a POSTED/);
+      ).resolves.not.toThrow();
     });
 
-    it("check 2 — INSERT against a POSTED, not-reversed receipt succeeds (direct SQL)", async () => {
+    it("item 1 — INSERT against a POSTED, not-reversed receipt succeeds (direct SQL)", async () => {
       const token = tokenFor(["finance.poster"]);
       const invoice = await postInvoice(token, 500, "2026-08-03");
       const posted = await createAndPostReceipt(token, 500, "2026-08-04", []);
@@ -476,7 +483,7 @@ describe("On-Account — Customer Receipts: zero/partial posting, applyAllocatio
       ).resolves.not.toThrow();
     });
 
-    it("check 3 — INSERT against a REVERSED receipt is rejected by the trigger", async () => {
+    it("item 3 — INSERT against a REVERSED receipt is rejected by the trigger", async () => {
       const token = tokenFor(["finance.poster"]);
       const invoice = await postInvoice(token, 500, "2026-08-05");
       const posted = await createAndPostReceipt(token, 500, "2026-08-06", []);
@@ -484,7 +491,7 @@ describe("On-Account — Customer Receipts: zero/partial posting, applyAllocatio
         .post(`/v1/finance/receipts/${posted.id}/reverse`)
         .set("Authorization", `Bearer ${token}`)
         .send({})
-        .expect(200);
+        .expect(201);
       const financeDb = getFinanceDb();
       await expect(
         financeDb.insert(customerReceiptAllocations).values({
@@ -497,7 +504,7 @@ describe("On-Account — Customer Receipts: zero/partial posting, applyAllocatio
       ).rejects.toThrow(/may not be inserted against a reversed/);
     });
 
-    it("check 4/5 — UPDATE and DELETE on an existing allocation row are unconditionally rejected", async () => {
+    it("item 4/5 — UPDATE and DELETE on an existing allocation row are unconditionally rejected", async () => {
       const token = tokenFor(["finance.poster"]);
       const invoice = await postInvoice(token, 500, "2026-08-07");
       const posted = await createAndPostReceipt(token, 500, "2026-08-08", [
@@ -516,10 +523,76 @@ describe("On-Account — Customer Receipts: zero/partial posting, applyAllocatio
           .where(eq(customerReceiptAllocations.receiptId, posted.id)),
       ).rejects.toThrow(/is immutable/);
     });
+
+    it("item 7 — two direct-SQL INSERTs for the identical (receipt_id, invoice_id) pair both succeed (unique constraint genuinely dropped)", async () => {
+      const token = tokenFor(["finance.poster"]);
+      const invoice = await postInvoice(token, 1000, "2026-08-15");
+      const posted = await createAndPostReceipt(token, 1000, "2026-08-16", []);
+      const financeDb = getFinanceDb();
+      await expect(
+        financeDb.insert(customerReceiptAllocations).values({
+          tenantId,
+          receiptId: posted.id,
+          invoiceId: invoice.id,
+          allocatedAmountMinor: 300,
+          allocationDate: "2026-08-16",
+        }),
+      ).resolves.not.toThrow();
+      await expect(
+        financeDb.insert(customerReceiptAllocations).values({
+          tenantId,
+          receiptId: posted.id,
+          invoiceId: invoice.id,
+          allocatedAmountMinor: 200,
+          allocationDate: "2026-08-17",
+        }),
+      ).resolves.not.toThrow();
+      const rows = await withTenant(tenantId, (tx) =>
+        tx
+          .select()
+          .from(customerReceiptAllocations)
+          .where(eq(customerReceiptAllocations.receiptId, posted.id)),
+      );
+      expect(rows).toHaveLength(2);
+      expect(new Set(rows.map((r) => r.invoiceId)).size).toBe(1);
+    });
+
+    it("item 6 — a raw INSERT under a session bound to a DIFFERENT tenant is rejected by Postgres' own RLS policy, not by this trigger", async () => {
+      // Mirrors the AP suite's item-6 check (on-account-allocation.e2e-spec.ts)
+      // byte-for-byte — see that file's comment for the full RLS-policy
+      // reasoning (drizzle/rls/008_ar_receipts_rls.sql's tenant_isolation
+      // policy on customer_receipt_allocations, same USING-governs-INSERT
+      // shape as the AP table's own policy).
+      const token = tokenFor(["finance.poster"]);
+      const invoice = await postInvoice(token, 500, "2026-08-18");
+      const posted = await createAndPostReceipt(token, 500, "2026-08-19", []);
+      const otherTenantId = randomUUID();
+      const financeDb = getFinanceDb();
+      await expect(
+        financeDb.execute(sql`
+          SELECT set_config('app.current_tenant_id', ${otherTenantId}::text, true);
+          INSERT INTO customer_receipt_allocations
+            (tenant_id, receipt_id, invoice_id, allocated_amount_minor, allocation_date)
+          VALUES
+            (${tenantId}, ${posted.id}, ${invoice.id}, 500, '2026-08-19');
+        `),
+      ).rejects.toThrow();
+    });
+
+    it("item 12 — exactly one active (non-internal) trigger exists on customer_receipt_allocations, and it is the replacement trigger from §15.3", async () => {
+      const financeDb = getFinanceDb();
+      const rows = (await financeDb.execute(sql`
+        SELECT tgname FROM pg_trigger
+        WHERE tgrelid = 'customer_receipt_allocations'::regclass
+          AND NOT tgisinternal
+      `)) as unknown as Array<{ tgname: string }>;
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.tgname).toMatch(/immutab/i);
+    });
   });
 
-  describe("schema state — raw SQL verification (§15.1/§19.2)", () => {
-    it("allocation_date column exists, is type date, NOT NULL; old unique constraint gone", async () => {
+  describe("schema state — raw SQL verification (§15.1/§19.2 item 3)", () => {
+    it("item 8 (schema shape) — allocation_date column exists, is type date, NOT NULL; item 10 — old unique constraint gone", async () => {
       const financeDb = getFinanceDb();
       const colRows = (await financeDb.execute(sql`
         SELECT data_type, is_nullable
@@ -537,11 +610,40 @@ describe("On-Account — Customer Receipts: zero/partial posting, applyAllocatio
       `)) as unknown as Array<{ conname: string }>;
       expect(constraintRows).toHaveLength(0);
     });
+
+    it("item 8 (exact checklist query) — SELECT COUNT(*) WHERE allocation_date IS NULL is 0", async () => {
+      const financeDb = getFinanceDb();
+      const rows = (await financeDb.execute(sql`
+        SELECT COUNT(*) AS null_count FROM customer_receipt_allocations
+        WHERE allocation_date IS NULL
+      `)) as unknown as Array<{ null_count: string }>;
+      expect(Number(rows[0]!.null_count)).toBe(0);
+    });
+
+    it("item 11 — the replacement non-unique index on (receipt_id, invoice_id) is present", async () => {
+      const financeDb = getFinanceDb();
+      const rows = (await financeDb.execute(sql`
+        SELECT indexname FROM pg_indexes
+        WHERE indexname = 'customer_receipt_allocations_receipt_invoice_idx'
+      `)) as unknown as Array<{ indexname: string }>;
+      expect(rows).toHaveLength(1);
+    });
+
+    // §19.2 item 3, sub-point 9 (pre/post-migration row count identity)
+    // is not covered here for the same reason documented in the AP
+    // suite (on-account-allocation.e2e-spec.ts) — see
+    // scripts/verify-on-account-migration-safety.sh instead.
   });
 
   describe("AR reconciliation — unappliedReceiptsMinor (§11.2)", () => {
-    it("a zero-allocation receipt shows its full amount as unappliedReceiptsMinor and reconciled stays true", async () => {
+    it("#36 — a zero-allocation receipt shows its full amount as unappliedReceiptsMinor and reconciled stays true (explicit negative check)", async () => {
       const token = tokenFor(["finance.poster"]);
+      const before = await request(app.getHttpServer())
+        .get("/v1/finance/ar/reconciliation")
+        .set("Authorization", `Bearer ${token}`)
+        .expect(200);
+      const baselineDiff = before.body.data.differenceMinor as number;
+
       await createAndPostReceipt(token, 750, "2026-09-01", []);
       const res = await request(app.getHttpServer())
         .get("/v1/finance/ar/reconciliation")
@@ -549,6 +651,169 @@ describe("On-Account — Customer Receipts: zero/partial posting, applyAllocatio
         .expect(200);
       expect(res.body.data.unappliedReceiptsMinor).toBeGreaterThanOrEqual(750);
       expect(res.body.data.reconciled).toBe(true);
+      // Negative check (§19.2 item 3's AP mirror applied here too): a
+      // naive formula omitting unappliedReceiptsMinor would show
+      // differenceMinor grow by 750 for this on-account receipt.
+      expect(res.body.data.differenceMinor).toBe(baselineDiff);
+    });
+
+    it("§19.2 item 2 — independent raw-SQL cross-check: unappliedReceiptsMinor equals a structurally independent computation, never reusing unappliedCashMinor()", async () => {
+      const token = tokenFor(["finance.poster"]);
+      const invoiceOne = await postInvoice(token, 400, "2026-09-17");
+      const posted = await createAndPostReceipt(token, 400, "2026-09-17", []);
+      await request(app.getHttpServer())
+        .post(`/v1/finance/receipts/${posted.id}/allocations`)
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          allocations: [
+            { invoiceId: invoiceOne.id, allocatedAmountMinor: 150 },
+          ],
+          allocationDate: "2026-09-18",
+        })
+        .expect(200);
+
+      const cutoffDate = "2026-09-30";
+      const financeDb = getFinanceDb();
+
+      const receiptRows = (await financeDb.execute(sql`
+        SELECT cr.id, cr.receipt_amount_minor,
+               je.reversed_by_journal_entry_id, rev_je.transaction_date AS reversed_on
+        FROM customer_receipts cr
+        LEFT JOIN journal_entries je ON je.id = cr.journal_entry_id
+        LEFT JOIN journal_entries rev_je ON rev_je.id = je.reversed_by_journal_entry_id
+        WHERE cr.tenant_id = ${tenantId}
+          AND cr.legal_entity_id = ${legalEntityId}
+          AND cr.status = 'POSTED'
+          AND cr.receipt_date <= ${cutoffDate}::date
+      `)) as unknown as Array<{
+        id: string;
+        receipt_amount_minor: number;
+        reversed_by_journal_entry_id: string | null;
+        reversed_on: string | null;
+      }>;
+
+      const allocRows = (await financeDb.execute(sql`
+        SELECT receipt_id, allocated_amount_minor
+        FROM customer_receipt_allocations
+        WHERE tenant_id = ${tenantId}
+          AND allocation_date <= ${cutoffDate}::date
+      `)) as unknown as Array<{
+        receipt_id: string;
+        allocated_amount_minor: number;
+      }>;
+      const allocatedByReceipt = new Map<string, number>();
+      for (const row of allocRows) {
+        allocatedByReceipt.set(
+          row.receipt_id,
+          (allocatedByReceipt.get(row.receipt_id) ?? 0) +
+            Number(row.allocated_amount_minor),
+        );
+      }
+
+      let independentTotal = 0;
+      for (const r of receiptRows) {
+        const notReversedAsOfCutoff =
+          r.reversed_by_journal_entry_id == null ||
+          r.reversed_on == null ||
+          r.reversed_on > cutoffDate;
+        if (!notReversedAsOfCutoff) continue;
+        const applied = allocatedByReceipt.get(r.id) ?? 0;
+        independentTotal += Number(r.receipt_amount_minor) - applied;
+      }
+
+      const res = await request(app.getHttpServer())
+        .get("/v1/finance/ar/reconciliation")
+        .query({ asOf: cutoffDate })
+        .set("Authorization", `Bearer ${token}`)
+        .expect(200);
+
+      expect(res.body.data.unappliedReceiptsMinor).toBe(independentTotal);
+    });
+  });
+
+  // -------------------------------------------------------------------
+  // Table 19.1 #32-33 — AR mirror of the AP suite's identically-named
+  // describe block (on-account-allocation.e2e-spec.ts). Uses
+  // customerBId exclusively for a clean as-of baseline, same reasoning.
+  // -------------------------------------------------------------------
+  describe("as-of reversal-boundary scenarios (§11.4, Table 19.1 #32-33)", () => {
+    function daysAgo(n: number): string {
+      const d = new Date();
+      d.setUTCDate(d.getUTCDate() - n);
+      return d.toISOString().slice(0, 10);
+    }
+
+    it("#32 — as-of cutoff exactly ON the reversal's own transaction_date already reflects the reversal (strict '>' boundary)", async () => {
+      const token = tokenFor(["finance.poster"]);
+      const invoice = await postInvoice(token, 1000, daysAgo(30), customerBId);
+      const posted = await createAndPostReceipt(
+        token,
+        1000,
+        daysAgo(30),
+        [],
+        customerBId,
+      );
+      await request(app.getHttpServer())
+        .post(`/v1/finance/receipts/${posted.id}/allocations`)
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          allocations: [{ invoiceId: invoice.id, allocatedAmountMinor: 1000 }],
+          allocationDate: daysAgo(20),
+        })
+        .expect(200);
+      const reversalDate = daysAgo(10);
+      await request(app.getHttpServer())
+        .post(`/v1/finance/receipts/${posted.id}/reverse`)
+        .set("Authorization", `Bearer ${token}`)
+        .send({ transactionDate: reversalDate })
+        .expect(201);
+
+      const asOfBoundary = await request(app.getHttpServer())
+        .get(`/v1/finance/customers/${customerBId}/balance`)
+        .query({ asOf: reversalDate })
+        .set("Authorization", `Bearer ${token}`)
+        .expect(200);
+      const dayBefore = await request(app.getHttpServer())
+        .get(`/v1/finance/customers/${customerBId}/balance`)
+        .query({ asOf: daysAgo(11) })
+        .set("Authorization", `Bearer ${token}`)
+        .expect(200);
+
+      expect(dayBefore.body.data.totalReceivedMinor).toBeGreaterThanOrEqual(
+        1000,
+      );
+      expect(asOfBoundary.body.data.totalReceivedMinor).toBe(0);
+    });
+
+    it("#33 — as-of report for a document reversed but never allocated at all, queried after the reversal date, shows 0 applied throughout", async () => {
+      const token = tokenFor(["finance.poster"]);
+      const posted = await createAndPostReceipt(
+        token,
+        500,
+        daysAgo(15),
+        [],
+        customerBId,
+      );
+      await request(app.getHttpServer())
+        .post(`/v1/finance/receipts/${posted.id}/reverse`)
+        .set("Authorization", `Bearer ${token}`)
+        .send({ transactionDate: daysAgo(5) })
+        .expect(201);
+
+      const asOfAfterReversal = await request(app.getHttpServer())
+        .get(`/v1/finance/customers/${customerBId}/balance`)
+        .query({ asOf: daysAgo(1) })
+        .set("Authorization", `Bearer ${token}`)
+        .expect(200);
+      expect(asOfAfterReversal.body.data.totalReceivedMinor).toBe(0);
+
+      const [allocRow] = await withTenant(tenantId, (tx) =>
+        tx
+          .select()
+          .from(customerReceiptAllocations)
+          .where(eq(customerReceiptAllocations.receiptId, posted.id)),
+      );
+      expect(allocRow).toBeUndefined();
     });
   });
 });

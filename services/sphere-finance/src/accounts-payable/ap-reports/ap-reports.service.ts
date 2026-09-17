@@ -902,12 +902,19 @@ export class ApReportsService {
     // §23, CTO-approved) — a bill reversed AFTER cutoffDate must still
     // count toward this historical total_billed reconstruction (it
     // genuinely was outstanding as of that date); one reversed AT OR
-    // BEFORE cutoffDate must not. Deliberately NOT extended to the
-    // settlement-allocation subqueries below (a later-reversed payment/
-    // debit-note allocation within this same as-of window) — disclosed
-    // as a known limitation in the completion report; no historical
-    // reversed settlement can exist yet since this is a brand-new
-    // feature, so the gap has zero real-world blast radius at launch.
+    // BEFORE cutoffDate must not. The identical reversal-date check is
+    // ALSO applied to the total_paid settlement-allocation subquery
+    // immediately below (via rev_je joined on sp.journal_entry_id) — a
+    // payment reversed AT OR BEFORE cutoffDate no longer counts as
+    // settling the bill as of that historical date, exactly mirroring
+    // the total_billed side. (A comment above this subquery previously
+    // read the check as "deliberately NOT extended" to this join —
+    // stale as of the On-Account (Unapplied) Supplier Payments & Customer
+    // Receipts work item's runtime verification (NORYX SPHERE final
+    // runtime quality gate): the check was already present in this
+    // query and produces the mathematically correct historical result;
+    // only that comment, and document-reversal.e2e-spec.ts's own test
+    // asserting the old "known limitation" value, were out of date.)
     const rows = (await tx.execute(sql`
       SELECT
         COALESCE((

@@ -1229,9 +1229,16 @@ export class CustomerReceiptsService {
     customerId: string,
     allocations: CreateCustomerReceiptAllocationDto[],
   ): Promise<void> {
+    // CTO remediation runtime-verification finding (NORYX SPHERE final
+    // runtime quality gate) — byte-mirror of the AP-side fix in
+    // supplier-payments.service.ts's validateAllocationsShapeOrThrow();
+    // see that file's comment for the full explanation. Both checks
+    // threw BadRequestException (400); the proposal (§19 Table 19.1
+    // items 12/20) is explicit this method's own rejections are 422.
+    // Corrected to UnprocessableEntityException for both throws.
     const uniqueInvoiceIds = [...new Set(allocations.map((a) => a.invoiceId))];
     if (uniqueInvoiceIds.length !== allocations.length) {
-      throw new BadRequestException(
+      throw new UnprocessableEntityException(
         "A receipt may allocate to a given invoice at most once — combine amounts into a single allocation entry.",
       );
     }
@@ -1249,7 +1256,7 @@ export class CustomerReceiptsService {
     const validIds = new Set(validInvoices.map((i) => i.id));
     const invalid = uniqueInvoiceIds.filter((invId) => !validIds.has(invId));
     if (invalid.length > 0) {
-      throw new BadRequestException(
+      throw new UnprocessableEntityException(
         `The following invoice id(s) do not refer to invoices belonging to this receipt's customer in this legal entity: ${invalid.join(", ")}.`,
       );
     }
@@ -1398,6 +1405,18 @@ export class CustomerReceiptsService {
     allocations: CreateCustomerReceiptAllocationDto[],
     allocationDate: string,
   ): Promise<CustomerReceiptAllocation[]> {
+    // CTO remediation runtime-verification finding (NORYX SPHERE final
+    // runtime quality gate — byte-mirror of the AP-side fix in
+    // supplier-payments.service.ts's insertAllocations(); see that
+    // file's comment for the full explanation): Drizzle's
+    // `.insert().values(...)` throws synchronously ("values() must be
+    // called with at least one value") when given an empty array —
+    // never reachable via source inspection alone, only by actually
+    // posting a zero-allocation (on-account) receipt. Short-circuit
+    // before Drizzle sees an empty array.
+    if (allocations.length === 0) {
+      return [];
+    }
     return tx
       .insert(customerReceiptAllocations)
       .values(

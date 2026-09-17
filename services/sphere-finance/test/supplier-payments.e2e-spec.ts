@@ -451,9 +451,17 @@ describe("Supplier Payments (e2e) — draft CRUD, allocation, posting, immutabil
   });
 
   describe("validation at create/edit time", () => {
-    it("rejects an empty allocations array (400)", async () => {
+    it("permits an empty allocations array (201) — superseded by the On-Account work item: a zero-allocation, unapplied payment is now the intended, first-class way to create an on-account payment (§3.2)", async () => {
+      // CTO remediation runtime-verification correction (NORYX SPHERE
+      // final runtime quality gate) — this test predates the On-Account
+      // (Unapplied) Supplier Payments & Customer Receipts proposal
+      // (docs/finance-work-item-on-account-payments-proposal.md), which
+      // deliberately makes an empty `allocations` array a valid, common
+      // input (Table 19.1 #1 — "posts with ZERO allocations"), not a
+      // validation error. Caught only by actually running this suite
+      // against real Postgres.
       const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.poster"]);
-      await request(app.getHttpServer())
+      const created = await request(app.getHttpServer())
         .post("/v1/finance/payments")
         .set("Authorization", `Bearer ${token}`)
         .send({
@@ -464,7 +472,8 @@ describe("Supplier Payments (e2e) — draft CRUD, allocation, posting, immutabil
           bankCashAccountId: bankAccountA1Id,
           allocations: [],
         })
-        .expect(400);
+        .expect(201);
+      expect(created.body.data.allocations).toHaveLength(0);
     });
 
     it("rejects a nonexistent supplierId (400)", async () => {
@@ -515,7 +524,15 @@ describe("Supplier Payments (e2e) — draft CRUD, allocation, posting, immutabil
         .expect(400);
     });
 
-    it("rejects an allocation referencing a bill belonging to a different supplier (400)", async () => {
+    it("rejects an allocation referencing a bill belonging to a different supplier (422)", async () => {
+      // CTO remediation runtime-verification correction (NORYX SPHERE
+      // final runtime quality gate) — validateAllocationsShapeOrThrow()
+      // was corrected under the On-Account (Unapplied) Supplier Payments
+      // & Customer Receipts work item (Table 19.1 #13) to throw
+      // UnprocessableEntityException (422), matching the proposal's own
+      // specified status code, instead of the pre-existing
+      // BadRequestException (400) this test predates. Caught only by
+      // actually running this suite against real Postgres.
       const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.poster"]);
       const bill = await createAndPostBill(token, supplierA1bId, "2026-02-01");
       await request(app.getHttpServer())
@@ -531,10 +548,11 @@ describe("Supplier Payments (e2e) — draft CRUD, allocation, posting, immutabil
             { billId: bill.id, allocatedAmountMinor: bill.totalMinor },
           ],
         })
-        .expect(400);
+        .expect(422);
     });
 
-    it("rejects an allocation referencing a cross-legal-entity or cross-tenant bill (400)", async () => {
+    it("rejects an allocation referencing a cross-legal-entity or cross-tenant bill (422)", async () => {
+      // Same 400 -> 422 correction as the test above.
       const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.poster"]);
       const a2Token = tokenFor(tenantAId, legalEntityA2Id, ["finance.poster"]);
       const crossEntityBill = await createAndPostBill(
@@ -557,7 +575,7 @@ describe("Supplier Payments (e2e) — draft CRUD, allocation, posting, immutabil
             { billId: crossEntityBill.id, allocatedAmountMinor: 1000 },
           ],
         })
-        .expect(400);
+        .expect(422);
     });
 
     it("a cross-tenant supplierId is rejected the same way a cross-entity one is (400) — RLS plus the explicit legal-entity predicate together close both angles", async () => {
@@ -1080,7 +1098,21 @@ describe("Supplier Payments (e2e) — draft CRUD, allocation, posting, immutabil
         .expect(422);
     });
 
-    it("422 when the sum of allocations does not equal the payment amount", async () => {
+    it("200 when the sum of allocations is LESS than the payment amount — partial (on-account) posting is now permitted, not rejected", async () => {
+      // CTO remediation runtime-verification correction (NORYX SPHERE
+      // final runtime quality gate) — this test predates the On-Account
+      // (Unapplied) Supplier Payments & Customer Receipts proposal
+      // (docs/finance-work-item-on-account-payments-proposal.md), which
+      // deliberately makes a partial allocation sum (< paymentAmountMinor)
+      // a valid, common input at post time (Table 19.1 #2 — "posts with
+      // PARTIAL allocation: 200 (was 422)"), no longer a validation
+      // error — the remainder becomes unapplied/on-account. The
+      // adjacent, still-passing test above ("422 when a single bill's
+      // allocation exceeds its outstanding balance") and the on-account
+      // suite's own "#4 — Step 9 upper bound" cover the case this
+      // proposal did NOT relax: a sum EXCEEDING paymentAmountMinor is
+      // still rejected (422). Caught only by actually running this
+      // suite against real Postgres.
       const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.poster"]);
       const bill = await createAndPostBill(
         token,
@@ -1100,10 +1132,12 @@ describe("Supplier Payments (e2e) — draft CRUD, allocation, posting, immutabil
           allocations: [{ billId: bill.id, allocatedAmountMinor: 400 }], // < 1000
         })
         .expect(201);
-      await request(app.getHttpServer())
+      const posted = await request(app.getHttpServer())
         .post(`/v1/finance/payments/${created.body.data.id}/post`)
         .set("Authorization", `Bearer ${token}`)
-        .expect(422);
+        .expect(200);
+      expect(posted.body.data.allocations).toHaveLength(1);
+      expect(posted.body.data.allocations[0].allocatedAmountMinor).toBe(400);
     });
 
     it("422 when posting against a DRAFT (not yet posted) bill", async () => {
@@ -1418,7 +1452,7 @@ describe("Supplier Payments (e2e) — draft CRUD, allocation, posting, immutabil
       ).rejects.toThrow(/immutable once POSTED/);
     });
 
-    it("rejects INSERT/UPDATE/DELETE of supplier_payment_allocations once the parent payment is POSTED — zero exceptions", async () => {
+    it("rejects UPDATE/DELETE of supplier_payment_allocations once the parent payment is POSTED — zero exceptions; INSERT against a POSTED, not-reversed parent is now permitted (superseded by the On-Account work item, §15.3)", async () => {
       const id = await createAndPostPayment();
       const existingAllocation = await withTenant(tenantAId, (tx) =>
         tx
@@ -1449,6 +1483,25 @@ describe("Supplier Payments (e2e) — draft CRUD, allocation, posting, immutabil
         /immutable once its parent supplier_payments is POSTED/,
       );
 
+      // CTO remediation runtime-verification correction (NORYX SPHERE final
+      // runtime quality gate) — this raw INSERT against a POSTED,
+      // not-reversed parent payment was rejected by the ORIGINAL v1
+      // trigger (008_supplier_payment_allocations_immutability_trigger.sql)
+      // this test was written against, but the approved On-Account
+      // (Unapplied) Supplier Payments & Customer Receipts proposal
+      // (docs/finance-work-item-on-account-payments-proposal.md §15.3)
+      // deliberately supersedes that trigger with
+      // 026_supplier_payment_allocations_immutability_trigger_v2.sql,
+      // which explicitly PERMITS INSERT against a POSTED, not-reversed
+      // parent — the mechanism CustomerReceiptsService.applyAllocation()/
+      // SupplierPaymentsService.applyAllocation() (§9.1) needs to add a
+      // new allocation to an already-posted, on-account (partially or
+      // fully unapplied) payment. Also requires the now-NOT-NULL
+      // allocation_date column (migration 0022) on this raw insert, which
+      // this pre-existing test predates. Caught only by actually
+      // compiling and running this suite against real Postgres — UPDATE
+      // and DELETE above remain unconditionally forbidden at every parent
+      // status, unchanged by the on-account work item.
       const otherBill = await createAndPostBill(
         tokenFor(tenantAId, legalEntityA1Id, ["finance.poster"]),
         supplierA1Id,
@@ -1462,11 +1515,10 @@ describe("Supplier Payments (e2e) — draft CRUD, allocation, posting, immutabil
             paymentId: id,
             billId: otherBill.id,
             allocatedAmountMinor: 200,
+            allocationDate: "2026-07-03",
           }),
         ),
-      ).rejects.toThrow(
-        /immutable once its parent supplier_payments is POSTED/,
-      );
+      ).resolves.not.toThrow();
     });
   });
 

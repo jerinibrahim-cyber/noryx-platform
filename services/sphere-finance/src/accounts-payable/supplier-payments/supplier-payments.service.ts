@@ -1200,9 +1200,19 @@ export class SupplierPaymentsService {
     supplierId: string,
     allocations: CreateSupplierPaymentAllocationDto[],
   ): Promise<void> {
+    // CTO remediation runtime-verification finding (NORYX SPHERE final
+    // runtime quality gate — Table 19.1 #12/#13): both checks below
+    // threw BadRequestException (400), but the proposal is explicit
+    // both here and at §19 Table 19.1 items 12/20 ("Duplicate allocation
+    // ... 422 — validateAllocationsShapeOrThrow()'s existing duplicate
+    // check (unmodified)") that this method's own rejections are 422,
+    // not 400 — a pre-existing mismatch between spec and implementation,
+    // never caught by source inspection, only by actually running
+    // on-account-allocation.e2e-spec.ts's #12/#13 against a live server.
+    // Corrected to UnprocessableEntityException for both throws.
     const uniqueBillIds = [...new Set(allocations.map((a) => a.billId))];
     if (uniqueBillIds.length !== allocations.length) {
-      throw new BadRequestException(
+      throw new UnprocessableEntityException(
         "A payment may allocate to a given bill at most once — combine amounts into a single allocation entry.",
       );
     }
@@ -1220,7 +1230,7 @@ export class SupplierPaymentsService {
     const validIds = new Set(validBills.map((b) => b.id));
     const invalid = uniqueBillIds.filter((billId) => !validIds.has(billId));
     if (invalid.length > 0) {
-      throw new BadRequestException(
+      throw new UnprocessableEntityException(
         `The following bill id(s) do not refer to bills belonging to this payment's supplier in this legal entity: ${invalid.join(", ")}.`,
       );
     }
@@ -1367,6 +1377,19 @@ export class SupplierPaymentsService {
     allocations: CreateSupplierPaymentAllocationDto[],
     allocationDate: string,
   ): Promise<SupplierPaymentAllocation[]> {
+    // CTO remediation runtime-verification finding (NORYX SPHERE final
+    // runtime quality gate — on-account AP e2e, "#1 — posts with ZERO
+    // allocations"): Drizzle's `.insert().values(...)` throws
+    // synchronously ("values() must be called with at least one value")
+    // when given an empty array — never reachable via source inspection
+    // alone, only by actually posting a zero-allocation (on-account)
+    // payment, which is this work item's own primary scenario. Every
+    // caller (create(), update()) is otherwise correct to pass an empty
+    // `allocations` array through unconditionally; the empty case simply
+    // means "no rows to insert", so short-circuit before Drizzle sees it.
+    if (allocations.length === 0) {
+      return [];
+    }
     return tx
       .insert(supplierPaymentAllocations)
       .values(

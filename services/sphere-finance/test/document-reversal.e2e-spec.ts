@@ -1204,7 +1204,7 @@ describe("Document-Level Reversal for Posted AP & AR Documents (e2e)", () => {
       expect(live.body.data.totalBilledMinor).toBe(0);
     });
 
-    it("AP Supplier Balance: the disclosed settlement-allocation gap in asOfTotals() is real, but confined to that one historical reconstruction — it never leaks into the live (non-as-of) totals, which read the bill's own live paidMinor instead", async () => {
+    it("AP Supplier Balance: asOfTotals()'s historical reconstruction correctly excludes a settlement reversed at-or-before the as-of cutoff, matching the live (non-as-of) totals", async () => {
       const supplier = await request(app.getHttpServer())
         .post("/v1/finance/suppliers")
         .set(...auth(adminToken))
@@ -1266,26 +1266,31 @@ describe("Document-Level Reversal for Posted AP & AR Documents (e2e)", () => {
       expect(live.body.data.totalPaidMinor).toBe(0);
       expect(live.body.data.totalOutstandingMinor).toBe(10000);
 
-      // --- Historical as-of reconstruction: the disclosed, known gap --
+      // --- Historical as-of reconstruction -----------------------------
       // As of 2026-01-10 (AFTER the reversal's own transactionDate,
-      // 2026-01-08), a fully correct historical reconstruction would
-      // show the payment as no longer applied by then. asOfTotals()'s
-      // total_paid subquery carries no reversal-date check on the
-      // settlement side (deliberately not extended — completion report
-      // "Known Limitations"), so it still counts the allocation purely
-      // by payment_date <= cutoff. Reproduced here as a DEFECT
-      // CONFIRMATION, not an expectation of correctness: this is the
-      // disclosed limitation, shown to be real and exactly this narrow.
+      // 2026-01-08), a fully correct historical reconstruction shows the
+      // payment as no longer applied by then. asOfTotals()'s total_paid
+      // subquery DOES carry the same reversal-date check as the
+      // total_billed side (rev_je joined on sp.journal_entry_id, in
+      // ap-reports.service.ts's own asOfTotals()) — a payment reversed at
+      // or before the cutoff no longer counts as a settlement as of that
+      // historical date.
+      //
+      // CTO remediation runtime-verification correction (NORYX SPHERE
+      // final runtime quality gate) — this test, and the comment above
+      // asOfTotals()'s total_paid subquery, previously described this as
+      // a disclosed "known limitation" (expecting the stale/buggy value
+      // 10000 here as a deliberate defect-confirmation). Caught only by
+      // actually running this suite against real Postgres: the check was
+      // already present and correct in the query; only this test's own
+      // expectation (and that comment) had not been updated to match.
       const historicalAfterReversal = await request(app.getHttpServer())
         .get(`/v1/finance/suppliers/${isoSupplierId}/balance`)
         .query({ asOf: "2026-01-10" })
         .set(...auth(posterToken))
         .expect(200);
       expect(historicalAfterReversal.body.data.totalBilledMinor).toBe(10000);
-      // KNOWN LIMITATION, reproduced deliberately: an ideal historical
-      // reconstruction would report 0 here; the current implementation
-      // still reports 10000, exactly as disclosed.
-      expect(historicalAfterReversal.body.data.totalPaidMinor).toBe(10000);
+      expect(historicalAfterReversal.body.data.totalPaidMinor).toBe(0);
 
       // An as-of query dated BEFORE the reversal ever happened is
       // unaffected either way — same value, for the ordinary reason

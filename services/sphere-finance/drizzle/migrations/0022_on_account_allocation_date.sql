@@ -14,7 +14,31 @@
 -- separately, after this migration and the new trigger version (§16
 -- rollout ordering).
 
+-- CTO remediation runtime-verification finding (NORYX SPHERE final
+-- runtime quality gate, MODE=seeded run of
+-- scripts/verify-on-account-migration-safety.sh — see the completion
+-- report's defects section): against a database with realistic
+-- pre-existing data, this migration's own backfill UPDATE statements
+-- below were rejected by the still-active OLD (v1)
+-- supplier_payment_allocations_immutable /
+-- customer_receipt_allocations_immutability_trigger — see
+-- drizzle/constraints/008_supplier_payment_allocations_immutability_trigger.sql
+-- / 012_customer_receipt_allocations_immutability_trigger.sql, "no
+-- exceptions at all" — for any row whose parent payment/receipt is
+-- already POSTED, which is the normal case for real historical data
+-- (only ever caught against an empty/fresh database, where there is
+-- nothing to backfill and the UPDATE trivially affects 0 rows). Fixed by
+-- dropping the old blocking trigger immediately before each backfill
+-- UPDATE; drizzle/constraints/026_supplier_payment_allocations_immutability_trigger_v2.sql
+-- and .../027_customer_receipt_allocations_immutability_trigger_v2.sql —
+-- applied immediately after this migration, per this work item's own
+-- documented rollout ordering (see this file's original header comment
+-- above) — recreate a (differently-behaved) trigger of the same name
+-- right after, so the interim window with no trigger on these two
+-- tables is bounded by this migration script itself.
+
 -- 1) supplier_payment_allocations -------------------------------------------
+DROP TRIGGER IF EXISTS "supplier_payment_allocations_immutable" ON "supplier_payment_allocations";--> statement-breakpoint
 ALTER TABLE "supplier_payment_allocations" ADD COLUMN "allocation_date" date;--> statement-breakpoint
 UPDATE "supplier_payment_allocations" spa
   SET "allocation_date" = sp."payment_date"
@@ -25,6 +49,7 @@ ALTER TABLE "supplier_payment_allocations" DROP CONSTRAINT "supplier_payment_all
 CREATE INDEX IF NOT EXISTS "supplier_payment_allocations_payment_bill_idx" ON "supplier_payment_allocations" USING btree ("payment_id","bill_id");--> statement-breakpoint
 
 -- 2) customer_receipt_allocations (byte-mirror) ------------------------------
+DROP TRIGGER IF EXISTS "customer_receipt_allocations_immutable" ON "customer_receipt_allocations";--> statement-breakpoint
 ALTER TABLE "customer_receipt_allocations" ADD COLUMN "allocation_date" date;--> statement-breakpoint
 UPDATE "customer_receipt_allocations" cra
   SET "allocation_date" = cr."receipt_date"

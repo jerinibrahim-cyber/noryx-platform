@@ -451,9 +451,13 @@ describe("Customer Receipts (e2e) — draft CRUD, allocation, posting, immutabil
   });
 
   describe("validation at create/edit time", () => {
-    it("rejects an empty allocations array (400)", async () => {
+    it("permits an empty allocations array (201) — superseded by the On-Account work item: a zero-allocation, unapplied receipt is now the intended, first-class way to create an on-account receipt (§3.2)", async () => {
+      // CTO remediation runtime-verification correction (NORYX SPHERE
+      // final runtime quality gate) — byte-mirror of the AP-side fix in
+      // supplier-payments.e2e-spec.ts's own equivalent test. Caught only
+      // by actually running this suite against real Postgres.
       const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.poster"]);
-      await request(app.getHttpServer())
+      const created = await request(app.getHttpServer())
         .post("/v1/finance/receipts")
         .set("Authorization", `Bearer ${token}`)
         .send({
@@ -464,7 +468,8 @@ describe("Customer Receipts (e2e) — draft CRUD, allocation, posting, immutabil
           bankCashAccountId: bankAccountA1Id,
           allocations: [],
         })
-        .expect(400);
+        .expect(201);
+      expect(created.body.data.allocations).toHaveLength(0);
     });
 
     it("rejects a nonexistent customerId (400)", async () => {
@@ -523,7 +528,13 @@ describe("Customer Receipts (e2e) — draft CRUD, allocation, posting, immutabil
         .expect(400);
     });
 
-    it("rejects an allocation referencing an invoice belonging to a different customer (400)", async () => {
+    it("rejects an allocation referencing an invoice belonging to a different customer (422)", async () => {
+      // CTO remediation runtime-verification correction (NORYX SPHERE
+      // final runtime quality gate) — byte-mirror of the AP-side fix:
+      // validateAllocationsShapeOrThrow() now throws
+      // UnprocessableEntityException (422), matching the On-Account
+      // proposal's specified status code (Table 19.1 #13), instead of
+      // the pre-existing BadRequestException (400) this test predates.
       const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.poster"]);
       const invoice = await createAndPostInvoice(
         token,
@@ -543,10 +554,11 @@ describe("Customer Receipts (e2e) — draft CRUD, allocation, posting, immutabil
             { invoiceId: invoice.id, allocatedAmountMinor: invoice.totalMinor },
           ],
         })
-        .expect(400);
+        .expect(422);
     });
 
-    it("rejects an allocation referencing a cross-legal-entity or cross-tenant invoice (400)", async () => {
+    it("rejects an allocation referencing a cross-legal-entity or cross-tenant invoice (422)", async () => {
+      // Same 400 -> 422 correction as the test above.
       const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.poster"]);
       const a2Token = tokenFor(tenantAId, legalEntityA2Id, ["finance.poster"]);
       const crossEntityInvoice = await createAndPostInvoice(
@@ -569,7 +581,7 @@ describe("Customer Receipts (e2e) — draft CRUD, allocation, posting, immutabil
             { invoiceId: crossEntityInvoice.id, allocatedAmountMinor: 1000 },
           ],
         })
-        .expect(400);
+        .expect(422);
     });
 
     it("a cross-tenant customerId is rejected the same way a cross-entity one is (400) — RLS plus the explicit legal-entity predicate together close both angles", async () => {
@@ -1117,7 +1129,12 @@ describe("Customer Receipts (e2e) — draft CRUD, allocation, posting, immutabil
         .expect(422);
     });
 
-    it("422 when the sum of allocations does not equal the receipt amount", async () => {
+    it("200 when the sum of allocations is LESS than the receipt amount — partial (on-account) posting is now permitted, not rejected", async () => {
+      // CTO remediation runtime-verification correction (NORYX SPHERE
+      // final runtime quality gate) — byte-mirror of the AP-side fix in
+      // supplier-payments.e2e-spec.ts's own equivalent test; see that
+      // test's comment for the full analysis. Caught only by actually
+      // running this suite against real Postgres.
       const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.poster"]);
       const invoice = await createAndPostInvoice(
         token,
@@ -1137,10 +1154,12 @@ describe("Customer Receipts (e2e) — draft CRUD, allocation, posting, immutabil
           allocations: [{ invoiceId: invoice.id, allocatedAmountMinor: 400 }], // < 1000
         })
         .expect(201);
-      await request(app.getHttpServer())
+      const posted = await request(app.getHttpServer())
         .post(`/v1/finance/receipts/${created.body.data.id}/post`)
         .set("Authorization", `Bearer ${token}`)
-        .expect(422);
+        .expect(200);
+      expect(posted.body.data.allocations).toHaveLength(1);
+      expect(posted.body.data.allocations[0].allocatedAmountMinor).toBe(400);
     });
 
     it("422 when posting against a DRAFT (not yet posted) invoice", async () => {
@@ -1460,7 +1479,7 @@ describe("Customer Receipts (e2e) — draft CRUD, allocation, posting, immutabil
       ).rejects.toThrow(/immutable once POSTED/);
     });
 
-    it("rejects INSERT/UPDATE/DELETE of customer_receipt_allocations once the parent receipt is POSTED — zero exceptions", async () => {
+    it("rejects UPDATE/DELETE of customer_receipt_allocations once the parent receipt is POSTED — zero exceptions; INSERT against a POSTED, not-reversed parent is now permitted (superseded by the On-Account work item, §15.3)", async () => {
       const id = await createAndPostReceipt();
       const existingAllocation = await withTenant(tenantAId, (tx) =>
         tx
@@ -1491,6 +1510,24 @@ describe("Customer Receipts (e2e) — draft CRUD, allocation, posting, immutabil
         /immutable once its parent customer_receipts is POSTED/,
       );
 
+      // CTO remediation runtime-verification correction (NORYX SPHERE final
+      // runtime quality gate) — byte-mirror of the AP-side fix in
+      // supplier-payments.e2e-spec.ts's own equivalent test: this raw
+      // INSERT against a POSTED, not-reversed parent receipt was rejected
+      // by the ORIGINAL v1 trigger
+      // (012_customer_receipt_allocations_immutability_trigger.sql) this
+      // test was written against, but the approved On-Account (Unapplied)
+      // Supplier Payments & Customer Receipts proposal
+      // (docs/finance-work-item-on-account-payments-proposal.md §15.3)
+      // deliberately supersedes that trigger with
+      // 027_customer_receipt_allocations_immutability_trigger_v2.sql,
+      // which explicitly PERMITS INSERT against a POSTED, not-reversed
+      // parent — the mechanism
+      // CustomerReceiptsService.applyAllocation() (§9.1) needs. Also
+      // requires the now-NOT-NULL allocation_date column (migration
+      // 0022), which this pre-existing test predates. UPDATE and DELETE
+      // above remain unconditionally forbidden at every parent status,
+      // unchanged by the on-account work item.
       const otherInvoice = await createAndPostInvoice(
         tokenFor(tenantAId, legalEntityA1Id, ["finance.poster"]),
         customerA1Id,
@@ -1504,11 +1541,10 @@ describe("Customer Receipts (e2e) — draft CRUD, allocation, posting, immutabil
             receiptId: id,
             invoiceId: otherInvoice.id,
             allocatedAmountMinor: 200,
+            allocationDate: "2026-07-03",
           }),
         ),
-      ).rejects.toThrow(
-        /immutable once its parent customer_receipts is POSTED/,
-      );
+      ).resolves.not.toThrow();
     });
   });
 
