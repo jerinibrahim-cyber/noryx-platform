@@ -31,6 +31,8 @@ import { PaymentProviderSettlementsController } from "./payment-provider-settlem
 import { ScheduledReversalsController } from "./scheduled-reversals/scheduled-reversals.controller";
 import { TaxCodesController } from "./tax-configuration/tax-codes.controller";
 import { TaxReportsController } from "./tax-reports/tax-reports.controller";
+import { BudgetsController } from "./budgeting/budgets.controller";
+import { BudgetLinesController } from "./budgeting/budget-lines.controller";
 
 /**
  * Milestone 3.2 — Route → Required-Role Matrix Hardening
@@ -270,7 +272,18 @@ function role(
  * implementation authorization) — finance.poster only, the same
  * write-side posture as `/post` and `/reverse` on the same two
  * controllers: 137 routes total across the same 25 controllers (still
- * 25 — this work item added no new controller).
+ * 25 — this work item added no new controller), plus Budgeting /
+ * Planning — Phase 1 Foundation's two new controllers
+ * (docs/work-items/budgeting-phase-1-foundation/CONTRACT.md §7/§9,
+ * CTO-approved implementation authorization, v6) —
+ * BudgetsController (5 routes: header create/list/get/update/approve,
+ * finance.admin-only writes, mirrors AccountingPeriodsController's
+ * create/close governance-action posture) and BudgetLinesController (5
+ * routes, nested under `budgets/:budgetId/lines`: line
+ * create/list/get/update/delete, finance.poster + finance.admin
+ * writes, the same transactional-write split as every other line-level
+ * mutation in this repo): 147 routes total across 27 controllers (25 +
+ * 2 new).
  */
 const EXPECTED: DiscoveredRoute[] = [
   role("POST", "accounts", "AccountsController", ["finance.admin"]),
@@ -986,6 +999,57 @@ const EXPECTED: DiscoveredRoute[] = [
     "PaymentProviderSettlementsController",
     ["finance.viewer", "finance.poster", "finance.admin"],
   ),
+
+  // Budgeting / Planning — Phase 1 Foundation
+  // (docs/work-items/budgeting-phase-1-foundation/CONTRACT.md §7/§9,
+  // CTO-approved implementation authorization, v6). Header
+  // create/update/approve are finance.admin-only — mirrors
+  // AccountingPeriodsController's create/close split (a budget approval
+  // is a governance action, same class as a period close). Header GET
+  // is open to every finance.* role.
+  role("POST", "budgets", "BudgetsController", ["finance.admin"]),
+  role("GET", "budgets", "BudgetsController", [
+    "finance.viewer",
+    "finance.poster",
+    "finance.admin",
+  ]),
+  role("GET", "budgets/:id", "BudgetsController", [
+    "finance.viewer",
+    "finance.poster",
+    "finance.admin",
+  ]),
+  role("PATCH", "budgets/:id", "BudgetsController", ["finance.admin"]),
+  role("POST", "budgets/:id/approve", "BudgetsController", ["finance.admin"]),
+
+  // Budget lines nest under their parent budget
+  // (budgets/:budgetId/lines) — a line is meaningless without its
+  // parent, same nesting convention as tax-codes/:taxCodeId/rates.
+  // Line create/update/delete are finance.poster + finance.admin, the
+  // same transactional-write split as every other line-level mutation
+  // in this repo (distinct from the header's finance.admin-only
+  // governance-action posture above).
+  role("POST", "budgets/:budgetId/lines", "BudgetLinesController", [
+    "finance.poster",
+    "finance.admin",
+  ]),
+  role("GET", "budgets/:budgetId/lines", "BudgetLinesController", [
+    "finance.viewer",
+    "finance.poster",
+    "finance.admin",
+  ]),
+  role("GET", "budgets/:budgetId/lines/:id", "BudgetLinesController", [
+    "finance.viewer",
+    "finance.poster",
+    "finance.admin",
+  ]),
+  role("PATCH", "budgets/:budgetId/lines/:id", "BudgetLinesController", [
+    "finance.poster",
+    "finance.admin",
+  ]),
+  role("DELETE", "budgets/:budgetId/lines/:id", "BudgetLinesController", [
+    "finance.poster",
+    "finance.admin",
+  ]),
 ];
 
 describe("Route → required-role matrix (sphere-finance)", () => {
@@ -1015,11 +1079,13 @@ describe("Route → required-role matrix (sphere-finance)", () => {
     ...discoverRoutes(ScheduledReversalsController),
     ...discoverRoutes(TaxCodesController),
     ...discoverRoutes(TaxReportsController),
+    ...discoverRoutes(BudgetsController),
+    ...discoverRoutes(BudgetLinesController),
   ];
   const actualByKey = new Map(actual.map((r) => [r.key, r]));
   const expectedByKey = new Map(EXPECTED.map((r) => [r.key, r]));
 
-  it("discovers exactly the expected number of routes across all twenty-five controllers", () => {
+  it("discovers exactly the expected number of routes across all twenty-seven controllers", () => {
     expect(actual).toHaveLength(EXPECTED.length);
   });
 

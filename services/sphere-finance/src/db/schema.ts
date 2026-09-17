@@ -3052,3 +3052,132 @@ export const taxRates = pgTable(
 
 export type TaxRate = typeof taxRates.$inferSelect;
 export type NewTaxRate = typeof taxRates.$inferInsert;
+
+// ---------------------------------------------------------------------------
+// Budgeting / Planning — Phase 1 Foundation
+// (docs/work-items/budgeting-phase-1-foundation/CONTRACT.md, v6,
+// CTO-approved implementation authorization). Two new tables only:
+// `budgets` (header/master) and `budget_lines` (detail), mirroring the
+// Tax Configuration Foundation's header/child shape (`tax_codes`/
+// `tax_rates`). Foundation-phase scope: master data + a single
+// DRAFT->APPROVED lifecycle transition, zero GL posting (§10/§13 of the
+// contract) — no journal_entries/journal_lines write anywhere in this
+// section's services.
+// ---------------------------------------------------------------------------
+
+export const budgetStatusEnum = pgEnum("budget_status", ["DRAFT", "APPROVED"]);
+
+/**
+ * Budget header — one row per named budget per legal entity. `code` is
+ * unique per `(tenant_id, legal_entity_id)`, same shape as
+ * `accounting_periods`/`tax_codes`. `currencyCode` is always
+ * server-resolved from the legal entity's functional currency at create
+ * time (`legalEntities.currencyCode`), never client input — the
+ * repo-wide convention (SupplierBillsService.resolveCurrency and
+ * every other Finance create path), applied directly here rather than
+ * disclosed as a later deviation.
+ *
+ * CTO Decision D (contract §0/§10): multiple `APPROVED` budgets may
+ * coexist, including overlapping date ranges and/or lines referencing
+ * the same accounts/periods — no exclusivity constraint anywhere in
+ * this schema, unlike `accounting_periods`' overlap-exclusion
+ * constraint. Phase 1 does not designate an authoritative budget.
+ *
+ * Once `APPROVED`, the header (and every line under it) becomes
+ * immutable at the application layer only — no DB trigger in this
+ * phase (contract §10, same disclosed-limitation shape as
+ * `accounting_periods` having no reopen route to guard).
+ */
+export const budgets = pgTable(
+  "budgets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id").notNull(),
+    legalEntityId: uuid("legal_entity_id").notNull(),
+    code: varchar("code", { length: 32 }).notNull(),
+    name: varchar("name", { length: 255 }).notNull(),
+    startDate: date("start_date").notNull(),
+    endDate: date("end_date").notNull(),
+    currencyCode: varchar("currency_code", { length: 3 }).notNull(),
+    status: budgetStatusEnum("status").notNull().default("DRAFT"),
+    approvedAt: timestamp("approved_at", { withTimezone: true }),
+    approvedBy: uuid("approved_by"),
+    createdBy: uuid("created_by"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    unique("budgets_tenant_entity_code_unique").on(
+      t.tenantId,
+      t.legalEntityId,
+      t.code,
+    ),
+    index("budgets_tenant_entity_idx").on(t.tenantId, t.legalEntityId),
+    check("budgets_end_after_start", sql`${t.endDate} > ${t.startDate}`),
+  ],
+);
+
+export type Budget = typeof budgets.$inferSelect;
+export type NewBudget = typeof budgets.$inferInsert;
+
+/**
+ * Budget line — one budgeted amount per account per accounting period
+ * per budget. Real Postgres FKs to `budgets`, `chart_of_accounts`, and
+ * `accounting_periods` — all three share Finance's own migration
+ * lifecycle, the established within-schema-FK convention (see
+ * `tax_rates.taxCodeId` above for the identical reasoning).
+ *
+ * CTO Decision A (contract §0/§10): `amountMinor` is a non-negative
+ * magnitude, not a signed debit/credit amount — no polarity column in
+ * this phase.
+ *
+ * CTO Decision C (contract §0/§5/§10): every line's referenced
+ * accounting period must fall completely within its parent budget's
+ * date range. This is a cross-table rule (requires joining
+ * `accounting_periods` and `budgets`, neither of whose dates this table
+ * itself stores) and is therefore enforced at the application layer in
+ * `BudgetLinesService`/`BudgetsService`, not a DB CHECK — identical
+ * disclosed-limitation shape to `accounting_periods_end_after_start`
+ * being a same-row CHECK while this cross-row rule cannot be.
+ */
+export const budgetLines = pgTable(
+  "budget_lines",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id").notNull(),
+    legalEntityId: uuid("legal_entity_id").notNull(),
+    budgetId: uuid("budget_id")
+      .notNull()
+      .references(() => budgets.id),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => chartOfAccounts.id),
+    periodId: uuid("period_id")
+      .notNull()
+      .references(() => accountingPeriods.id),
+    amountMinor: bigint("amount_minor", { mode: "number" }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    unique("budget_lines_budget_account_period_unique").on(
+      t.budgetId,
+      t.accountId,
+      t.periodId,
+    ),
+    index("budget_lines_tenant_entity_idx").on(t.tenantId, t.legalEntityId),
+    index("budget_lines_budget_idx").on(t.budgetId),
+    check("budget_lines_amount_non_negative", sql`${t.amountMinor} >= 0`),
+  ],
+);
+
+export type BudgetLine = typeof budgetLines.$inferSelect;
+export type NewBudgetLine = typeof budgetLines.$inferInsert;

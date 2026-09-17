@@ -162,6 +162,13 @@
       "when": 1789502391602,
       "tag": "0022_on_account_allocation_date",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1789676257925,
+      "tag": "0023_budgeting_phase_1_foundation",
+      "breakpoints": true
     }
   ]
 }

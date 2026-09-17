@@ -16,6 +16,7 @@ import { PaymentProviderSettlementsModule } from "./payment-provider-settlements
 import { ScheduledReversalsModule } from "./scheduled-reversals/scheduled-reversals.module";
 import { TaxConfigurationModule } from "./tax-configuration/tax-configuration.module";
 import { TaxReportsModule } from "./tax-reports/tax-reports.module";
+import { BudgetingModule } from "./budgeting/budgeting.module";
 import { HealthController } from "./health/health.controller";
 import { TenantContextMiddleware } from "./tenant/tenant-context.middleware";
 
@@ -148,6 +149,18 @@ import { TenantContextMiddleware } from "./tenant/tenant-context.middleware";
     // comment above gives for its own top-level placement. Pure read
     // layer; touches none of the modules above.
     TaxReportsModule,
+    // Budgeting / Planning — Phase 1 Foundation
+    // (docs/work-items/budgeting-phase-1-foundation/CONTRACT.md, v6,
+    // CTO-approved implementation authorization). A top-level sibling of
+    // TaxConfigurationModule/ScheduledReversalsModule, not nested inside
+    // AccountsPayableModule/AccountsReceivableModule/TaxConfigurationModule
+    // — a budget is owned by a legal entity, not by AP/AR/Tax. Reads/
+    // writes its own two new tables only (budgets, budget_lines);
+    // touches none of the modules above. Foundation phase only: master
+    // data + a single DRAFT->APPROVED lifecycle transition, zero GL
+    // posting, no actual-vs-budget/variance reporting — all explicitly
+    // deferred to a later, separately-authorized phase.
+    BudgetingModule,
     // Scoped registration so TenantContextMiddleware can inject JwtService
     // without importing AccountsModule's other providers — same pattern as
     // services/identity/src/app.module.ts.
