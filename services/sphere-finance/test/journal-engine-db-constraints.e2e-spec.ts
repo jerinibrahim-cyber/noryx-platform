@@ -456,4 +456,125 @@ describe("Journal Engine — DB-level accounting invariants (2b, schema layer on
       ).rejects.toThrow(/journal_lines_amounts_non_negative/);
     });
   });
+
+  /**
+   * Tax/VAT Phase 6 (docs/finance-work-item-tax-vat-phase-6-manual-journal-tax-coverage-proposal.md,
+   * CTO-approved implementation authorization §8.3, §9, migration
+   * 0024) — JTX-004/JTX-005 at the database layer (the DTO validator
+   * covers the same rule at the API layer in the phase's own e2e
+   * spec; this file proves the DB is the real backstop, independent of
+   * any application code).
+   */
+  describe("journal_lines tax classification pairing — CHECK(both null or both set)", () => {
+    let taxCodeId: string;
+
+    beforeAll(async () => {
+      const [taxCode] = await sql`
+        INSERT INTO tax_codes (tenant_id, legal_entity_id, code, name, treatment)
+        VALUES (${tenantId}, ${legalEntityId}, ${"JEDB-TAX-" + randomUUID().slice(0, 8)}, 'DB Test Tax Code', 'STANDARD')
+        RETURNING id
+      `;
+      taxCodeId = taxCode!.id as string;
+    });
+
+    it("accepts a line with both tax_code_id and tax_direction null", async () => {
+      const entryId = await createDraftEntry();
+      await insertLine(entryId, 1, assetAccountId, 500, 0);
+    });
+
+    it("accepts a line with both tax_code_id and tax_direction set (OUTPUT)", async () => {
+      const entryId = await createDraftEntry();
+      await sql`
+        INSERT INTO journal_lines (tenant_id, journal_entry_id, line_number, account_id, debit_minor, credit_minor, tax_code_id, tax_direction)
+        VALUES (${tenantId}, ${entryId}, 1, ${revenueAccountId}, 0, 500, ${taxCodeId}, 'OUTPUT')
+      `;
+    });
+
+    it("accepts a line with both tax_code_id and tax_direction set (INPUT)", async () => {
+      const entryId = await createDraftEntry();
+      await sql`
+        INSERT INTO journal_lines (tenant_id, journal_entry_id, line_number, account_id, debit_minor, credit_minor, tax_code_id, tax_direction)
+        VALUES (${tenantId}, ${entryId}, 1, ${assetAccountId}, 500, 0, ${taxCodeId}, 'INPUT')
+      `;
+    });
+
+    it("rejects a line with tax_code_id set but tax_direction null", async () => {
+      const entryId = await createDraftEntry();
+      await expect(
+        sql`
+          INSERT INTO journal_lines (tenant_id, journal_entry_id, line_number, account_id, debit_minor, credit_minor, tax_code_id)
+          VALUES (${tenantId}, ${entryId}, 1, ${assetAccountId}, 500, 0, ${taxCodeId})
+        `,
+      ).rejects.toThrow(/journal_lines_tax_code_requires_direction/);
+    });
+
+    it("rejects a line with tax_direction set but tax_code_id null", async () => {
+      const entryId = await createDraftEntry();
+      await expect(
+        sql`
+          INSERT INTO journal_lines (tenant_id, journal_entry_id, line_number, account_id, debit_minor, credit_minor, tax_direction)
+          VALUES (${tenantId}, ${entryId}, 1, ${assetAccountId}, 500, 0, 'INPUT')
+        `,
+      ).rejects.toThrow(/journal_lines_tax_direction_requires_code/);
+    });
+
+    it("rejects an invalid tax_direction enum value", async () => {
+      const entryId = await createDraftEntry();
+      await expect(
+        sql`
+          INSERT INTO journal_lines (tenant_id, journal_entry_id, line_number, account_id, debit_minor, credit_minor, tax_code_id, tax_direction)
+          VALUES (${tenantId}, ${entryId}, 1, ${assetAccountId}, 500, 0, ${taxCodeId}, 'SIDEWAYS')
+        `,
+      ).rejects.toThrow();
+    });
+  });
+
+  /**
+   * Tax/VAT Phase 6 — JTX-010 at the database layer: proves the
+   * PRE-EXISTING, column-agnostic prevent_posted_journal_line_mutation()
+   * trigger (drizzle/constraints/004_...) needed zero changes to also
+   * protect the two new tax-classification columns, by attempting to
+   * mutate them directly and confirming the same immutability exception
+   * fires — not merely asserted from reading the trigger's source.
+   */
+  describe("journal_lines tax classification immutability — same column-agnostic POSTED trigger", () => {
+    let taxCodeId: string;
+    let postedEntryId: string;
+    let taxTaggedLineId: string;
+
+    beforeAll(async () => {
+      const [taxCode] = await sql`
+        INSERT INTO tax_codes (tenant_id, legal_entity_id, code, name, treatment)
+        VALUES (${tenantId}, ${legalEntityId}, ${"JEDB-TAX-IMMUT-" + randomUUID().slice(0, 8)}, 'DB Test Tax Code Immutable', 'STANDARD')
+        RETURNING id
+      `;
+      taxCodeId = taxCode!.id as string;
+
+      postedEntryId = await createDraftEntry();
+      await insertLine(postedEntryId, 1, assetAccountId, 20000, 0);
+      const [line2] = await sql`
+        INSERT INTO journal_lines (tenant_id, journal_entry_id, line_number, account_id, debit_minor, credit_minor, tax_code_id, tax_direction)
+        VALUES (${tenantId}, ${postedEntryId}, 2, ${revenueAccountId}, 0, 20000, ${taxCodeId}, 'OUTPUT')
+        RETURNING id
+      `;
+      taxTaggedLineId = line2!.id as string;
+      await sql`
+        UPDATE journal_entries
+        SET status = 'POSTED', posted_at = now(), journal_number = ${"JE-TAXIMMUT-" + randomUUID().slice(0, 8)}
+        WHERE id = ${postedEntryId}
+      `;
+    });
+
+    it("rejects clearing tax_code_id/tax_direction on a line belonging to a POSTED entry", async () => {
+      await expect(
+        sql`UPDATE journal_lines SET tax_code_id = NULL, tax_direction = NULL WHERE id = ${taxTaggedLineId}`,
+      ).rejects.toThrow(/immutable once its parent journal_entries is POSTED/);
+    });
+
+    it("rejects changing tax_direction alone on a line belonging to a POSTED entry", async () => {
+      await expect(
+        sql`UPDATE journal_lines SET tax_direction = 'INPUT' WHERE id = ${taxTaggedLineId}`,
+      ).rejects.toThrow(/immutable once its parent journal_entries is POSTED/);
+    });
+  });
 });

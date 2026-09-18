@@ -297,6 +297,20 @@ export const journalEntries = pgTable(
 export type JournalEntry = typeof journalEntries.$inferSelect;
 export type NewJournalEntry = typeof journalEntries.$inferInsert;
 
+/// Tax/VAT Phase 6 (docs/finance-work-item-tax-vat-phase-6-manual-journal-tax-coverage-proposal.md,
+/// CTO-approved implementation authorization §8.1) — explicit direction
+/// tag for a manually-tax-classified journal line. Deliberately NOT
+/// inferred from debit/credit polarity, account type, or tax-code
+/// configuration (tax_codes carries no direction column at all — see
+/// taxTreatmentEnum's own doc comment — and a journal line has no
+/// document type the way an AP/AR line does to imply one). Two values
+/// only, mirroring tax_codes' apTaxAccountId/arTaxAccountId's own
+/// INPUT/OUTPUT framing.
+export const journalLineTaxDirectionEnum = pgEnum(
+  "journal_line_tax_direction",
+  ["INPUT", "OUTPUT"],
+);
+
 export const journalLines = pgTable(
   "journal_lines",
   {
@@ -321,6 +335,23 @@ export const journalLines = pgTable(
       .notNull()
       .default(0),
     description: varchar("description", { length: 500 }),
+    /// Tax/VAT Phase 6 — optional manual tax classification. NULL means
+    /// "not tax-classified" (100% legacy behavior for every existing and
+    /// future untagged line: excluded from the VAT Position Report's
+    /// classified totals, same as an AP/AR line with no taxCodeId).
+    /// When set, the line's OWN debitMinor/creditMinor amount IS the tax
+    /// amount attributed to this code+direction — there is no base-
+    /// amount/percentage calculation for a manual journal line (a
+    /// journal line has no "taxable base" the way an AP/AR document line
+    /// does; it directly states its own debit/credit). Real FK:
+    /// tax_codes is Finance's own table, same migration lifecycle (same
+    /// reasoning as supplierBillLines.taxCodeId).
+    taxCodeId: uuid("tax_code_id").references(() => taxCodes.id),
+    /// Tax/VAT Phase 6 — paired with taxCodeId (both-null-or-both-set,
+    /// enforced by the two implication CHECK constraints below). Always
+    /// explicitly supplied, never inferred — see journalLineTaxDirectionEnum's
+    /// doc comment.
+    taxDirection: journalLineTaxDirectionEnum("tax_direction"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -342,6 +373,19 @@ export const journalLines = pgTable(
     check(
       "journal_lines_single_sided",
       sql`NOT (${t.debitMinor} > 0 AND ${t.creditMinor} > 0)`,
+    ),
+    // Tax/VAT Phase 6 — both-or-neither pairing, expressed as two
+    // one-directional implications, the exact idiom already used by
+    // supplierBillLines/customerInvoiceLines/customerCreditNoteLines'
+    // own taxRateId-requires-taxCodeId checks (e.g. line ~712 above),
+    // rather than a single biconditional.
+    check(
+      "journal_lines_tax_direction_requires_code",
+      sql`${t.taxDirection} IS NULL OR ${t.taxCodeId} IS NOT NULL`,
+    ),
+    check(
+      "journal_lines_tax_code_requires_direction",
+      sql`${t.taxCodeId} IS NULL OR ${t.taxDirection} IS NOT NULL`,
     ),
     // Reject meaningless zero/zero lines — a line must move value on at
     // least one side. Combined with the single-sided check above, every

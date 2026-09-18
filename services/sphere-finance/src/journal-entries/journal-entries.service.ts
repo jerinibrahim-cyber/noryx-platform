@@ -21,6 +21,7 @@ import {
   chartOfAccounts,
   journalEntries,
   journalLines,
+  taxCodes,
   type AccountingPeriod,
   type JournalEntry,
   type JournalLine,
@@ -554,12 +555,24 @@ export class JournalEntriesService {
   ): Promise<JournalEntryWithLines> {
     // Step 6: build reversal lines — same accounts/amounts, swapped
     // debit/credit, fresh 1..N numbering independent of the original's.
+    // Tax/VAT Phase 6 (CTO authorization §8.6) — a tax-classified
+    // line's taxCodeId/taxDirection is carried onto its reversal
+    // unchanged (same code, same direction — NOT swapped, unlike
+    // debit/credit). Combined with the VAT report's signed-contribution
+    // formula (creditMinor - debitMinor for OUTPUT, debitMinor -
+    // creditMinor for INPUT), a reversal's swapped debit/credit under
+    // the same code+direction always nets its original's contribution
+    // to exactly zero — no separate "exclude reversed" filter is needed
+    // or used for manual-journal tax (contrast tax-reports.service.ts's
+    // AP/AR queries, which do need one).
     const reversalLineInputs: CreateJournalLineDto[] = original.lines.map(
       (l) => ({
         accountId: l.accountId,
         debitMinor: l.creditMinor,
         creditMinor: l.debitMinor,
         description: l.description ?? undefined,
+        taxCodeId: l.taxCodeId ?? undefined,
+        taxDirection: l.taxDirection ?? undefined,
       }),
     );
 
@@ -736,6 +749,27 @@ export class JournalEntriesService {
         `The following account id(s) are not active accounts in this legal entity: ${invalid.join(", ")}.`,
       );
     }
+
+    // Tax/VAT Phase 6 — draft-time validation of every explicitly
+    // tax-classified line's tax code (CTO authorization §8.4). The DTO's
+    // TaxCodeDirectionPairingConstraint already guarantees taxCodeId and
+    // taxDirection are both-or-neither by the time we get here; only the
+    // referenced code's existence/activation/scope remains to check.
+    const taxCodeIds = lines
+      .map((l) => l.taxCodeId)
+      .filter((id): id is string => id !== undefined && id !== null);
+    if (taxCodeIds.length > 0) {
+      const invalidTaxCodes = await this.findInvalidTaxCodeIds(
+        tx,
+        legalEntityId,
+        taxCodeIds,
+      );
+      if (invalidTaxCodes.length > 0) {
+        throw new BadRequestException(
+          `The following tax code id(s) are not active tax codes in this legal entity: ${invalidTaxCodes.join(", ")}.`,
+        );
+      }
+    }
   }
 
   /** Posting-time re-validation of every line's account — independent
@@ -763,6 +797,28 @@ export class JournalEntriesService {
         `The following account id(s) are not active accounts in this legal entity: ${invalid.join(", ")}.`,
       );
     }
+
+    // Tax/VAT Phase 6 — post-time re-validation of every tax-classified
+    // line's tax code, independent of whatever passed at draft
+    // create/edit time (CTO authorization §8.4, mirroring the account
+    // re-validation immediately above): a tax code can be deactivated
+    // between draft creation and posting. 422, not 400 — same
+    // business-rule-at-posting-time convention as the account check.
+    const taxCodeIds = lines
+      .map((l) => l.taxCodeId)
+      .filter((id): id is string => id !== null);
+    if (taxCodeIds.length > 0) {
+      const invalidTaxCodes = await this.findInvalidTaxCodeIds(
+        tx,
+        legalEntityId,
+        taxCodeIds,
+      );
+      if (invalidTaxCodes.length > 0) {
+        throw new UnprocessableEntityException(
+          `The following tax code id(s) are not active tax codes in this legal entity: ${invalidTaxCodes.join(", ")}.`,
+        );
+      }
+    }
   }
 
   private async findInvalidAccountIds(
@@ -784,6 +840,48 @@ export class JournalEntriesService {
         ),
       );
     const validIds = new Set(validAccounts.map((a) => a.id));
+    return uniqueIds.filter((id) => !validIds.has(id));
+  }
+
+  /** Tax/VAT Phase 6 — deliberately a local, trivial, single-table
+   * lookup (tax_codes: exists in this legal entity, isActive) rather
+   * than an injected TaxCodesService, unlike AP/AR's tax wiring — this
+   * codebase's "usual convention" for a trivial single-table check
+   * (same shape as findInvalidAccountIds above, resolveCurrency,
+   * allocateJournalNumber), explicitly contrasted in
+   * SupplierBillsModule's own doc comment against the "non-trivial,
+   * evolving business logic" case that justifies DI there (rate
+   * resolution/calculation — CTO authorization §8.2 explicitly rules
+   * that out for this work item, so there is no non-trivial logic to
+   * inject a service for). Also avoids adding a first-ever constructor
+   * dependency to JournalEntriesService, which every other AP/AR/
+   * ScheduledReversals module already registers as a bare second
+   * provider on the explicit assumption ("Safe for the identical
+   * reason: JournalEntriesService has no constructor-injected
+   * dependencies of its own" — SupplierBillsModule's own doc comment)
+   * that it has none — introducing one would require touching seven
+   * further, functionally unrelated modules (supplier-payments,
+   * customer-receipts, customer-credit-notes, scheduled-reversals,
+   * etc.) purely for DI wiring. Queries the exact same `tax_codes`
+   * table TaxCodesService.findByIdInTx() itself queries — not a second
+   * tax-code authority, just a second call site for the same one. */
+  private async findInvalidTaxCodeIds(
+    tx: TxClient,
+    legalEntityId: string,
+    taxCodeIds: string[],
+  ): Promise<string[]> {
+    const uniqueIds = [...new Set(taxCodeIds)];
+    const validCodes = await tx
+      .select({ id: taxCodes.id })
+      .from(taxCodes)
+      .where(
+        and(
+          eq(taxCodes.legalEntityId, legalEntityId),
+          eq(taxCodes.isActive, true),
+          inArray(taxCodes.id, uniqueIds),
+        ),
+      );
+    const validIds = new Set(validCodes.map((c) => c.id));
     return uniqueIds.filter((id) => !validIds.has(id));
   }
 
@@ -903,6 +1001,11 @@ export class JournalEntriesService {
           debitMinor: line.debitMinor,
           creditMinor: line.creditMinor,
           description: line.description ?? null,
+          // Tax/VAT Phase 6 — both null or both set, guaranteed by
+          // TaxCodeDirectionPairingConstraint at the DTO layer and by
+          // the two implication CHECK constraints at the DB layer.
+          taxCodeId: line.taxCodeId ?? null,
+          taxDirection: line.taxDirection ?? null,
         })),
       )
       .returning();

@@ -17,6 +17,15 @@ export interface VatPositionCodeRow {
   netSupplyValueMinor: number;
   netTaxMinor: number;
   netCalculatedTaxMinor: number;
+  /** Tax/VAT Phase 6 (CTO authorization §8.7) — the portion of
+   * netTaxMinor sourced from explicitly tax-classified manual journal
+   * lines (journal_lines.tax_code_id), already included within
+   * netTaxMinor, never a separate additional amount. `netTaxMinor -
+   * manualTaxMinor` recovers the AP/AR-only (invoice/credit-note or
+   * bill/debit-note) contribution — the "source-level attribution"
+   * required alongside the unified headline. Always 0 for a code with
+   * no manual-journal activity this window. */
+  manualTaxMinor: number;
 }
 
 /** Tax/VAT Phase 5 (docs/finance-work-item-tax-vat-phase-5-proposal.md
@@ -69,6 +78,19 @@ export interface VatPositionMeta {
   netPositionMinor: number;
   unclassifiedOutputTaxMinor: number;
   unclassifiedInputTaxMinor: number;
+  /** Tax/VAT Phase 6 (CTO authorization §8.7) — the portion of
+   * outputTaxMinor/inputTaxMinor sourced from explicitly
+   * tax-classified manual journal lines, already included within
+   * outputTaxMinor/inputTaxMinor (the unified headline), never a
+   * separate additional amount. `outputTaxMinor - manualOutputTaxMinor`
+   * recovers the AR-only figure; `inputTaxMinor - manualInputTaxMinor`
+   * recovers the AP-only figure. A reversed manual entry (same
+   * tax_code_id/tax_direction, swapped debit/credit — §8.6) always
+   * nets its original's contribution to zero, so both fields are 0
+   * for a legal entity with no *net* manual tax activity this window,
+   * even if manual tax-classified entries exist and were reversed. */
+  manualOutputTaxMinor: number;
+  manualInputTaxMinor: number;
   glCrossCheck: VatPositionGlCrossCheck;
 }
 
@@ -92,6 +114,21 @@ interface RawTotalsRow {
   total_tax_minor: unknown;
 }
 
+/** Tax/VAT Phase 6 — one row per (tax code, tax direction) combination
+ * seen on any POSTED, explicitly-classified manual journal line this
+ * window. net_tax_minor is already signed per the formula in
+ * manualTaxRows()'s own doc comment — no separate primary/contra pair
+ * to net against, unlike codeRows()/RawCodeRow (reversals net to zero
+ * within this single signed sum instead). */
+interface RawManualCodeRow {
+  tax_code_id: string;
+  code: string;
+  name: string;
+  treatment: "STANDARD" | "ZERO_RATED" | "EXEMPT";
+  tax_direction: "INPUT" | "OUTPUT";
+  net_tax_minor: unknown;
+}
+
 /**
  * Tax/VAT Phase 4 — VAT Position Report.
  * docs/finance-work-item-tax-vat-phase-4-discovery.md, CTO-authorized
@@ -111,25 +148,36 @@ interface RawTotalsRow {
  * several statements, and needs the identical one-snapshot guarantee
  * every other multi-statement Finance report already relies on.
  *
- * No new schema, no new table, no new migration (discovery §4) — every
- * column this report reads already exists, written correctly by
- * Tax/VAT Phases 1-3. No dependency on `TaxConfigurationModule`/
- * `TaxRatesService` at all (discovery §5) — this report only ever reads
- * already-snapshotted `tax_code_id`/`tax_rate_id`/`tax_amount_minor`
- * values off posted lines, never resolves a rate itself.
+ * No dependency on `TaxConfigurationModule`/`TaxRatesService` at all
+ * (discovery §5) — this report only ever reads already-snapshotted
+ * `tax_code_id`/`tax_rate_id`/`tax_amount_minor` values (AP/AR) or
+ * already-supplied `tax_code_id`/`tax_direction` values (manual, Phase
+ * 6) off posted lines, never resolves a rate or calculates a tax
+ * amount itself.
  *
- * Central architectural fact this file is built on (discovery §3.2,
- * confirmed by direct read of `CustomerInvoicesService.post()`/
- * `SupplierBillsService.post()` this session): posting writes ONE
- * aggregate tax `journal_lines` row per document, summed across every
- * tax code on it. `journal_lines` carries no `tax_code_id` at all, so a
- * per-tax-code breakdown is structurally impossible from the General
- * Ledger — every `*ByTaxCode` figure here is read from the four
- * document line tables directly (`supplier_bill_lines`,
- * `supplier_debit_note_lines`, `customer_invoice_lines`,
- * `customer_credit_note_lines`), never from `journal_lines`. The GL
- * read layer is used only for the coarser, optional `glCrossCheck`
- * section (§6.3/§6.4 of the discovery) — a movement-sum sanity check
+ * Central architectural fact this file was originally built on
+ * (discovery §3.2, confirmed by direct read of
+ * `CustomerInvoicesService.post()`/`SupplierBillsService.post()`):
+ * posting an AP/AR document writes ONE aggregate tax `journal_lines`
+ * row per document, summed across every tax code on it — an AP/AR
+ * per-tax-code breakdown is structurally impossible from that side of
+ * the General Ledger, so every `*ByTaxCode` figure sourced from AP/AR
+ * is read from the four document line tables directly
+ * (`supplier_bill_lines`, `supplier_debit_note_lines`,
+ * `customer_invoice_lines`, `customer_credit_note_lines`), never from
+ * `journal_lines`.
+ *
+ * Tax/VAT Phase 6 (docs/finance-work-item-tax-vat-phase-6-manual-journal-tax-coverage-proposal.md,
+ * CTO-approved implementation authorization) changes the previous
+ * "journal_lines carries no tax_code_id at all" statement: migration
+ * 0024 adds an OPTIONAL, explicitly-supplied `tax_code_id`/
+ * `tax_direction` pair to `journal_lines`, for MANUALLY tax-classified
+ * lines only (never auto-derived from AP/AR posting — those aggregate
+ * lines are never tax-tagged). `manualTaxRows()` below reads exactly
+ * that new, narrow slice of `journal_lines` — explicitly-tagged lines
+ * only (`tax_code_id IS NOT NULL`) — and is additive to, not a
+ * replacement for, the four-table AP/AR read above. The GL read layer
+ * is still used only for the coarser, optional `glCrossCheck`
  * against the two singleton tax accounts, not a source of per-code
  * data.
  *
@@ -214,7 +262,7 @@ export class TaxReportsService {
           dateFrom,
           dateTo,
         );
-        const outputByTaxCode = this.netByCode(invoiceRows, creditNoteRows);
+        let outputByTaxCode = this.netByCode(invoiceRows, creditNoteRows);
 
         // Input side — supplier bills (primary) net of supplier debit
         // notes (contra), grouped by tax_code_id.
@@ -240,7 +288,48 @@ export class TaxReportsService {
           dateFrom,
           dateTo,
         );
-        const inputByTaxCode = this.netByCode(billRows, debitNoteRows);
+        let inputByTaxCode = this.netByCode(billRows, debitNoteRows);
+
+        // Tax/VAT Phase 6 (CTO authorization §8.7 — CTO DECISION: manual
+        // tax MUST be included in the existing VAT headline totals, not
+        // a separate headline) — explicitly tax-classified manual
+        // journal lines, already net per code+direction (reversals
+        // cancel out within manualTaxRows() itself; see that method's
+        // doc comment). Merged into the SAME outputByTaxCode/
+        // inputByTaxCode arrays AP/AR already populate, each row's
+        // manualTaxMinor tracking the manual-only portion so the
+        // AP/AR-only figure stays recoverable (`netTaxMinor -
+        // manualTaxMinor`) — the "detailed source attribution" the CTO
+        // decision requires alongside the unified headline.
+        const manualRows = await this.manualTaxRows(
+          tx,
+          tenantId,
+          legalEntityId,
+          dateFrom,
+          dateTo,
+        );
+        const manualOutputRows = manualRows.filter(
+          (r) => r.tax_direction === "OUTPUT",
+        );
+        const manualInputRows = manualRows.filter(
+          (r) => r.tax_direction === "INPUT",
+        );
+        outputByTaxCode = this.mergeManualIntoByCode(
+          outputByTaxCode,
+          manualOutputRows,
+        );
+        inputByTaxCode = this.mergeManualIntoByCode(
+          inputByTaxCode,
+          manualInputRows,
+        );
+        const manualOutputTaxMinor = manualOutputRows.reduce(
+          (sum, r) => sum + this.toNumber(r.net_tax_minor),
+          0,
+        );
+        const manualInputTaxMinor = manualInputRows.reduce(
+          (sum, r) => sum + this.toNumber(r.net_tax_minor),
+          0,
+        );
 
         // Headline totals — computed independently of tax-code
         // classification (no `tax_code_id IS NOT NULL` filter), so
@@ -273,7 +362,10 @@ export class TaxReportsService {
           dateFrom,
           dateTo,
         );
-        const outputTaxMinor = totalInvoiceTax - totalCreditNoteTax;
+        // Tax/VAT Phase 6 (CTO authorization §8.7) — the unified
+        // headline: AP/AR total, plus the net manual contribution.
+        const outputTaxMinor =
+          totalInvoiceTax - totalCreditNoteTax + manualOutputTaxMinor;
         const classifiedOutputTaxMinor = outputByTaxCode.reduce(
           (sum, r) => sum + r.netTaxMinor,
           0,
@@ -303,7 +395,8 @@ export class TaxReportsService {
           dateFrom,
           dateTo,
         );
-        const inputTaxMinor = totalBillTax - totalDebitNoteTax;
+        const inputTaxMinor =
+          totalBillTax - totalDebitNoteTax + manualInputTaxMinor;
         const classifiedInputTaxMinor = inputByTaxCode.reduce(
           (sum, r) => sum + r.netTaxMinor,
           0,
@@ -335,6 +428,8 @@ export class TaxReportsService {
             netPositionMinor: outputTaxMinor - inputTaxMinor,
             unclassifiedOutputTaxMinor,
             unclassifiedInputTaxMinor,
+            manualOutputTaxMinor,
+            manualInputTaxMinor,
             glCrossCheck,
           },
         };
@@ -461,6 +556,7 @@ export class TaxReportsService {
         netSupplyValueMinor: this.toNumber(r.supply_value_minor),
         netTaxMinor: this.toNumber(r.tax_minor),
         netCalculatedTaxMinor: this.toNumber(r.calculated_tax_minor),
+        manualTaxMinor: 0,
       });
     }
     for (const r of contra) {
@@ -481,6 +577,112 @@ export class TaxReportsService {
           netSupplyValueMinor: -supply,
           netTaxMinor: -tax,
           netCalculatedTaxMinor: -calc,
+          manualTaxMinor: 0,
+        });
+      }
+    }
+    return Array.from(byCode.values()).sort((a, b) =>
+      a.code.localeCompare(b.code),
+    );
+  }
+
+  /** Tax/VAT Phase 6 (CTO authorization §8.7/§8.9/§8.10) — every
+   * explicitly tax-classified manual journal line (`journal_lines.
+   * tax_code_id IS NOT NULL`) on a POSTED journal entry within the
+   * report window, grouped by (tax code, tax direction) and net per
+   * the signed-contribution formula:
+   *   OUTPUT: SUM(credit_minor - debit_minor)
+   *   INPUT:  SUM(debit_minor - credit_minor)
+   * — mirroring how a credit/debit note already contributes negatively
+   * against its own primary document type elsewhere in this file, so a
+   * reversal (same tax_code_id/tax_direction, swapped debit/credit —
+   * JournalEntriesService.completeReversalPosting(), CTO authorization
+   * §8.6) always nets its original's row to exactly zero WITHIN this
+   * single query. Deliberately does NOT exclude reversed entries the
+   * way codeRows()/totalTax() exclude a reversed AP/AR document's
+   * journal — there is no separate "document row" for a manual entry
+   * to net against; the original and its reversal are each their own
+   * POSTED journal_entries row with their own tax-tagged lines, and
+   * excluding either one would leave the OTHER one's contribution
+   * unmatched (a wrong, nonzero residual) rather than a correct zero.
+   * A DRAFT manual entry (je.status != 'POSTED') never contributes,
+   * matching §8.4 (only posted classification is authoritative). Scoped
+   * by transactionDate, the manual-journal analogue of AP/AR's own
+   * document-date columns. */
+  private async manualTaxRows(
+    tx: TxClient,
+    tenantId: string,
+    legalEntityId: string,
+    dateFrom: string,
+    dateTo: string,
+  ): Promise<RawManualCodeRow[]> {
+    const rows = (await tx.execute(sql`
+      SELECT
+        tc.id AS tax_code_id,
+        tc.code AS code,
+        tc.name AS name,
+        tc.treatment AS treatment,
+        jl.tax_direction AS tax_direction,
+        COALESCE(SUM(
+          CASE
+            WHEN jl.tax_direction = 'OUTPUT' THEN jl.credit_minor - jl.debit_minor
+            WHEN jl.tax_direction = 'INPUT' THEN jl.debit_minor - jl.credit_minor
+          END
+        ), 0) AS net_tax_minor
+      FROM journal_lines jl
+      INNER JOIN journal_entries je ON je.id = jl.journal_entry_id
+      INNER JOIN tax_codes tc ON tc.id = jl.tax_code_id
+      WHERE jl.tenant_id = ${tenantId}
+        AND je.tenant_id = ${tenantId}
+        AND je.legal_entity_id = ${legalEntityId}
+        AND je.status = 'POSTED'
+        AND je.transaction_date >= ${dateFrom}::date
+        AND je.transaction_date <= ${dateTo}::date
+        AND jl.tax_code_id IS NOT NULL
+      GROUP BY tc.id, tc.code, tc.name, tc.treatment, jl.tax_direction
+    `)) as unknown as RawManualCodeRow[];
+    return rows;
+  }
+
+  /** Merges manual journal tax rows (one direction's worth — OUTPUT or
+   * INPUT) into an existing AP/AR-sourced byCode array, mutating each
+   * matched row's netTaxMinor/netCalculatedTaxMinor/manualTaxMinor in
+   * place and appending a fresh row (netSupplyValueMinor: 0 — a manual
+   * journal line has no base/supply-value concept at all, CTO
+   * authorization §8.2/§11's null-vs-zero fallback clause: this field's
+   * existing non-nullable `number` contract is preserved rather than
+   * widened to `number | null` for the sake of one new, always-optional
+   * source) for a code seen only on manual lines this window.
+   * netCalculatedTaxMinor tracks netTaxMinor exactly for the manual
+   * portion — manual tax is never "calculated vs. overridden" (CTO
+   * authorization §8.2: no calculation exists to override), so
+   * calculated == actual always holds for it, preserving this field's
+   * existing "equals netTaxMinor iff nothing was overridden" meaning
+   * for AP/AR consumers. */
+  private mergeManualIntoByCode(
+    base: VatPositionCodeRow[],
+    manualRows: RawManualCodeRow[],
+  ): VatPositionCodeRow[] {
+    const byCode = new Map<string, VatPositionCodeRow>(
+      base.map((r) => [r.taxCodeId, r]),
+    );
+    for (const r of manualRows) {
+      const manualTax = this.toNumber(r.net_tax_minor);
+      const existing = byCode.get(r.tax_code_id);
+      if (existing) {
+        existing.netTaxMinor += manualTax;
+        existing.netCalculatedTaxMinor += manualTax;
+        existing.manualTaxMinor += manualTax;
+      } else {
+        byCode.set(r.tax_code_id, {
+          taxCodeId: r.tax_code_id,
+          code: r.code,
+          name: r.name,
+          treatment: r.treatment,
+          netSupplyValueMinor: 0,
+          netTaxMinor: manualTax,
+          netCalculatedTaxMinor: manualTax,
+          manualTaxMinor: manualTax,
         });
       }
     }
@@ -491,8 +693,11 @@ export class TaxReportsService {
 
   /** Optional GL cross-check (discovery §6.3/§6.4) — a coarse,
    * period-movement sanity check against the two singleton tax
-   * accounts, NOT a source of per-tax-code data (journal_lines has no
-   * tax_code_id at all — discovery §3.2). Polarity confirmed by direct
+   * accounts, NOT a source of per-tax-code data (the classified AP/AR
+   * breakdown reads the four document line tables directly, and the
+   * manual breakdown reads journal_lines.tax_code_id directly — this
+   * cross-check instead reads aggregate GL account movement only, by
+   * accountId, regardless of tax_code_id). Polarity confirmed by direct
    * read of the posting code this session: invoices CREDIT
    * taxOutputAccountId, credit notes DEBIT it (reversed) — so output
    * movement is `SUM(credit) - SUM(debit)`. Bills DEBIT

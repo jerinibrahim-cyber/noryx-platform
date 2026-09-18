@@ -169,6 +169,13 @@
       "when": 1789676257925,
       "tag": "0023_budgeting_phase_1_foundation",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1789765099903,
+      "tag": "0024_tax_vat_phase_6_manual_journal_tax_coverage",
+      "breakpoints": true
     }
   ]
 }
