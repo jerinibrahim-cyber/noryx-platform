@@ -19,20 +19,26 @@ Labelling discipline used throughout (per the CTO's implementation authorization
 **Discovery source:** `docs/finance-work-item-tax-vat-phase-6-manual-journal-tax-coverage-proposal.md` (§0–§18, CTO-reviewed, concluded READY FOR CTO REVIEW).
 **Implementation authorization:** "NORYX CTO — FINAL ONE-PASS IMPLEMENTATION AUTHORIZATION — Tax/VAT Phase 6 — Manual Journal Tax Coverage" (this session).
 
-## 2. Baseline SHA
+## 2. Baseline and Commit Provenance
 
 **CTO DECISION (authorization §1):** authoritative starting point is `ac16fa0e195f175806240924832c8c1567cc9772`.
 
-**VERIFIED this session, independently, before any change:**
+**Commit chain:**
 
-- Device repo (`~/mnt/noryx-platform`, canonical git history location): `git branch --show-current` → `main`; `git rev-parse HEAD` → `ac16fa0e195f175806240924832c8c1567cc9772`; `git status --short` → two untracked, non-conflicting files only (the prior discovery proposal doc, and a pre-existing unrelated `_to_delete/` scratch artifact from an earlier session, left untouched — out of this work item's scope).
-- `origin/main`: SSH fetch against the device's configured `origin` fails host-key verification inside the sandboxed device shell (an environment limitation, not a data problem — same class of issue recorded in the prior Budgeting/discovery sessions). Verified instead via read-only `git ls-remote https://github.com/jerinibrahim-cyber/noryx-platform.git main` → `ac16fa0e195f175806240924832c8c1567cc9772`. Equal to local HEAD.
-- Cloud implementation workspace (`/root/noryx-platform`, used for the actual build/test/migration work in this session — has a real local PostgreSQL 16, pnpm, and full build tooling the device shell lacks): found at a stale, uncommitted mid-session state from the _previous_ (Budgeting) conversation, HEAD at the historical `71964dc...` baseline with a dirty working tree. **OBSERVED:** a targeted diff (`git diff origin/main -- <file>`) confirmed the dirty content was byte-identical to what `origin/main` already contains — i.e. already-superseded, already-committed work, not unsaved unique work. Synced via `git fetch origin main && git reset --hard origin/main`, landing at `ac16fa0e195f175806240924832c8c1567cc9772` with a clean tree.
-- **Equality confirmed:** device `main` HEAD == `origin/main` (via `ls-remote`) == cloud workspace HEAD after sync == `ac16fa0e195f175806240924832c8c1567cc9772`, exactly the SHA the authorization designates as authoritative.
+- **Approved baseline SHA:** `ac16fa0e195f175806240924832c8c1567cc9772`
+- **Implementation commit SHA:** `908b9306f496ed11059aa8f551b741ba30a6fb4a`
+- **Documentation/completion commit SHA:** `f48266899bec4e3bdd0550fcfd02a45639b3be3f`
+- **Evidence correction commit SHA:** recorded in `COMPLETION_REPORT.md` upon completion of this pass.
+
+**VERIFIED before coding:**
+
+- Local repo `main` at `ac16fa0e195f175806240924832c8c1567cc9772`.
+- `origin/main` (via `git ls-remote`) verified at `ac16fa0e195f175806240924832c8c1567cc9772`.
+- `main` was not modified directly.
 
 ## 3. Implementation Branch
 
-`feat/tax-vat-phase-6-manual-journal-tax-coverage`, created from `ac16fa0e195f175806240924832c8c1567cc9772` on both the device repo and the cloud implementation workspace (kept in sync — see `COMPLETION_REPORT.md` §2/§19/§20 for exact final SHAs). Not pushed. `main` not modified directly on either repo.
+`feat/tax-vat-phase-6-manual-journal-tax-coverage`, created from `ac16fa0e195f175806240924832c8c1567cc9772`. Not pushed. `main` not modified directly. See `COMPLETION_REPORT.md` for explicit commit provenance.
 
 ## 4. Current Architecture (OBSERVED, re-confirmed against this exact baseline before coding — full detail already in the discovery proposal §2, not repeated verbatim here)
 
@@ -77,7 +83,14 @@ ALTER TABLE "journal_lines" ADD CONSTRAINT "journal_lines_tax_code_requires_dire
   CHECK ("tax_code_id" IS NULL OR "tax_direction" IS NOT NULL);
 ```
 
-Purely additive: two nullable columns, one new enum type, two implication CHECKs, one FK. No table, no RLS file (existing `tenant_isolation` policy filters rows, not columns), no new constraint/trigger file (the existing generic `prevent_posted_journal_line_mutation()` trigger already covers any column). **VERIFIED:** applied cleanly to (a) a fresh database running all 24 migrations in sequence, and (b) a database seeded with real pre-existing POSTED `journal_entries`/`journal_lines` rows created _before_ 0024 — existing rows survived with `tax_code_id`/`tax_direction` both NULL (no backfill, as designed), and the immutability trigger continued to reject a raw-SQL mutation attempt against a pre-existing POSTED row's new columns. See `COMPLETION_REPORT.md` §4/§13.
+Purely additive: two nullable columns, one new enum type, two implication CHECKs, one FK. No table, no RLS file (existing `tenant_isolation` policy filters rows, not columns), no new constraint/trigger file (the existing generic `prevent_posted_journal_line_mutation()` trigger already covers any column). **VERIFIED:** applied cleanly to (a) a fresh database running all 24 migrations in sequence, and (b) a database seeded with real pre-existing POSTED `journal_entries`/`journal_lines` rows created _before_ 0024 — existing rows survived with `tax_code_id`/`tax_direction` both NULL (no backfill, as designed), and the immutability trigger continued to reject a raw-SQL mutation attempt against a pre-existing POSTED row's new columns.
+
+**Pre-migration data safety vs. post-migration rollback safety (JTX-027):**
+
+- **Pre-migration data safety:** Migration 0024 is additive; existing pre-Phase-6 rows are preserved with `NULL`; no pre-existing tax classification data exists to lose during forward migration.
+- **Post-migration rollback safety:** A rollback performed after tax classifications have been populated could destroy the new tax classification columns and data. Therefore, rollback after population is potentially destructive and requires an explicit operational rollback procedure.
+
+See `COMPLETION_REPORT.md` §3/§4/§13.
 
 ## 8. API / Service Contract (IMPLEMENTED, VERIFIED — no new routes)
 

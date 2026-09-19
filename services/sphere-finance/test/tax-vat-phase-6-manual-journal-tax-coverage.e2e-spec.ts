@@ -9,6 +9,9 @@ import {
   closeDb as closePlatformDb,
   tenants,
   legalEntities,
+  auditLogs,
+  eq,
+  and,
 } from "@noryx/db-core";
 import { closeDb as closeFinanceDb } from "../src/db/db";
 import { AppModule } from "../src/app.module";
@@ -725,6 +728,83 @@ describe("Tax/VAT Phase 6 — Manual Journal Tax Coverage (e2e)", () => {
         expect(res.body.meta).toHaveProperty("manualOutputTaxMinor");
         expect(res.body.meta).toHaveProperty("manualInputTaxMinor");
       }
+    });
+  });
+
+  describe("Audit evidence — JTX-audit direct persisted assertion", () => {
+    it("persists taxCodeId and taxDirection in audit_logs row snapshots for tax-classified journal lines", async () => {
+      const token = tokenFor(tenantAId, legalEntityA1Id, ["finance.poster"]);
+      const createRes = await createJournalEntry(token, {
+        transactionDate: "2026-03-01",
+        lines: [
+          {
+            accountId: taxOutputAccountA1Id,
+            debitMinor: 0,
+            creditMinor: 100,
+            taxCodeId: taxCodeStandardId,
+            taxDirection: "OUTPUT",
+          },
+          {
+            accountId: assetAccountA1Id,
+            debitMinor: 100,
+            creditMinor: 0,
+          },
+        ],
+      }).expect(201);
+
+      const entryId = createRes.body.data.id as string;
+
+      // Post the entry so audit persistence is proven across the lifecycle
+      await postJournalEntry(token, entryId).expect(200);
+
+      const db = getPlatformDb();
+      const logs = await db
+        .select()
+        .from(auditLogs)
+        .where(
+          and(
+            eq(auditLogs.entityType, "journal_entry"),
+            eq(auditLogs.entityId, entryId),
+          ),
+        );
+
+      // 1. Direct assertion on CREATE audit log payload
+      const createLog = logs.find((r) => r.action === "CREATE");
+      expect(createLog).toBeDefined();
+      expect(createLog!.tenantId).toBe(tenantAId);
+      expect(createLog!.legalEntityId).toBe(legalEntityA1Id);
+      const createAfter = createLog!.afterState as {
+        lines?: Array<{
+          taxCodeId: string | null;
+          taxDirection: string | null;
+        }>;
+      };
+      expect(createAfter.lines).toBeDefined();
+      const createTaxLine = createAfter.lines!.find(
+        (l) => l.taxCodeId === taxCodeStandardId,
+      );
+      expect(createTaxLine).toBeDefined();
+      expect(createTaxLine!.taxCodeId).toBe(taxCodeStandardId);
+      expect(createTaxLine!.taxDirection).toBe("OUTPUT");
+
+      // 2. Direct assertion on POST audit log payload
+      const postLog = logs.find((r) => r.action === "POST");
+      expect(postLog).toBeDefined();
+      expect(postLog!.tenantId).toBe(tenantAId);
+      expect(postLog!.legalEntityId).toBe(legalEntityA1Id);
+      const postAfter = postLog!.afterState as {
+        lines?: Array<{
+          taxCodeId: string | null;
+          taxDirection: string | null;
+        }>;
+      };
+      expect(postAfter.lines).toBeDefined();
+      const postTaxLine = postAfter.lines!.find(
+        (l) => l.taxCodeId === taxCodeStandardId,
+      );
+      expect(postTaxLine).toBeDefined();
+      expect(postTaxLine!.taxCodeId).toBe(taxCodeStandardId);
+      expect(postTaxLine!.taxDirection).toBe("OUTPUT");
     });
   });
 });
