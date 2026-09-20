@@ -5,7 +5,7 @@ built and actually run — this is not a proposal document.
 
 Authorization: CTO "IMPLEMENTATION" instruction (full implementation
 authorization) against the CTO-approved architecture in
-`docs/finance-work-item-cash-flow-statement-proposal.md` ("Account-Level
+`docs/work-items/cash-flow-statement/PROPOSAL.md` ("Account-Level
 Classification, Entry-Level Reconciling Gate").
 
 ---

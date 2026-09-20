@@ -2,7 +2,7 @@
 
 **Status:** IMPLEMENTED, VERIFIED, COMMITTED (see §11 for push verification)
 **Date:** 2026-09-12
-**Authoritative discovery/proposal artifacts:** `docs/finance-work-item-tax-vat-phase-5-discovery.md`, `docs/finance-work-item-tax-vat-phase-5-proposal.md`
+**Authoritative discovery/proposal artifacts:** `docs/work-items/tax-vat-phase-5-gl-account-mapping/DISCOVERY.md`, `docs/work-items/tax-vat-phase-5-gl-account-mapping/PROPOSAL.md`
 **Baseline before this work:** `main` @ `8ccdec5` (Tax/VAT Phase 4 completion report), confirmed `local main == origin/main` at that SHA before implementation began.
 **Commit(s) produced by this work:** see §11
 

@@ -26,7 +26,7 @@ Read access (`git fetch origin main`) succeeds normally — this is a write/push
 
 ## What was implemented
 
-Wires the approved Tax Code/Rate model (Tax/VAT Phase 1) into Customer Invoices and Customer Credit Notes, using the Phase 2 AP implementation (`SupplierBillsService` / `SupplierDebitNotesService`) as the direct engineering precedent, per `docs/finance-work-item-tax-vat-phase-3-discovery.md`.
+Wires the approved Tax Code/Rate model (Tax/VAT Phase 1) into Customer Invoices and Customer Credit Notes, using the Phase 2 AP implementation (`SupplierBillsService` / `SupplierDebitNotesService`) as the direct engineering precedent, per `docs/work-items/tax-vat-phase-3-ar-tax-calculation/DISCOVERY.md`.
 
 - **Schema / migration** (`0019_tax_vat_phase_3_ar_calculation.sql`): added `tax_code_id`, `tax_rate_id`, `tax_amount_calculated_minor`, `tax_amount_overridden` to `customer_invoice_lines` and `customer_credit_note_lines`, with FKs to `tax_codes`/`tax_rates` and the two CHECK constraints per table (`..._tax_overridden_requires_code`, `..._tax_rate_requires_code`) established in Phase 2. Purely additive; RLS policies and the immutability trigger automatically cover the new columns with zero SQL changes, exactly as the discovery document predicted.
 - **DTOs**: optional `taxCodeId` (UUID) added to `CreateCustomerInvoiceLineDto` and `CreateCustomerCreditNoteLineDto`, with unit tests for well-formed, malformed, and override-combined cases.
