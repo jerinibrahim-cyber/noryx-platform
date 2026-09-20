@@ -4,10 +4,12 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 import { and, eq, legalEntities, sql } from "@noryx/db-core";
-import { apSettings, arSettings, accountingPeriods } from "../db/schema";
+import type { PaginatedMeta } from "@noryx/shared-types";
+import { apSettings, arSettings, accountingPeriods, taxCodes } from "../db/schema";
 import { withTenant, type TxClient } from "../db/db";
 import { REPORT_TX_CONFIG } from "../general-ledger/general-ledger.service";
 import type { VatPositionQueryDto } from "./dto/vat-position-query.dto";
+import type { VatPositionDetailQueryDto } from "./dto/vat-position-detail-query.dto";
 
 export interface VatPositionCodeRow {
   taxCodeId: string;
@@ -98,6 +100,93 @@ export interface VatPositionResult {
   outputByTaxCode: VatPositionCodeRow[];
   inputByTaxCode: VatPositionCodeRow[];
   meta: VatPositionMeta;
+}
+
+/**
+ * Tax/VAT Phase 7 (CONTRACT.md §0/§5/§6) — VAT Position Detail /
+ * Source-Document Drill-Down. One row per persisted tax-bearing source
+ * line that contributed to `getVatPosition()`'s `netTaxMinor` (never one
+ * row per document, per tax code, or an aggregate) — the same five
+ * source types §5's table defines, read at row grain instead of
+ * `SUM()`/`GROUP BY` grain.
+ */
+export interface VatPositionDetailRow {
+  sourceType:
+    | "SUPPLIER_BILL"
+    | "SUPPLIER_DEBIT_NOTE"
+    | "CUSTOMER_INVOICE"
+    | "CUSTOMER_CREDIT_NOTE"
+    | "MANUAL_JOURNAL";
+  sourceDocumentId: string;
+  /** The line's own primary-key UUID — CONTRACT.md §9's mandatory final
+   * ordering tie-breaker (only guaranteed unique within its own table,
+   * per §9's Correction-1 wording; `sourceType` disambiguates across
+   * tables). */
+  sourceLineId: string;
+  sourceDocumentReference: string | null;
+  /** Canonical source date, CONTRACT.md §9 — `bill_date` /
+   * `debit_note_date` / `invoice_date` / `credit_note_date` /
+   * `transaction_date`, per `sourceType`. `YYYY-MM-DD`. */
+  sourceDocumentDate: string;
+  taxCodeId: string;
+  code: string;
+  name: string;
+  direction: "INPUT" | "OUTPUT";
+  /** Signed per CONTRACT.md §7's polarity table — already sign-adjusted,
+   * never a value the caller must re-sign. */
+  signedTaxContributionMinor: number;
+}
+
+/**
+ * Tax/VAT Phase 7 (CONTRACT.md §11A) — one entry per `(taxCodeId,
+ * direction)` present in the request's COMPLETE filtered result (never
+ * merely the current page), computed inside the same
+ * `REPORT_TX_CONFIG` transaction/snapshot as the page fetch (§10A).
+ * `direction` — not the display `code` string — is part of the
+ * reconciliation identity (Hardening Requirement 4): INPUT and OUTPUT
+ * activity under what displays as "the same code" are two separate
+ * entries.
+ */
+export interface VatPositionReconciliationTotal {
+  taxCodeId: string;
+  code: string;
+  direction: "INPUT" | "OUTPUT";
+  netTaxContributionMinor: number;
+}
+
+export interface VatPositionDetailMeta extends PaginatedMeta {
+  legalEntityId: string;
+  dateFrom: string;
+  dateTo: string;
+  periodId: string | null;
+  taxCodeId: string | null;
+  currencyCode: string;
+}
+
+export interface VatPositionDetailResult {
+  rows: VatPositionDetailRow[];
+  reconciliationTotals: VatPositionReconciliationTotal[];
+  meta: VatPositionDetailMeta;
+}
+
+interface RawDetailRow {
+  source_type: string;
+  source_document_id: string;
+  source_line_id: string;
+  source_document_reference: string | null;
+  source_document_date: unknown;
+  tax_code_id: string;
+  code: string;
+  name: string;
+  direction: string;
+  signed_tax_contribution_minor: unknown;
+}
+
+interface RawReconciliationRow {
+  tax_code_id: string;
+  code: string;
+  direction: string;
+  net_tax_contribution_minor: unknown;
 }
 
 interface RawCodeRow {
@@ -431,6 +520,142 @@ export class TaxReportsService {
             manualOutputTaxMinor,
             manualInputTaxMinor,
             glCrossCheck,
+          },
+        };
+      },
+      undefined,
+      REPORT_TX_CONFIG,
+    );
+  }
+
+  /**
+   * Tax/VAT Phase 7 — VAT Position Detail / Source-Document Drill-Down
+   * (docs/work-items/tax-vat-phase-7-vat-position-detail-drill-down/CONTRACT.md,
+   * ACCEPTANCE.md). Read-only; no tax calculation, no write path, no new
+   * accounting behavior — restates `codeRows()`/`manualTaxRows()`'s own
+   * predicates at row grain instead of `SUM()`/`GROUP BY` grain (§4,
+   * §20). Runs inside the identical `REPORT_TX_CONFIG` transaction
+   * (`REPEATABLE READ`, `READ ONLY`) `getVatPosition()`/`getLedger()`
+   * already use — the page fetch, `totalItems` count, and
+   * `reconciliationTotals` are all computed against the same MVCC
+   * snapshot (§10A), never redefined or reused across separate requests
+   * (§10B — no cross-request/server-side snapshot infrastructure is
+   * introduced).
+   */
+  async getVatPositionDetail(
+    tenantId: string,
+    legalEntityId: string,
+    query: VatPositionDetailQueryDto,
+  ): Promise<VatPositionDetailResult> {
+    return withTenant(
+      tenantId,
+      async (tx: TxClient) => {
+        let dateFrom: string;
+        let dateTo: string;
+        let periodId: string | null;
+
+        if (query.periodId) {
+          const period = await this.resolvePeriodInScope(
+            tx,
+            tenantId,
+            legalEntityId,
+            query.periodId,
+          );
+          dateFrom = period.startDate;
+          dateTo = period.endDate;
+          periodId = period.id;
+        } else if (query.dateFrom && query.dateTo) {
+          dateFrom = query.dateFrom;
+          dateTo = query.dateTo;
+          periodId = null;
+        } else {
+          // Identical rule to getVatPosition() (§8) — a detail drill-down
+          // with no lower bound at all would scan every posted document
+          // ever created, never a coherent single VAT filing window.
+          throw new BadRequestException(
+            "A VAT position detail report requires either a periodId or both dateFrom and dateTo.",
+          );
+        }
+
+        // §8/§13/§15 — an explicitly supplied taxCodeId must resolve
+        // within the caller's own tenant/legal entity or 404, identical
+        // "resolve or 404" posture to resolvePeriodInScope() immediately
+        // above (ACCEPTANCE.md DRILL-037 — corrected from its earlier
+        // "400" wording, which cited resolvePeriodInScope() as its own
+        // precedent while that precedent actually throws 404; the
+        // precedent's real behavior governs, not the earlier wording —
+        // see this phase's completion report).
+        let taxCodeId: string | null = null;
+        if (query.taxCodeId) {
+          taxCodeId = await this.resolveTaxCodeInScope(
+            tx,
+            tenantId,
+            legalEntityId,
+            query.taxCodeId,
+          );
+        }
+
+        const currencyCode = await this.resolveCurrency(
+          tx,
+          tenantId,
+          legalEntityId,
+        );
+
+        const unionSql = this.detailUnionSql(
+          tenantId,
+          legalEntityId,
+          dateFrom,
+          dateTo,
+        );
+        const taxCodeFilter = taxCodeId
+          ? sql`WHERE d.tax_code_id = ${taxCodeId}`
+          : sql``;
+
+        // Hardening Requirement 7 (§9, FROZEN) — filtering, ordering, and
+        // pagination all happen at the database layer: three statements
+        // against the same inner union, never a JS-side sort/slice of a
+        // fully materialized result set. All three share one transaction
+        // snapshot (§10A), so they are mutually consistent regardless of
+        // concurrent posting activity elsewhere.
+        const totalItems = await this.countDetailRows(
+          tx,
+          unionSql,
+          taxCodeFilter,
+        );
+
+        const offset = (query.page - 1) * query.pageSize;
+        const rows = await this.fetchDetailPage(
+          tx,
+          unionSql,
+          taxCodeFilter,
+          query.pageSize,
+          offset,
+        );
+
+        // §11A (FROZEN) — computed over the COMPLETE filtered result,
+        // never the returned page alone (Correction 3); this is a
+        // separate, unpaginated aggregate query against the same inner
+        // union/snapshot, not a client-side sum of `rows`.
+        const reconciliationTotals = await this.fetchReconciliationTotals(
+          tx,
+          unionSql,
+          taxCodeFilter,
+        );
+
+        return {
+          rows,
+          reconciliationTotals,
+          meta: {
+            legalEntityId,
+            dateFrom,
+            dateTo,
+            periodId,
+            taxCodeId,
+            currencyCode,
+            page: query.page,
+            pageSize: query.pageSize,
+            totalItems,
+            totalPages: Math.ceil(totalItems / query.pageSize),
           },
         };
       },
@@ -1041,5 +1266,271 @@ export class TaxReportsService {
   private toNumber(value: unknown): number {
     if (value === null || value === undefined) return 0;
     return typeof value === "number" ? value : Number(value);
+  }
+
+  /** Normalizes a raw driver value for a Postgres `date` column to a
+   * plain `YYYY-MM-DD` string — identical helper/reasoning to
+   * `GeneralLedgerService.dateOnly()` (general-ledger.service.ts),
+   * duplicated locally per this codebase's established
+   * duplicate-the-trivial-helper convention (see `resolvePeriodInScope`/
+   * `resolveCurrency`'s own doc comments above) rather than imported;
+   * `tx.execute()` bypasses Drizzle's own column-mode mapping, so a raw
+   * `date` column needs this explicit normalization regardless of
+   * whether the driver handed back a JS `Date` or an already-formatted
+   * string. */
+  private dateOnly(value: unknown): string {
+    if (value instanceof Date) return value.toISOString().slice(0, 10);
+    if (typeof value === "string") {
+      return value.length >= 10 ? value.slice(0, 10) : value;
+    }
+    return String(value);
+  }
+
+  /** Tax/VAT Phase 7 (CONTRACT.md §13/§15) — resolves an explicitly
+   * supplied `taxCodeId` within the caller's own tenant AND legal
+   * entity, or 404s — identical "resolve or 404" shape to
+   * `resolvePeriodInScope` immediately above (a tax code belonging to a
+   * different legal entity of the same tenant, or a different tenant
+   * entirely, must never silently narrow the result to zero rows; it
+   * must be rejected explicitly, matching §13's "an id-based lookup must
+   * never become an authorization bypass" invariant). */
+  private async resolveTaxCodeInScope(
+    tx: TxClient,
+    tenantId: string,
+    legalEntityId: string,
+    taxCodeId: string,
+  ): Promise<string> {
+    const [taxCode] = await tx
+      .select({ id: taxCodes.id })
+      .from(taxCodes)
+      .where(
+        and(
+          eq(taxCodes.id, taxCodeId),
+          eq(taxCodes.tenantId, tenantId),
+          eq(taxCodes.legalEntityId, legalEntityId),
+        ),
+      )
+      .limit(1);
+    if (!taxCode) {
+      throw new NotFoundException(
+        `No tax code found with id ${taxCodeId} for this legal entity.`,
+      );
+    }
+    return taxCode.id;
+  }
+
+  /** Tax/VAT Phase 7 (CONTRACT.md §5/§6/§7/§9/§20) — the row-grain union
+   * of all five tax-bearing source types, built from the identical
+   * predicate shape `codeRows()`/`manualTaxRows()` already use above
+   * (tenant + legal-entity + `status = 'POSTED'` + date-window +
+   * `tax_code_id IS NOT NULL`; AP/AR's own-document reversal exclusion
+   * via `journal_entries.reversed_by_journal_entry_id`; manual
+   * journal's deliberate NON-exclusion, §7) — restated at row grain
+   * instead of `SUM()`/`GROUP BY` grain, never hand-duplicated with a
+   * drifted predicate. Combined with `UNION ALL`, never bare `UNION`
+   * (Hardening Requirement 12) — a bare `UNION` would silently
+   * deduplicate two coincidentally-identical rows, violating §6's
+   * one-row-per-source-line guarantee. Returns the inner subquery only
+   * (no `taxCodeId` filter, no `ORDER BY`, no `LIMIT`/`OFFSET`) — every
+   * caller wraps it for counting, paging, or reconciliation totals, all
+   * three inside the same `REPORT_TX_CONFIG` transaction/snapshot. */
+  private detailUnionSql(
+    tenantId: string,
+    legalEntityId: string,
+    dateFrom: string,
+    dateTo: string,
+  ) {
+    const apArBranch = (
+      sourceType: string,
+      direction: "INPUT" | "OUTPUT",
+      contraSign: 1 | -1,
+      lineTable: string,
+      parentTable: string,
+      parentFk: string,
+      dateColumn: string,
+    ) => sql`
+      SELECT
+        ${sourceType}::text AS source_type,
+        doc.id AS source_document_id,
+        ln.id AS source_line_id,
+        doc.internal_reference AS source_document_reference,
+        doc.${sql.raw(dateColumn)} AS source_document_date,
+        tc.id AS tax_code_id,
+        tc.code AS code,
+        tc.name AS name,
+        ${direction}::text AS direction,
+        ${
+          contraSign === 1
+            ? sql`ln.tax_amount_minor`
+            : sql`-ln.tax_amount_minor`
+        } AS signed_tax_contribution_minor
+      FROM ${sql.raw(lineTable)} ln
+      INNER JOIN ${sql.raw(parentTable)} doc ON doc.id = ln.${sql.raw(parentFk)}
+      INNER JOIN tax_codes tc ON tc.id = ln.tax_code_id
+      WHERE ln.tenant_id = ${tenantId}
+        AND doc.tenant_id = ${tenantId}
+        AND doc.legal_entity_id = ${legalEntityId}
+        AND doc.status = 'POSTED'
+        AND doc.${sql.raw(dateColumn)} >= ${dateFrom}::date
+        AND doc.${sql.raw(dateColumn)} <= ${dateTo}::date
+        AND ln.tax_code_id IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM journal_entries je
+          WHERE je.id = doc.journal_entry_id
+            AND je.reversed_by_journal_entry_id IS NOT NULL
+        )
+    `;
+
+    // §7 — deliberately NO reversal exclusion here: a manual reversal is
+    // its own independent POSTED journal_lines row (same
+    // tax_code_id/tax_direction, swapped debit/credit) and nets to zero
+    // purely through this row's own signed arithmetic, exactly as
+    // manualTaxRows() above already does at aggregate grain.
+    const manualBranch = sql`
+      SELECT
+        'MANUAL_JOURNAL'::text AS source_type,
+        je.id AS source_document_id,
+        jl.id AS source_line_id,
+        je.journal_number AS source_document_reference,
+        je.transaction_date AS source_document_date,
+        tc.id AS tax_code_id,
+        tc.code AS code,
+        tc.name AS name,
+        jl.tax_direction::text AS direction,
+        CASE
+          WHEN jl.tax_direction = 'OUTPUT' THEN jl.credit_minor - jl.debit_minor
+          WHEN jl.tax_direction = 'INPUT' THEN jl.debit_minor - jl.credit_minor
+        END AS signed_tax_contribution_minor
+      FROM journal_lines jl
+      INNER JOIN journal_entries je ON je.id = jl.journal_entry_id
+      INNER JOIN tax_codes tc ON tc.id = jl.tax_code_id
+      WHERE jl.tenant_id = ${tenantId}
+        AND je.tenant_id = ${tenantId}
+        AND je.legal_entity_id = ${legalEntityId}
+        AND je.status = 'POSTED'
+        AND je.transaction_date >= ${dateFrom}::date
+        AND je.transaction_date <= ${dateTo}::date
+        AND jl.tax_code_id IS NOT NULL
+    `;
+
+    return sql.join(
+      [
+        apArBranch(
+          "SUPPLIER_BILL",
+          "INPUT",
+          1,
+          "supplier_bill_lines",
+          "supplier_bills",
+          "bill_id",
+          "bill_date",
+        ),
+        apArBranch(
+          "SUPPLIER_DEBIT_NOTE",
+          "INPUT",
+          -1,
+          "supplier_debit_note_lines",
+          "supplier_debit_notes",
+          "debit_note_id",
+          "debit_note_date",
+        ),
+        apArBranch(
+          "CUSTOMER_INVOICE",
+          "OUTPUT",
+          1,
+          "customer_invoice_lines",
+          "customer_invoices",
+          "invoice_id",
+          "invoice_date",
+        ),
+        apArBranch(
+          "CUSTOMER_CREDIT_NOTE",
+          "OUTPUT",
+          -1,
+          "customer_credit_note_lines",
+          "customer_credit_notes",
+          "credit_note_id",
+          "credit_note_date",
+        ),
+        manualBranch,
+      ],
+      sql` UNION ALL `,
+    );
+  }
+
+  /** `COUNT(*)` over the filtered union — Hardening Requirement 7,
+   * database-side, same transaction/snapshot as the page fetch and
+   * reconciliation totals. */
+  private async countDetailRows(
+    tx: TxClient,
+    unionSql: ReturnType<TaxReportsService["detailUnionSql"]>,
+    taxCodeFilter: ReturnType<TaxReportsService["detailUnionSql"]>,
+  ): Promise<number> {
+    const rows = (await tx.execute(sql`
+      SELECT COUNT(*) AS total
+      FROM (${unionSql}) d
+      ${taxCodeFilter}
+    `)) as unknown as Array<{ total: unknown }>;
+    return this.toNumber(rows[0]?.total);
+  }
+
+  /** One page of detail rows, ordered per CONTRACT.md §9's frozen total
+   * order (`sourceDocumentDate ASC, sourceType ASC, sourceLineId ASC`),
+   * `LIMIT`/`OFFSET` applied at the database layer. */
+  private async fetchDetailPage(
+    tx: TxClient,
+    unionSql: ReturnType<TaxReportsService["detailUnionSql"]>,
+    taxCodeFilter: ReturnType<TaxReportsService["detailUnionSql"]>,
+    pageSize: number,
+    offset: number,
+  ): Promise<VatPositionDetailRow[]> {
+    const rows = (await tx.execute(sql`
+      SELECT *
+      FROM (${unionSql}) d
+      ${taxCodeFilter}
+      ORDER BY d.source_document_date ASC, d.source_type ASC, d.source_line_id ASC
+      LIMIT ${pageSize} OFFSET ${offset}
+    `)) as unknown as RawDetailRow[];
+    return rows.map((r) => ({
+      sourceType: r.source_type as VatPositionDetailRow["sourceType"],
+      sourceDocumentId: r.source_document_id,
+      sourceLineId: r.source_line_id,
+      sourceDocumentReference: r.source_document_reference,
+      sourceDocumentDate: this.dateOnly(r.source_document_date),
+      taxCodeId: r.tax_code_id,
+      code: r.code,
+      name: r.name,
+      direction: r.direction as "INPUT" | "OUTPUT",
+      signedTaxContributionMinor: this.toNumber(
+        r.signed_tax_contribution_minor,
+      ),
+    }));
+  }
+
+  /** §11A (FROZEN) — one entry per `(taxCodeId, direction, code)` over
+   * the COMPLETE filtered result (no `LIMIT`/`OFFSET`), same
+   * transaction/snapshot as the page fetch above — never a client-side
+   * sum of the returned page. */
+  private async fetchReconciliationTotals(
+    tx: TxClient,
+    unionSql: ReturnType<TaxReportsService["detailUnionSql"]>,
+    taxCodeFilter: ReturnType<TaxReportsService["detailUnionSql"]>,
+  ): Promise<VatPositionReconciliationTotal[]> {
+    const rows = (await tx.execute(sql`
+      SELECT
+        d.tax_code_id AS tax_code_id,
+        d.code AS code,
+        d.direction AS direction,
+        COALESCE(SUM(d.signed_tax_contribution_minor), 0) AS net_tax_contribution_minor
+      FROM (${unionSql}) d
+      ${taxCodeFilter}
+      GROUP BY d.tax_code_id, d.code, d.direction
+      ORDER BY d.code ASC, d.direction ASC
+    `)) as unknown as RawReconciliationRow[];
+    return rows.map((r) => ({
+      taxCodeId: r.tax_code_id,
+      code: r.code,
+      direction: r.direction as "INPUT" | "OUTPUT",
+      netTaxContributionMinor: this.toNumber(r.net_tax_contribution_minor),
+    }));
   }
 }
