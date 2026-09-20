@@ -1,6 +1,10 @@
-# Stage 1B — Implementation Plan (V2, CTO-Approved)
+# Stage 1B — Implementation Plan (V2, CTO-Approved) [ABANDONED]
 
-**Status:** Design/content approved by NOAH (CTO). This document is the approved artifact for Stage 1B's implementation. It does **not**, by itself, authorize implementation — see §12 ("Implementation sequence") below and `docs/project/DECISIONS.md` DEC-007 for the explicit approval-vs-authorization distinction.
+> [!WARNING]
+> **PERMANENTLY ABANDONED WORKSTREAM**
+> This document is preserved for historical audit only. The NOAH / Orchestrator project was permanently abandoned in September 2026. This plan is NOT authorized for implementation.
+
+**Status:** HISTORICAL ARCHIVE — ABANDONED (Superceded by manual engineering protocol). Design/content originally approved by NOAH (CTO). It does **not** authorize implementation.
 
 This document merges the original Stage 1B implementation-preparation proposal with its CTO-requested correction (V2: state count fixed to 14; implementation sequence corrected for artifact-SHA pinning; single-source-of-truth requirement for the validator's state machine) into one self-contained record.
 

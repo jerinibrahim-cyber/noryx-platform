@@ -1,61 +1,79 @@
-# Noryx Project State
+# NoryX Project State
 
-**Snapshot:** 2026-09-18 (Repository implementation state paragraph updated to reflect Tax/VAT Phase 6 implementation, currently at CTO_REVIEW on a feature branch — see below; all other sections unchanged from 2026-09-05)  
+**Snapshot:** 2026-09-21  
 **Repository:** `jerinibrahim-cyber/noryx-platform`  
 **Authoritative product branch:** `main`  
-**Last verified main commit:** `ac16fa0e195f175806240924832c8c1567cc9772` (Budgeting Phase 1 Foundation completion report — the authoritative baseline Tax/VAT Phase 6 was branched from). See `docs/work-items/tax-vat-phase-6-manual-journal-tax-coverage/COMPLETION_REPORT.md` for the Phase 6 implementation-commit SHA, branch, and bundle details once recorded — Phase 6 has **not** been merged or pushed to `main`.
+**Last verified main commit:** `2bcb13130eb322cf5810410c0e3ffe06e8f0d8e6` (Tax/VAT Phase 6 — Manual Journal Tax Coverage post-implementation evidence correction).  
+**Active workstream:** Repository reverification and professional cleanup (`chore/repository-governance-and-cleanup-2026-09`).
 
-## Product
+---
 
-Noryx is a monorepo for **Noryx Sphere** (ERP · CRM · HRMS) and **Noryx Orbis** (CAFM/FM Intelligence), with shared multi-tenant platform services. The stack includes Node.js/TypeScript/NestJS backend services, PostgreSQL with RLS, React/TypeScript web, an event-driven internal core, and a versioned REST gateway.
+## 1. Product
 
-## Product direction
+NoryX is a monorepo for **Noryx Sphere** (ERP · CRM · HRMS) and **Noryx Orbis** (CAFM/FM Intelligence), with shared multi-tenant platform services. The stack includes Node.js/TypeScript/NestJS backend services, PostgreSQL 16 with RLS, React/TypeScript web, an event-driven internal core, and a versioned REST gateway.
 
-The locked strategic direction is **Finance-first**. Other product areas are not to be inferred as the next implementation target unless the roadmap/state explicitly establishes them.
+---
 
-## Repository implementation state
+## 2. Product Direction
 
-`main` has advanced past Scheduled Reversal for Accruals and Other Timing Adjustments (Revision 2, `733c3070...`), then past **Tax/VAT MVP Phase 1 — Tax Configuration Foundation** (`dd6d135`, Finance), then past NOAH's own Stage 1A-close/Stage 1B-ratification commits (`8021c36`, `878da4c`, `563046e` — orchestrator workstream, not Finance), then past **Tax/VAT MVP Phase 2 — AP Tax Calculation** (`ae4b073`/`6229bc6`, Finance). The CTO subsequently confirmed the Phase 3 architecture decisions (credit-note lines resolve tax independently per line, never inherited from allocated invoices — the same no-inheritance shape as Phase 2's debit notes) against the actual current code/schema and authorized full implementation directly.
+The locked strategic direction is **Finance-First**. Other product areas are not to be inferred as the next implementation target unless the roadmap/state explicitly establishes them with separate CTO authorization.
 
-**Tax/VAT MVP Phase 2 — AP Tax Calculation is implemented, verified, and pushed to `main`.** Optional line-level `taxCodeId` on Supplier Bill lines and Supplier Debit Note lines resolves the effective `tax_rates` row by the document's own transaction date (`billDate` / `debitNoteDate`), calculates and snapshots the rate via an immutable FK, supports the approved override semantics (client-supplied `taxAmountMinor` stays authoritative alongside a retained `taxAmountCalculatedMinor` and `taxAmountOverridden` flag), and fully preserves legacy behavior when `taxCodeId` is omitted. Supplier Debit Notes resolve tax entirely independently per line (no inheritance from allocated bills), per the CTO-confirmed correction to the originally-proposed Decision 1. A pre-existing Phase 1 bug in `TaxRatesService.create()`'s overlap pre-check (inclusive comparisons stricter than the real half-open EXCLUDE constraint) was discovered and fixed during Phase 2 verification. Full detail is in `docs/finance-work-item-tax-vat-phase-2-completion-report.md`.
+---
 
-**Tax/VAT MVP Phase 3 — AR Tax Calculation is implemented, verified, and pushed to `main`.** The identical shape is wired into Customer Invoices and Customer Credit Notes: optional line-level `taxCodeId` resolves the effective `tax_rates` row by the document's own transaction date (`invoiceDate` / `creditNoteDate`), calculates and snapshots the rate via an immutable FK, supports the same override semantics as Phase 2's Decision 4, and fully preserves legacy behavior when `taxCodeId` is omitted. Customer Credit Notes resolve tax entirely independently per line (no inheritance from allocated invoices), carrying forward Phase 2's CTO-confirmed no-inheritance correction — `customer_credit_note_allocations` is a header-level many-to-many table with no line-level linkage to any invoice line, so `CustomerCreditNotesService.resolveLineTax()` takes no `allocations` parameter at all, mirroring `SupplierDebitNotesService.resolveLineTax()`'s exact signature as a compile-time guarantee, not just a runtime convention. `TaxConfigurationModule`/`TaxRatesService`/`calculateTaxAmountMinor` were reused unmodified via DI — no new tax-calculation logic was written. Existing GL posting (including AR's Cr-revenue/Cr-tax-output polarity, reversed again on credit notes), totals, RLS, RBAC, and blanket post-immutability are unchanged and were re-verified by full regression. Full detail, exact test results, commit SHA, and push verification are in `docs/finance-work-item-tax-vat-phase-3-completion-report.md`.
+## 3. Repository Implementation State
 
-**Tax/VAT MVP Phase 4 — VAT Position Report is now implemented, verified, and committed** (see the completion report for push verification). A new top-level, read-only `TaxReportsModule` (`GET /v1/finance/tax-reports/vat-position`, sibling of `GeneralLedgerModule`/`FinancialStatementsModule`, per discovery §6.1/§11 decision 1) computes net output tax (`customer_invoice_lines` − `customer_credit_note_lines`, POSTED, in-window), net input tax (`supplier_bill_lines` − `supplier_debit_note_lines`, POSTED, in-window), and net VAT position (output − input) directly from the four AP/AR tax-bearing source-line tables established in Phases 2/3 — never from `journal_lines`, which the discovery confirmed has no `tax_code_id` and so cannot support per-tax-code reporting. Reporting is tax-code-level with a headline total that always includes legacy/manual (`taxCodeId IS NULL`) lines via an explicit unclassified bucket, so the total can never silently exclude them. Both the authoritative posted `netTaxMinor` and the retained `netCalculatedTaxMinor` are surfaced per line/code for calculated-vs-overridden visibility (discovery §11 decision 5). A secondary, coarser GL cross-check reports period MOVEMENT (not point-in-time balance) on the `ap_settings.tax_input_account_id` / `ar_settings.tax_output_account_id` singleton accounts, confirmed against the actual posting polarity in code (invoices credit / credit notes debit the output account; bills debit / debit notes credit the input account) rather than assumed. The report supports `periodId` or an explicit `dateFrom`/`dateTo` window (mutually exclusive, mirroring `ProfitAndLossQueryDto`'s validation pattern), requires no schema change or migration (every column it reads already existed from Phases 1-3), and reuses `TaxConfigurationModule`'s existing tax-code/rate infrastructure and `GeneralLedgerModule`'s `REPORT_TX_CONFIG` transaction convention unmodified. RBAC (`finance.viewer`/`finance.poster`/`finance.admin`, read-only), tenant isolation, and legal-entity scoping follow the same convention as every other Finance report and were verified by a dedicated 17-test e2e suite plus the full regression suite. Full detail, exact test results, commit SHA, and push verification are in `docs/finance-work-item-tax-vat-phase-4-completion-report.md`.
+`main` contains the complete delivered chain of Finance capabilities through Tax/VAT Phase 6:
 
-**Tax/VAT MVP Phase 5 — Per-Tax-Code GL Account Mapping is now implemented, verified, and committed** (see the completion report for exact SHA(s) and push verification). `tax_codes` gained two independent, nullable per-direction GL-account overrides (`apTaxAccountId`/`arTaxAccountId`, migration `0020_tax_vat_phase_5_gl_account_mapping.sql`) — deliberately NOT a join table, effective-dated history, or a separate configuration table, per the CTO's explicit constraint. Each of the four tax-bearing line tables (`supplier_bill_lines`, `supplier_debit_note_lines`, `customer_invoice_lines`, `customer_credit_note_lines`) gained a matching nullable `resolvedTaxAccountId` snapshot column. The CTO's mandatory architectural correction — resolve and snapshot this value inside the EXISTING `resolveLineTax()` stage (draft create/update), never inside `post()` — was implemented exactly as directed: `post()` remains 100% read-only with respect to source-document tax lines, and the pre-existing per-table database-level immutability triggers (already protecting `taxRateId`/`taxAmountCalculatedMinor`/etc.) protect the new column for free, confirmed by a direct database-level test (a raw `UPDATE` against a posted line's `resolvedTaxAccountId` is rejected by the existing trigger, not a new one). `TaxRatesService.resolveEffectiveRate()` was extended to also return the already-internally-fetched `taxCode` row (zero additional queries), exactly matching the CTO's "do not introduce an unnecessary additional per-line `tax_codes` SELECT" instruction. A code with no configured override falls back to the pre-existing AP/AR-settings singleton account at that same resolution moment — full backward compatibility, confirmed by the complete pre-existing 891-test e2e suite passing unmodified against this change. `post()` in all four posting services now aggregates tax journal lines by DISTINCT resolved account (never merging different accounts, never splitting one account across multiple lines) while preserving each document type's existing debit/credit polarity exactly, and rejects posting (422) whenever a tax-bearing line's snapshot is null or its resolved account was deactivated before posting — the CTO's "every posted tax line must have a deterministic accounting destination" invariant. Credit notes and debit notes continue to resolve tax entirely independently of any allocation (no `allocations` parameter was added to any `resolveLineTax()`). The VAT Position Report's `VatPositionGlCrossCheck` gained two strictly additive fields (`outputTaxAccounts`/`inputTaxAccounts`) derived from the lines' own historical snapshots rather than current configuration — the pre-existing 8 singleton fields keep their exact names/types/meanings, so no existing consumer is broken. A new `PATCH /tax-codes/:id/gl-accounts` route (`finance.admin`) sets/clears the two overrides, reusing the existing AP/AR-settings tax-account validation pattern. Full detail, exact test results, commit SHA(s), migration verification against both `noryx`/`noryx_test`, and push verification are in `docs/finance-work-item-tax-vat-phase-5-completion-report.md`.
+- **Foundation & Accounting Core:** Chart of Accounts, Journal Engine, General Ledger, Financial Statements.
+- **Accounts Payable & Receivable:** Supplier Bills, Supplier Payments, Debit Notes, Customer Invoices, Customer Receipts, Credit Notes.
+- **Banking & Cash Management:** Statements Import, Reconciliation, Payment Provider Settlements, Scheduled Reversals.
+- **Budgeting Phase 1 Foundation:** Budget accounts, periods, line items, and variance tracking (`ac16fa0e...`).
+- **Tax/VAT Suite (Phases 1–6):**
+  - Phase 1: Tax Configuration Foundation (`dd6d135`).
+  - Phase 2: AP Tax Calculation (`ae4b073`/`6229bc6`).
+  - Phase 3: AR Tax Calculation (`ad71a50`/`263354b`).
+  - Phase 4: VAT Position Report (`ba607b8`/`8ccdec5`).
+  - Phase 5: Per-Tax-Code GL Account Mapping (`0020_tax_vat_phase_5_gl_account_mapping.sql`).
+  - Phase 6: Manual Journal Tax Coverage (`2bcb131`, `0024_tax_vat_phase_6_manual_journal_tax_coverage.sql`).
 
-**Tax/VAT Phase 6 — Manual Journal Tax Coverage has been implemented and verified on branch `feat/tax-vat-phase-6-manual-journal-tax-coverage`, per the CTO's "FINAL ONE-PASS IMPLEMENTATION AUTHORIZATION" (2026-09-18), and is at CTO_REVIEW — it has not been merged or pushed to `main`.** Manual `journal_lines` gained optional, explicitly-set `taxCodeId`/`taxDirection` columns (migration `0024_tax_vat_phase_6_manual_journal_tax_coverage.sql`) so a manually-posted journal line can be classified as OUTPUT or INPUT tax with no calculation performed (draft+post-time validated against the tenant/legal-entity's own active `tax_codes`, both-or-neither pairing enforced at DTO and DB-constraint layers, posted immutability inherited for free from the existing column-agnostic `journal_lines` trigger, and classification carried unchanged onto reversals). The VAT Position Report (`GET /v1/finance/tax-reports/vat-position`, Phase 4) was extended with a signed-contribution aggregation over these newly-tagged lines, merged into the existing per-tax-code and headline totals via two new, strictly additive `manualOutputTaxMinor`/`manualInputTaxMinor` meta fields and a per-code `manualTaxMinor` field — with no change to how AP/AR-sourced tax is computed, no double-counting between manual and AP/AR sources, and untagged legacy lines still fully excluded. This closes the "manually-posted non-AP/AR tax journal entries" gap that Phases 1-5 explicitly deferred. Full detail (test results, migration verification, self-review, and provenance) is in `docs/work-items/tax-vat-phase-6-manual-journal-tax-coverage/COMPLETION_REPORT.md`.
+**Tax/VAT Phase 6 is DELIVERED and MERGED to `main` at `2bcb13130eb322cf5810410c0e3ffe06e8f0d8e6`.**
+Documentation and evidence artifacts are located in `docs/work-items/tax-vat-phase-6-manual-journal-tax-coverage/`.
 
-`docs/roadmap.md` reflects Tax/VAT Phase 6 as delivered pending CTO review (statutory filing, reverse charge, and multi-jurisdiction support remain explicitly deferred). No next Finance work item is currently authorized. The next Finance feature must **not** be invented from stale documents — it must come from a fresh discovery document and explicit CTO authorization.
+No next Finance work item is currently implementation-authorized. The next work item requires a fresh discovery document, proposal, and explicit CTO authorization.
 
-## Orchestrator state
+---
 
-**NOAH (Noryx Orchestration & AI Hub)** is the agreed name for the orchestration AI role.
+## 4. Orchestrator State — PERMANENTLY ABANDONED
 
-**Stage 1A — Project Memory Foundation: COMPLETED.**
+The AI Engineering Orchestrator / NOAH autonomous runtime project (Stages 1A and 1B) has been **PERMANENTLY ABANDONED** as of September 2026.
 
-Stage 1A established durable repository memory and operating contracts through:
+- All historical proposals, handoff contracts, and stage trackers have been moved to `docs/archive/orchestrator-abandoned/` for audit purposes only.
+- No agent may revive, implement, merge, or extend any part of the abandoned orchestrator runtime.
+- PR #25 (`feat/orchestrator-validator`) is closed as abandoned.
 
-- `CLAUDE.md`
-- `docs/project/PROJECT_STATE.md`
-- `docs/project/CURRENT_PHASE.md`
-- `docs/project/NEXT_TASK.md`
-- `docs/project/DECISIONS.md`
+---
 
-Stage 1A was merged to `main` as `733c30706a2c0c1baf2e4abdd29824739df26dd8`. Local `main` was subsequently fast-forwarded to that commit and verified clean. No application behavior was changed.
+## 5. Authoritative Engineering Governance
 
-The next orchestrator stage is **not yet implementation-approved**. Stage 1B must first be defined through NOAH discovery/design and the established proposal → CTO approval → implementation → verification → final-review workflow.
+The sole operating model is the manual workflow:
 
-The repository remains the source of truth. No RAG or autonomous orchestrator runtime exists yet.
+```text
+CTO (Human / Product Authority)
+  → Claude (Senior Engineer / Coder)
+  → CTO Quality Gate
+  → Antigravity (Verification & Delivery Agent)
+```
 
-## Locked role separation
+Governing protocols:
 
-- **NOAH / ChatGPT:** CTO + Product Owner + orchestration/state controller + final quality gate.
-- **Claude:** Senior Engineer / primary coder / technical proposal author and reviewer when assigned.
-- **Antigravity:** execution, verification, browser/UI testing, and explicitly delegated low-risk work.
-- **Human owner:** business authority and required approvals.
+- `docs/engineering/NORYX_ENGINEERING_GOVERNANCE.md` (Active / Ratified)
+- `docs/engineering/CLAUDE_ENGINEERING_PROTOCOL.md` (Active / Ratified)
+- `docs/engineering/NORYX_CTO_COPILOT_PROTOCOL.md` (Active / Ratified)
+- `docs/engineering/NORYX_ANTIGRAVITY_DELIVERY_PROTOCOL.md` (Active / Ratified)
 
-## Safety boundary
+---
 
-Never store secrets, credentials, tokens, `.env` contents, or other sensitive operational values in project memory. Critical architecture, database/schema, security, auth/authz, tenant/RLS, production-impacting, breaking-API, scope, roadmap, and deviation decisions require the appropriate human/CTO approval.
+## 6. Safety & Operational Boundaries
+
+- Never commit or log secrets, tokens, credentials, or `.env` files.
+- Delivery to `main` is handled exclusively by Antigravity under explicit CTO delivery authorization. Claude does not push to git remotes.

@@ -1,9 +1,14 @@
-# Next Task
+# Next Task [HISTORICAL ARCHIVE — ABANDONED]
 
-**Task ID:** ORCH-1B-IMPLEMENTATION  
-**Status:** IMPLEMENTATION_AUTHORIZED — NOT_YET_STARTED  
-**Role:** NOAH / CTO  
-**Workstream:** AI Engineering Orchestrator — Stage 1B
+> [!WARNING]
+> **PERMANENTLY ABANDONED WORKSTREAM**
+> This task contract is preserved for historical audit only. The NOAH / Orchestrator project was permanently abandoned in September 2026.
+> This task is NOT authorized and must not be implemented.
+
+**Task ID:** ORCH-1B-IMPLEMENTATION (Abandoned)  
+**Status:** ABANDONED / SUPERSEDED  
+**Role:** Historical / Inactive  
+**Workstream:** AI Engineering Orchestrator — Stage 1B (Abandoned)
 
 ## Objective
 
