@@ -1,6 +1,6 @@
 # NoryX CTO Copilot Protocol
 
-**Status:** Draft — CTO review required  
+**Status:** Active / Ratified  
 **Role:** CTO Copilot  
 **Last updated:** 2026-09-17
 

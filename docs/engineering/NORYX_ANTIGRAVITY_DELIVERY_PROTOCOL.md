@@ -1,6 +1,6 @@
 # NoryX Antigravity Delivery Protocol
 
-**Status:** Draft — CTO review required  
+**Status:** Active / Ratified  
 **Role:** Delivery / repository push agent  
 **Last updated:** 2026-09-17
 
