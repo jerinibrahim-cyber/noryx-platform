@@ -72,13 +72,13 @@ Format per scenario: **ID | Precondition/Setup | Action/Query | Expected Result 
 
 | ID | Precondition/Setup | Action/Query | Expected Result | Invariant Proven | Contract § |
 | --- | --- | --- | --- | --- | --- |
-| DRILL-018 | A tagged line dated inside the query window and another dated one day after `dateTo`. | Query with explicit `dateFrom`/`dateTo`. | Only the in-window line appears. | Date-window scoping matches each source type's own date column (§5, §8). | §8 |
+| DRILL-018 | A tagged line dated inside the query window and another dated one day after `dateTo`. | Query with explicit `dateFrom`/`dateTo`. | Only the in-window line appears. | Date-window scoping matches each source type's own date column (§5, §8). NOT directly exercised by `vat-position-detail.e2e-spec.ts` — regression-verified by `vat-position-report.e2e-spec.ts`'s `"date-window boundary" › "includes a document dated exactly on dateTo, excludes one dated the day after"` (line ~645), which since CONTRACT.md §21's predicate-sharing refactor exercises the literal same `>=`/`<=` date-window SQL condition (`apArEligibilitySql()`/`apArClassifiedEligibilitySql()`) `getVatPositionDetail()` now also calls — not merely a similar-looking query. | §8 |
 
 ## 11. Period Filtering
 
 | ID | Precondition/Setup | Action/Query | Expected Result | Invariant Proven | Contract § |
 | --- | --- | --- | --- | --- | --- |
-| DRILL-019 | A tagged line dated inside a defined accounting period. | Query with `periodId` set to that period. | The line appears, using the period's own resolved `startDate`/`endDate`, identical to the aggregate report's own `periodId` resolution. | `periodId` resolution matches the existing report (§8). | §8 |
+| DRILL-019 | A tagged line dated inside a defined accounting period. | Query with `periodId` set to that period. | The line appears, using the period's own resolved `startDate`/`endDate`, identical to the aggregate report's own `periodId` resolution. | `periodId` resolution matches the existing report (§8). NOT directly exercised by `vat-position-detail.e2e-spec.ts` — regression-verified by `vat-position-report.e2e-spec.ts`'s `"accepts periodId alone, resolving dateFrom/dateTo from the period"` (line ~419), which calls the literal same private `resolvePeriodInScope()` method `getVatPositionDetail()` also calls (not a duplicated copy). | §8 |
 | DRILL-020 | — | Query with both `periodId` and an explicit `dateFrom`/`dateTo`. | Request rejected 400 (`PeriodIdExcludesDateRangeConstraint`). | Mutual exclusivity enforced identically to the existing report/DTOs. | §8 |
 | DRILL-021 | — | Query with neither `periodId` nor `dateFrom`/`dateTo`. | Request rejected 400. | A VAT detail query requires an explicit window, matching the aggregate report's own rule. | §8 |
 
@@ -112,7 +112,7 @@ Format per scenario: **ID | Precondition/Setup | Action/Query | Expected Result 
 
 | ID | Precondition/Setup | Action/Query | Expected Result | Invariant Proven | Contract § |
 | --- | --- | --- | --- | --- | --- |
-| DRILL-028 | A fixture with more rows than one `pageSize`. | Request `page=1` and `page=2` at a fixed `pageSize`, with no intervening writes between the two requests. | The two pages contain disjoint rows, whose union (by `sourceLineId`) equals the complete filtered result with no duplicate and no omitted row. | Pages partition the complete result correctly for a stable snapshot (§9), read together with §10B's explicit no-cross-request-snapshot-guarantee caveat — this scenario is run in a no-concurrent-write test environment, not claimed as a production guarantee. | §9, §10B |
+| DRILL-028 | A fixture with more rows than one `pageSize`, spanning **at least two different `sourceType`s** (e.g. a customer invoice and a supplier bill on the same date) so cross-source-type identity is genuinely exercised, not merely same-table uniqueness. | Request `page=1` and `page=2` at a fixed `pageSize`, with no intervening writes between the two requests. | The two pages contain disjoint rows, whose union — keyed by the tuple `(sourceType, sourceLineId)`, never `sourceLineId` alone (§9's Correction 1: `sourceLineId` is only guaranteed unique within its own source table) — equals the complete filtered result with no duplicate and no omitted row. | Pages partition the complete result correctly for a stable snapshot (§9), read together with §10B's explicit no-cross-request-snapshot-guarantee caveat — this scenario is run in a no-concurrent-write test environment, not claimed as a production guarantee. | §9, §10B |
 | DRILL-029 | Same fixture. | Request the identical scope at `pageSize` large enough to cover the complete result in one call. | `totalItems` equals the row count; `totalPages = 1`; every expected row is present. | `totalItems`/`totalPages` computed correctly (§9). | §9 |
 
 ## 17. Pagination Metadata
@@ -147,7 +147,7 @@ Format per scenario: **ID | Precondition/Setup | Action/Query | Expected Result 
 | ID | Precondition/Setup | Action/Query | Expected Result | Invariant Proven | Contract § |
 | --- | --- | --- | --- | --- | --- |
 | DRILL-036 | — | Query with a syntactically invalid `taxCodeId` (not a UUID). | 400. | Input validation matches every other Finance report's convention. | §15 |
-| DRILL-037 | — | Query with a `taxCodeId` that does not exist, or belongs to a different legal entity. | 400, matching the "resolve or 400" convention (e.g. `resolvePeriodInScope`). | Tax-code resolution validated the same way as elsewhere in this service. | §13, §15 |
+| DRILL-037 | — | Query with a `taxCodeId` that does not exist, or belongs to a different legal entity. | 404 — `resolvePeriodInScope()` (this file) and `resolveAccount()` (`general-ledger.service.ts`) are this repository's actual precedent for "an explicit id-based lookup must resolve within tenant/legal-entity scope or 404," and both genuinely throw `NotFoundException`, not `BadRequestException`; a malformed (non-UUID) `taxCodeId` is the separate DRILL-036 case and correctly stays 400 via `@IsUUID` request validation. | Tax-code resolution validated the same way as every other in-scope-or-404 lookup already in this codebase. | §13, §15 |
 
 ## 22. No Mutation / No Accounting-State Change
 

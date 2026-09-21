@@ -668,14 +668,68 @@ export class TaxReportsService {
   // Shared helpers
   // ---------------------------------------------------------------------
 
+  /**
+   * Tax/VAT Phase 7 (CONTRACT.md §21, FROZEN — "must be built from the
+   * same predicate-construction logic ... shared/factored, not
+   * hand-duplicated") — the base AP/AR document eligibility predicate
+   * (tenant + legal-entity isolation, `status = 'POSTED'`, the
+   * document's own canonical date column within [dateFrom, dateTo], and
+   * the Document-Level Reversal exclusion,
+   * docs/finance-work-item-document-reversal-proposal.md §12/§23) for
+   * exactly one line table. Shared verbatim by `totalTax()` (aggregate
+   * grain, unclassified included), `codeRows()`/`detailUnionSql()`'s
+   * `apArBranch()` (both add the classified-only filter via
+   * `apArClassifiedEligibilitySql()` below) — one place to change this
+   * predicate, so the VAT Position headline and the Phase 7 detail
+   * drill-down can never silently drift apart through an edit applied
+   * to only one call site. Returns a bare boolean SQL fragment (no
+   * leading `WHERE`), for splicing into each caller's own `WHERE`
+   * clause; `doc`/`ln` are the fixed aliases every caller's `FROM`/
+   * `JOIN` already establishes.
+   */
+  private apArEligibilitySql(
+    tenantId: string,
+    legalEntityId: string,
+    dateColumn: string,
+    dateFrom: string,
+    dateTo: string,
+  ) {
+    return sql`
+      ln.tenant_id = ${tenantId}
+        AND doc.tenant_id = ${tenantId}
+        AND doc.legal_entity_id = ${legalEntityId}
+        AND doc.status = 'POSTED'
+        AND doc.${sql.raw(dateColumn)} >= ${dateFrom}::date
+        AND doc.${sql.raw(dateColumn)} <= ${dateTo}::date
+        AND NOT EXISTS (
+          SELECT 1 FROM journal_entries je
+          WHERE je.id = doc.journal_entry_id
+            AND je.reversed_by_journal_entry_id IS NOT NULL
+        )
+    `;
+  }
+
+  /** `apArEligibilitySql()` plus the classified-only filter
+   * (`ln.tax_code_id IS NOT NULL`) — the predicate `codeRows()` and
+   * `detailUnionSql()`'s `apArBranch()` both use (CONTRACT.md §21). */
+  private apArClassifiedEligibilitySql(
+    tenantId: string,
+    legalEntityId: string,
+    dateColumn: string,
+    dateFrom: string,
+    dateTo: string,
+  ) {
+    return sql`${this.apArEligibilitySql(tenantId, legalEntityId, dateColumn, dateFrom, dateTo)} AND ln.tax_code_id IS NOT NULL`;
+  }
+
   /** Per-tax-code SUM of supply value / tax / calculated tax for one
-   * line table, restricted to POSTED parents dated within [dateFrom,
-   * dateTo] and to lines that actually carry a taxCodeId — the
-   * classified slice only (discovery §6.4's core query shape). Table/
-   * column names are passed as plain strings from a fixed internal call
-   * set (never user input), so `sql.raw` on the identifier is safe here
-   * — the same posture every other report service's raw-SQL helpers
-   * already take with their own fixed table names. */
+   * line table — the classified slice only (discovery §6.4's core query
+   * shape), via the shared `apArClassifiedEligibilitySql()` predicate
+   * (CONTRACT.md §21). Table/column names are passed as plain strings
+   * from a fixed internal call set (never user input), so `sql.raw` on
+   * the identifier is safe here — the same posture every other report
+   * service's raw-SQL helpers already take with their own fixed table
+   * names. */
   private async codeRows(
     tx: TxClient,
     tenantId: string,
@@ -687,15 +741,6 @@ export class TaxReportsService {
     dateFrom: string,
     dateTo: string,
   ): Promise<RawCodeRow[]> {
-    // Document-Level Reversal work item
-    // (docs/finance-work-item-document-reversal-proposal.md §12/§23,
-    // CTO-approved implementation authorization) — any of the four
-    // tax-bearing document types can independently be reversed, and a
-    // reversed document stays status = 'POSTED' (§16), so it would
-    // otherwise still contribute its tax lines to this classified
-    // breakdown. Excluded via the same journal_entries.reversed_by_
-    // journal_entry_id linkage every other reversal-aware report query
-    // in this work item uses (ApReportsService/ArReportsService).
     const rows = (await tx.execute(sql`
       SELECT
         tc.id AS tax_code_id,
@@ -708,27 +753,18 @@ export class TaxReportsService {
       FROM ${sql.raw(lineTable)} ln
       INNER JOIN ${sql.raw(parentTable)} doc ON doc.id = ln.${sql.raw(parentFk)}
       INNER JOIN tax_codes tc ON tc.id = ln.tax_code_id
-      WHERE ln.tenant_id = ${tenantId}
-        AND doc.tenant_id = ${tenantId}
-        AND doc.legal_entity_id = ${legalEntityId}
-        AND doc.status = 'POSTED'
-        AND doc.${sql.raw(dateColumn)} >= ${dateFrom}::date
-        AND doc.${sql.raw(dateColumn)} <= ${dateTo}::date
-        AND ln.tax_code_id IS NOT NULL
-        AND NOT EXISTS (
-          SELECT 1 FROM journal_entries je
-          WHERE je.id = doc.journal_entry_id
-            AND je.reversed_by_journal_entry_id IS NOT NULL
-        )
+      WHERE ${this.apArClassifiedEligibilitySql(tenantId, legalEntityId, dateColumn, dateFrom, dateTo)}
       GROUP BY tc.id, tc.code, tc.name, tc.treatment
     `)) as unknown as RawCodeRow[];
     return rows;
   }
 
-  /** Total tax (classified + unclassified) for one line table, same
-   * POSTED/date-window scoping as `codeRows` but with no `tax_code_id`
-   * filter — the always-correct headline figure `codeRows`'s
-   * classified breakdown is reconciled against (discovery §7). */
+  /** Total tax (classified + unclassified) for one line table, the same
+   * base eligibility as `codeRows()` but WITHOUT the classified-only
+   * filter (`apArEligibilitySql()` directly, not
+   * `apArClassifiedEligibilitySql()`) — the always-correct headline
+   * figure `codeRows()`'s classified breakdown is reconciled against
+   * (discovery §7). */
   private async totalTax(
     tx: TxClient,
     tenantId: string,
@@ -740,24 +776,11 @@ export class TaxReportsService {
     dateFrom: string,
     dateTo: string,
   ): Promise<number> {
-    // Document-Level Reversal work item (§12/§23, CTO-approved) — same
-    // exclusion as `codeRows()` above, so the classified/unclassified
-    // reconciliation this total is checked against stays consistent.
     const rows = (await tx.execute(sql`
       SELECT COALESCE(SUM(ln.tax_amount_minor), 0) AS total_tax_minor
       FROM ${sql.raw(lineTable)} ln
       INNER JOIN ${sql.raw(parentTable)} doc ON doc.id = ln.${sql.raw(parentFk)}
-      WHERE ln.tenant_id = ${tenantId}
-        AND doc.tenant_id = ${tenantId}
-        AND doc.legal_entity_id = ${legalEntityId}
-        AND doc.status = 'POSTED'
-        AND doc.${sql.raw(dateColumn)} >= ${dateFrom}::date
-        AND doc.${sql.raw(dateColumn)} <= ${dateTo}::date
-        AND NOT EXISTS (
-          SELECT 1 FROM journal_entries je
-          WHERE je.id = doc.journal_entry_id
-            AND je.reversed_by_journal_entry_id IS NOT NULL
-        )
+      WHERE ${this.apArEligibilitySql(tenantId, legalEntityId, dateColumn, dateFrom, dateTo)}
     `)) as unknown as RawTotalsRow[];
     return this.toNumber(rows[0]?.total_tax_minor);
   }
@@ -857,16 +880,36 @@ export class TaxReportsService {
       FROM journal_lines jl
       INNER JOIN journal_entries je ON je.id = jl.journal_entry_id
       INNER JOIN tax_codes tc ON tc.id = jl.tax_code_id
-      WHERE jl.tenant_id = ${tenantId}
+      WHERE ${this.manualJournalEligibilitySql(tenantId, legalEntityId, dateFrom, dateTo)}
+      GROUP BY tc.id, tc.code, tc.name, tc.treatment, jl.tax_direction
+    `)) as unknown as RawManualCodeRow[];
+    return rows;
+  }
+
+  /** Tax/VAT Phase 7 (CONTRACT.md §21, FROZEN) — the manual-journal
+   * eligibility predicate (tenant + legal-entity isolation, `status =
+   * 'POSTED'`, `transaction_date` within [dateFrom, dateTo], explicitly
+   * tax-classified lines only — deliberately NO reversal exclusion, §7:
+   * a manual reversal is its own independent POSTED row that nets to
+   * zero purely through signed arithmetic). Shared verbatim by
+   * `manualTaxRows()` (aggregate grain) and `detailUnionSql()`'s
+   * `manualBranch` (row grain) — same one-predicate-one-place reasoning
+   * as `apArEligibilitySql()` above. */
+  private manualJournalEligibilitySql(
+    tenantId: string,
+    legalEntityId: string,
+    dateFrom: string,
+    dateTo: string,
+  ) {
+    return sql`
+      jl.tenant_id = ${tenantId}
         AND je.tenant_id = ${tenantId}
         AND je.legal_entity_id = ${legalEntityId}
         AND je.status = 'POSTED'
         AND je.transaction_date >= ${dateFrom}::date
         AND je.transaction_date <= ${dateTo}::date
         AND jl.tax_code_id IS NOT NULL
-      GROUP BY tc.id, tc.code, tc.name, tc.treatment, jl.tax_direction
-    `)) as unknown as RawManualCodeRow[];
-    return rows;
+    `;
   }
 
   /** Merges manual journal tax rows (one direction's worth — OUTPUT or
@@ -1319,15 +1362,22 @@ export class TaxReportsService {
     return taxCode.id;
   }
 
-  /** Tax/VAT Phase 7 (CONTRACT.md §5/§6/§7/§9/§20) — the row-grain union
-   * of all five tax-bearing source types, built from the identical
-   * predicate shape `codeRows()`/`manualTaxRows()` already use above
+  /** Tax/VAT Phase 7 (CONTRACT.md §5/§6/§7/§9/§20/§21) — the row-grain
+   * union of all five tax-bearing source types, built from the SAME
+   * shared predicate helpers `codeRows()`/`totalTax()`/`manualTaxRows()`
+   * call above — `apArClassifiedEligibilitySql()` for the four AP/AR
+   * branches, `manualJournalEligibilitySql()` for the manual branch
    * (tenant + legal-entity + `status = 'POSTED'` + date-window +
    * `tax_code_id IS NOT NULL`; AP/AR's own-document reversal exclusion
    * via `journal_entries.reversed_by_journal_entry_id`; manual
-   * journal's deliberate NON-exclusion, §7) — restated at row grain
-   * instead of `SUM()`/`GROUP BY` grain, never hand-duplicated with a
-   * drifted predicate. Combined with `UNION ALL`, never bare `UNION`
+   * journal's deliberate NON-exclusion, §7). §21 (FROZEN) requires this
+   * be genuinely shared/factored, not merely hand-duplicated code that
+   * happens to look the same — the two eligibility helpers are the
+   * single place either predicate is expressed; changing one caller
+   * without the other is no longer possible, and this file has no
+   * second, independent copy of either predicate anywhere. Restated at
+   * row grain instead of `SUM()`/`GROUP BY` grain. Combined with
+   * `UNION ALL`, never bare `UNION`
    * (Hardening Requirement 12) — a bare `UNION` would silently
    * deduplicate two coincidentally-identical rows, violating §6's
    * one-row-per-source-line guarantee. Returns the inner subquery only
@@ -1367,18 +1417,7 @@ export class TaxReportsService {
       FROM ${sql.raw(lineTable)} ln
       INNER JOIN ${sql.raw(parentTable)} doc ON doc.id = ln.${sql.raw(parentFk)}
       INNER JOIN tax_codes tc ON tc.id = ln.tax_code_id
-      WHERE ln.tenant_id = ${tenantId}
-        AND doc.tenant_id = ${tenantId}
-        AND doc.legal_entity_id = ${legalEntityId}
-        AND doc.status = 'POSTED'
-        AND doc.${sql.raw(dateColumn)} >= ${dateFrom}::date
-        AND doc.${sql.raw(dateColumn)} <= ${dateTo}::date
-        AND ln.tax_code_id IS NOT NULL
-        AND NOT EXISTS (
-          SELECT 1 FROM journal_entries je
-          WHERE je.id = doc.journal_entry_id
-            AND je.reversed_by_journal_entry_id IS NOT NULL
-        )
+      WHERE ${this.apArClassifiedEligibilitySql(tenantId, legalEntityId, dateColumn, dateFrom, dateTo)}
     `;
 
     // §7 — deliberately NO reversal exclusion here: a manual reversal is
@@ -1404,13 +1443,7 @@ export class TaxReportsService {
       FROM journal_lines jl
       INNER JOIN journal_entries je ON je.id = jl.journal_entry_id
       INNER JOIN tax_codes tc ON tc.id = jl.tax_code_id
-      WHERE jl.tenant_id = ${tenantId}
-        AND je.tenant_id = ${tenantId}
-        AND je.legal_entity_id = ${legalEntityId}
-        AND je.status = 'POSTED'
-        AND je.transaction_date >= ${dateFrom}::date
-        AND je.transaction_date <= ${dateTo}::date
-        AND jl.tax_code_id IS NOT NULL
+      WHERE ${this.manualJournalEligibilitySql(tenantId, legalEntityId, dateFrom, dateTo)}
     `;
 
     return sql.join(

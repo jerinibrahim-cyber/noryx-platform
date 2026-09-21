@@ -863,10 +863,14 @@ describe("VAT Position Detail / Source-Document Drill-Down (e2e)", () => {
   });
 
   describe("Pagination Correctness and Metadata (DRILL-028/029/030/031)", () => {
-    it("pages partition the complete result with no gaps/duplicates, and reject invalid page/pageSize", async () => {
+    it("pages partition the complete result with no gaps/duplicates (by the (sourceType, sourceLineId) tuple, across more than one sourceType), and reject invalid page/pageSize", async () => {
       const poster = tokenFor(["finance.poster"]);
       const date = "2026-02-25";
 
+      // Two different sourceTypes on the SAME date — DRILL-028 must
+      // prove cross-source-type identity, not merely same-table
+      // uniqueness, since sourceLineId alone is only guaranteed unique
+      // WITHIN its own source table (§9, Correction 1).
       for (let i = 0; i < 3; i++) {
         await createAndPostInvoice(poster, date, [
           {
@@ -877,6 +881,14 @@ describe("VAT Position Detail / Source-Document Drill-Down (e2e)", () => {
           },
         ]);
       }
+      await createAndPostBill(poster, date, [
+        {
+          accountId: expenseAccountA1Id,
+          amountMinor: 1000,
+          taxCodeId: taxCodeStandardId,
+          taxAmountMinor: 50,
+        },
+      ]);
 
       const full = await vatPositionDetail(poster, {
         dateFrom: date,
@@ -884,7 +896,13 @@ describe("VAT Position Detail / Source-Document Drill-Down (e2e)", () => {
         pageSize: 200,
       }).expect(200);
       const totalItems = full.body.meta.totalItems;
-      expect(totalItems).toBeGreaterThanOrEqual(3);
+      expect(totalItems).toBeGreaterThanOrEqual(4);
+      const fullSourceTypes = new Set(
+        (full.body.data.rows as VatPositionDetailRow[]).map(
+          (r) => r.sourceType,
+        ),
+      );
+      expect(fullSourceTypes.size).toBeGreaterThanOrEqual(2);
 
       const page1 = await vatPositionDetail(poster, {
         dateFrom: date,
@@ -899,13 +917,20 @@ describe("VAT Position Detail / Source-Document Drill-Down (e2e)", () => {
         pageSize: 2,
       }).expect(200);
 
-      const ids1 = (page1.body.data.rows as VatPositionDetailRow[]).map(
-        (r) => r.sourceLineId,
+      // DRILL-028 (corrected) — union keyed by the tuple
+      // `(sourceType, sourceLineId)`, never `sourceLineId` alone.
+      const tupleKey = (r: VatPositionDetailRow) =>
+        `${r.sourceType}:${r.sourceLineId}`;
+      const keys1 = (page1.body.data.rows as VatPositionDetailRow[]).map(
+        tupleKey,
       );
-      const ids2 = (page2.body.data.rows as VatPositionDetailRow[]).map(
-        (r) => r.sourceLineId,
+      const keys2 = (page2.body.data.rows as VatPositionDetailRow[]).map(
+        tupleKey,
       );
-      expect(ids1.filter((id) => ids2.includes(id))).toHaveLength(0);
+      expect(keys1.filter((k) => keys2.includes(k))).toHaveLength(0);
+      expect(new Set([...keys1, ...keys2]).size).toBe(
+        keys1.length + keys2.length,
+      );
       expect(page1.body.meta.totalPages).toBe(Math.ceil(totalItems / 2));
 
       await vatPositionDetail(poster, {
