@@ -38,8 +38,35 @@ async function main() {
     return;
   }
 
+  // Resolve app-role password from environment variable or APP_ROLE_DATABASE_URL.
+  // In production, this must be explicitly supplied.
+  let appRolePassword = process.env.APP_ROLE_PASSWORD;
+  if (!appRolePassword && process.env.APP_ROLE_DATABASE_URL) {
+    try {
+      const parsed = new URL(process.env.APP_ROLE_DATABASE_URL);
+      if (parsed.password) {
+        appRolePassword = decodeURIComponent(parsed.password);
+      }
+    } catch {
+      // ignore URL parse error
+    }
+  }
+
+  if (!appRolePassword) {
+    if (process.env.NODE_ENV === "production") {
+      throw new Error(
+        "APP_ROLE_PASSWORD must be explicitly provided in production environments.",
+      );
+    }
+    // Explicit development/test fixture default
+    appRolePassword = "noryx_app";
+  }
+
   const client = postgres(url, { max: 1 });
   try {
+    // Set session parameter for app-role SQL scripts via safe parameter binding
+    await client`SELECT set_config('noryx.app_role_password', ${appRolePassword}, false)`;
+
     for (const file of files) {
       // eslint-disable-next-line security/detect-non-literal-fs-filename
       const sqlText = readFileSync(join(dir, file), "utf-8");

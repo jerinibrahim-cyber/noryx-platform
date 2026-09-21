@@ -19,15 +19,15 @@ services:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_USER: noryx
-      POSTGRES_PASSWORD: noryx
-      POSTGRES_DB: noryx
+      POSTGRES_USER: ${POSTGRES_USER:-noryx}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-noryx_dev_only}
+      POSTGRES_DB: ${POSTGRES_DB:-noryx}
     ports:
       - "5432:5432"
     volumes:
       - noryx-postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U noryx"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-noryx}"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -52,7 +52,7 @@ services:
       postgres: { condition: service_healthy }
     environment:
       PORT: 3001
-      DATABASE_URL: postgresql://noryx_app:noryx_app@postgres:5432/noryx
+      DATABASE_URL: ${IDENTITY_DATABASE_URL:-postgresql://noryx_app:${APP_ROLE_PASSWORD:-noryx_app_dev_only}@postgres:5432/${POSTGRES_DB:-noryx}}
       JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-local-dev-only-secret-do-not-use-in-production}
       MFA_ENCRYPTION_KEY: ${MFA_ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
     ports:
@@ -67,7 +67,7 @@ services:
       postgres: { condition: service_healthy }
     environment:
       PORT: 3010
-      DATABASE_URL: postgresql://noryx_app:noryx_app@postgres:5432/noryx
+      DATABASE_URL: ${FINANCE_DATABASE_URL:-postgresql://noryx_app:${APP_ROLE_PASSWORD:-noryx_app_dev_only}@postgres:5432/${POSTGRES_DB:-noryx}}
       JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-local-dev-only-secret-do-not-use-in-production}
     ports:
       - "3010:3010"
