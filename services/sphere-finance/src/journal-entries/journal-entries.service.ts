@@ -701,11 +701,17 @@ export class JournalEntriesService {
    * `reverseInTx()`, `post()`, `create()`,
    * `lockAndValidateOriginalForReversal()`, `resolvePeriodForDate()`,
    * `resolveAndLockOpenPeriod()`, or the bodies of `insertLines()`/
-   * `allocateJournalNumber()` themselves — only their visibility
-   * changed (private -> package-internal), the same visibility change
-   * already precedented by how `lockAndValidateOriginalForReversal`/
-   * `completeReversalPosting` were made non-`private` specifically for
-   * `ScheduledReversalsService` to call.
+   * `allocateJournalNumber()` themselves. Both remain `private`: this
+   * method is itself a member of `JournalEntriesService`, so its calls
+   * to `this.insertLines()`/`this.allocateJournalNumber()` below are
+   * same-class access, which TypeScript's `private` always permits
+   * regardless of which method of the class performs the call — no
+   * visibility broadening was needed here, unlike
+   * `lockAndValidateOriginalForReversal`/`completeReversalPosting`,
+   * which are genuinely called from `ScheduledReversalsService`, a
+   * different class, and so must stay non-`private`.
+   * `DeferralRecognitionService` never calls `insertLines()` or
+   * `allocateJournalNumber()` directly — only this method.
    *
    * The caller (`DeferralRecognitionService`) is responsible for
    * everything this method deliberately does NOT do, exactly as
@@ -1130,12 +1136,15 @@ export class JournalEntriesService {
    * transaction rolls the allocation back too; no burned numbers from a
    * failed post. Formatted `JE-{n:06d}`, scoped per legal entity.
    *
-   * Intentionally not `private` — `postSystemGeneratedEntry()` above
-   * reuses it verbatim (Deferral Recognition Engine, CONTRACT.md §5),
-   * the same visibility change already precedented by
-   * `lockAndValidateOriginalForReversal`/`completeReversalPosting`.
-   * Body unchanged. */
-  async allocateJournalNumber(
+   * `private` — only ever called via `this.allocateJournalNumber()` from
+   * other methods of this same class (`post()`, `completeReversalPosting()`,
+   * and now `postSystemGeneratedEntry()` above). Same-class calls never
+   * require broadened visibility; unlike
+   * `lockAndValidateOriginalForReversal`/`completeReversalPosting`
+   * (called directly by `ScheduledReversalsService`, a different class),
+   * no other class calls this method, so it stays `private`. Body
+   * unchanged. */
+  private async allocateJournalNumber(
     tx: TxClient,
     tenantId: string,
     legalEntityId: string,
@@ -1151,12 +1160,15 @@ export class JournalEntriesService {
     return `JE-${String(lastAssignedNumber).padStart(6, "0")}`;
   }
 
-  /** Intentionally not `private` — `postSystemGeneratedEntry()` above
-   * reuses it verbatim (Deferral Recognition Engine, CONTRACT.md §5),
-   * the same visibility change already precedented by
-   * `lockAndValidateOriginalForReversal`/`completeReversalPosting`.
-   * Body unchanged. */
-  async insertLines(
+  /** `private` — only ever called via `this.insertLines()` from other
+   * methods of this same class (`create()`, `reverseInTx()`, and now
+   * `postSystemGeneratedEntry()` above). Same-class calls never require
+   * broadened visibility; unlike
+   * `lockAndValidateOriginalForReversal`/`completeReversalPosting`
+   * (called directly by `ScheduledReversalsService`, a different class),
+   * no other class calls this method, so it stays `private`. Body
+   * unchanged. */
+  private async insertLines(
     tx: TxClient,
     tenantId: string,
     journalEntryId: string,
