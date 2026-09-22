@@ -424,6 +424,16 @@ const EXPECTED: DiscoveredRoute[] = [
     "finance.admin",
   ]),
 
+  // Tax/VAT Phase 7 — VAT Position Detail / Source-Document Drill-Down.
+  // docs/work-items/tax-vat-phase-7-vat-position-detail-drill-down/
+  // CONTRACT.md §14. Pure read, identical any-finance-role posture to
+  // the aggregate vat-position route immediately above.
+  role("GET", "tax-reports/vat-position-detail", "TaxReportsController", [
+    "finance.viewer",
+    "finance.poster",
+    "finance.admin",
+  ]),
+
   role("GET", "accounts/:id/ledger", "GeneralLedgerController", [
     "finance.viewer",
     "finance.poster",
