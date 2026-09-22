@@ -689,6 +689,168 @@ export class JournalEntriesService {
     return reversalFull;
   }
 
+  /**
+   * `JournalEntriesService.postSystemGeneratedEntry()` — Generic
+   * Deferral Recognition Engine, Phase 2 Implementation Contract
+   * (docs/work-items/deferral-recognition-engine/CONTRACT.md §5),
+   * CTO-authorized additive generalization. Composed ONLY from
+   * `insertLines()` and `allocateJournalNumber()` — the exact same two
+   * primitives `completeReversalPosting()` itself already uses — so
+   * this is the SECOND caller of each, not a third posting engine.
+   * Zero changes to `completeReversalPosting()`, `reverse()`,
+   * `reverseInTx()`, `post()`, `create()`,
+   * `lockAndValidateOriginalForReversal()`, `resolvePeriodForDate()`,
+   * `resolveAndLockOpenPeriod()`, or the bodies of `insertLines()`/
+   * `allocateJournalNumber()` themselves — only their visibility
+   * changed (private -> package-internal), the same visibility change
+   * already precedented by how `lockAndValidateOriginalForReversal`/
+   * `completeReversalPosting` were made non-`private` specifically for
+   * `ScheduledReversalsService` to call.
+   *
+   * The caller (`DeferralRecognitionService`) is responsible for
+   * everything this method deliberately does NOT do, exactly as
+   * `ScheduledReversalsService.claimAndExecuteOne()` is responsible for
+   * locking its own `scheduled_reversals` row before ever calling
+   * `lockAndValidateOriginalForReversal()`:
+   *   - re-validating both accounts (exists, active, same tenant/
+   *     legal entity) immediately before calling this — this method
+   *     never queries `chart_of_accounts` itself, matching this
+   *     codebase's convention of each caller doing its own trivial
+   *     single-table account check (see AccountsService,
+   *     BankTransactionsService, BudgetLinesService, TaxCodesService —
+   *     none of them route a trivial chart-of-accounts existence/
+   *     active check through JournalEntriesService either);
+   *   - resolving and locking `period` via `resolvePeriodForDate()`
+   *     (this method takes an already-OPEN period, never resolves one
+   *     itself, so it can never be called out of the caller's own
+   *     required lock order — identical discipline to
+   *     `completeReversalPosting()`'s own `period` parameter);
+   *   - building `lines` such that they are exactly 2, balanced
+   *     (`debitMinor` sum === `creditMinor` sum), and reference only
+   *     accounts already re-validated above — this method inserts
+   *     whatever it is given via the same `insertLines()` every other
+   *     caller uses, and relies on the same structural-by-construction
+   *     guarantee `post()`'s own docstring notes, backstopped
+   *     regardless by the existing, untouched
+   *     `002_balance_invariant_trigger.sql` deferred constraint
+   *     trigger on every row in `journal_lines`;
+   *   - opening the transaction (`tx` is always the caller's own,
+   *     already-open transaction — this method never calls
+   *     `withTenant()` itself, so the header insert, line insert,
+   *     number allocation, POSTED transition, and the caller's own
+   *     domain-specific mutation/audit rows (e.g.
+   *     `deferral_recognitions` SCHEDULED -> EXECUTED) all commit or
+   *     roll back together, atomically, in one transaction — the same
+   *     property `claimAndExecuteOne()` relies on for
+   *     `completeReversalPosting()`).
+   *
+   * No `reversalOfJournalEntryId`/`reversedByJournalEntryId` linkage —
+   * those columns stay `null`, this is not a reversal.
+   */
+  async postSystemGeneratedEntry(
+    tx: TxClient,
+    tenantId: string,
+    legalEntityId: string,
+    actorUserId: string | null,
+    lines: CreateJournalLineDto[],
+    period: AccountingPeriod,
+    transactionDate: string,
+    memo: string,
+    currencyCode: string,
+  ): Promise<JournalEntryWithLines> {
+    // Step 1: insert the header. Starts DRAFT (the column default),
+    // flips to POSTED in step 4 — the same two-phase shape create()+
+    // post() always produce, just composed here in one transaction
+    // since the caller has already resolved+locked the period and
+    // re-validated the accounts.
+    const [createdEntry] = await tx
+      .insert(journalEntries)
+      .values({
+        tenantId,
+        legalEntityId,
+        transactionDate,
+        currencyCode,
+        memo,
+        createdBy: actorUserId ?? null,
+      })
+      .returning();
+
+    // Step 2: insertLines() — existing private method, reused verbatim.
+    const insertedLines = await this.insertLines(
+      tx,
+      tenantId,
+      createdEntry!.id,
+      lines,
+    );
+
+    // Step 3: allocateJournalNumber() — existing private method, reused
+    // verbatim, drawing from the exact same shared per-legal-entity
+    // counter every other posting path (manual post(), manual/scheduled
+    // reversal) already draws from — no separate numbering sequence.
+    const journalNumber = await this.allocateJournalNumber(
+      tx,
+      tenantId,
+      legalEntityId,
+    );
+
+    // Step 4: DRAFT -> POSTED.
+    const [posted] = await tx
+      .update(journalEntries)
+      .set({
+        status: "POSTED",
+        journalNumber,
+        periodId: period.id,
+        postedAt: new Date(),
+        postedBy: actorUserId ?? null,
+      })
+      .where(
+        and(
+          eq(journalEntries.id, createdEntry!.id),
+          eq(journalEntries.tenantId, tenantId),
+          eq(journalEntries.legalEntityId, legalEntityId),
+        ),
+      )
+      .returning();
+
+    const full: JournalEntryWithLines = {
+      ...posted!,
+      lines: insertedLines,
+    };
+
+    // Step 5: audit — CREATE + POST, the identical two-row shape
+    // completeReversalPosting() already writes for the entry it
+    // creates (steps 12's second and third rows there), so every
+    // system-generated entry gets the same audit shape regardless of
+    // which caller created it.
+    await tx.insert(auditLogs).values([
+      {
+        tenantId,
+        legalEntityId,
+        actorUserId: actorUserId ?? undefined,
+        action: "CREATE",
+        entityType: "journal_entry",
+        entityId: createdEntry!.id,
+        beforeState: null,
+        afterState: {
+          ...createdEntry!,
+          lines: insertedLines,
+        } as unknown as Record<string, unknown>,
+      },
+      {
+        tenantId,
+        legalEntityId,
+        actorUserId: actorUserId ?? undefined,
+        action: "POST",
+        entityType: "journal_entry",
+        entityId: createdEntry!.id,
+        beforeState: null,
+        afterState: full as unknown as Record<string, unknown>,
+      },
+    ]);
+
+    return full;
+  }
+
   /** Resolves the caller's legal entity's functional currency
    * (proposal §1.6) — never client-supplied. A missing row here means
    * the JWT's legalEntityId doesn't resolve to a real legal_entities row
@@ -966,8 +1128,14 @@ export class JournalEntriesService {
    * `MAX(journal_number)+1`. Runs inside the same transaction as the
    * rest of posting/reversal, so a later failure in that same
    * transaction rolls the allocation back too; no burned numbers from a
-   * failed post. Formatted `JE-{n:06d}`, scoped per legal entity. */
-  private async allocateJournalNumber(
+   * failed post. Formatted `JE-{n:06d}`, scoped per legal entity.
+   *
+   * Intentionally not `private` — `postSystemGeneratedEntry()` above
+   * reuses it verbatim (Deferral Recognition Engine, CONTRACT.md §5),
+   * the same visibility change already precedented by
+   * `lockAndValidateOriginalForReversal`/`completeReversalPosting`.
+   * Body unchanged. */
+  async allocateJournalNumber(
     tx: TxClient,
     tenantId: string,
     legalEntityId: string,
@@ -983,7 +1151,12 @@ export class JournalEntriesService {
     return `JE-${String(lastAssignedNumber).padStart(6, "0")}`;
   }
 
-  private async insertLines(
+  /** Intentionally not `private` — `postSystemGeneratedEntry()` above
+   * reuses it verbatim (Deferral Recognition Engine, CONTRACT.md §5),
+   * the same visibility change already precedented by
+   * `lockAndValidateOriginalForReversal`/`completeReversalPosting`.
+   * Body unchanged. */
+  async insertLines(
     tx: TxClient,
     tenantId: string,
     journalEntryId: string,

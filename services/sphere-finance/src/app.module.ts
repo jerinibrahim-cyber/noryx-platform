@@ -17,6 +17,7 @@ import { ScheduledReversalsModule } from "./scheduled-reversals/scheduled-revers
 import { TaxConfigurationModule } from "./tax-configuration/tax-configuration.module";
 import { TaxReportsModule } from "./tax-reports/tax-reports.module";
 import { BudgetingModule } from "./budgeting/budgeting.module";
+import { DeferralRecognitionModule } from "./deferral-recognition/deferral-recognition.module";
 import { HealthController } from "./health/health.controller";
 import { TenantContextMiddleware } from "./tenant/tenant-context.middleware";
 
@@ -161,6 +162,23 @@ import { TenantContextMiddleware } from "./tenant/tenant-context.middleware";
     // posting, no actual-vs-budget/variance reporting — all explicitly
     // deferred to a later, separately-authorized phase.
     BudgetingModule,
+    // Generic Deferral Recognition Engine — Phase 2 Implementation
+    // Contract (docs/work-items/deferral-recognition-engine/CONTRACT.md),
+    // CTO-authorized implementation. A top-level sibling of
+    // ScheduledReversalsModule/BudgetingModule, not nested inside any
+    // other module — reads/writes its own two new tables only
+    // (deferral_schedules, deferral_recognitions) and calls
+    // JournalEntriesService's new, additive
+    // postSystemGeneratedEntry() method (its own module registers a
+    // second DI instance of that dependency-free service rather than
+    // importing JournalEntriesModule — zero changes to any
+    // journal-entries.module.ts file, identical pattern to
+    // ScheduledReversalsModule/BankReconciliationModule/
+    // PaymentProviderSettlementsModule). Touches none of the modules
+    // above; Accrual, Fixed Assets, Multi-Currency, WIP, and scheduler/
+    // worker infrastructure are explicitly out of scope for this work
+    // item (CONTRACT.md §9).
+    DeferralRecognitionModule,
     // Scoped registration so TenantContextMiddleware can inject JwtService
     // without importing AccountsModule's other providers — same pattern as
     // services/identity/src/app.module.ts.

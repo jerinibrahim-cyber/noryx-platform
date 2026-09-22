@@ -3225,3 +3225,187 @@ export const budgetLines = pgTable(
 
 export type BudgetLine = typeof budgetLines.$inferSelect;
 export type NewBudgetLine = typeof budgetLines.$inferInsert;
+
+/// Generic Deferral Recognition Engine — Phase 2 Implementation Contract
+/// (docs/work-items/deferral-recognition-engine/CONTRACT.md §1/§2/§3),
+/// CTO-authorized implementation. Deferral Recognition ONLY — Accrual,
+/// Fixed Assets, Multi-Currency are explicitly out of scope (CONTRACT.md
+/// §9). Posts exclusively through JournalEntriesService's new additive
+/// postSystemGeneratedEntry() — never a second posting engine.
+///
+/// deferralTypeEnum is a Phase 3 implementation micro-decision, not
+/// present in CONTRACT.md verbatim: the contract's §6 concurrency model
+/// says each occurrence posts "2 balanced lines (debit/credit determined
+/// by the schedule's configured direction)" without naming the
+/// mechanism. EXPENSE_RECOGNITION (deferredAccountId is normally a
+/// prepaid-asset account; each occurrence debits recognitionAccountId
+/// and credits deferredAccountId) and REVENUE_RECOGNITION
+/// (deferredAccountId is normally an unearned-revenue liability account;
+/// each occurrence debits deferredAccountId and credits
+/// recognitionAccountId) are the only two shapes a two-account deferral
+/// schedule can take — recorded explicitly at creation rather than
+/// inferred from account type, matching this schema's existing
+/// convention of never inferring a posting direction from account
+/// configuration (see journalLineTaxDirectionEnum's own doc comment,
+/// same reasoning).
+export const deferralTypeEnum = pgEnum("deferral_type", [
+  "EXPENSE_RECOGNITION",
+  "REVENUE_RECOGNITION",
+]);
+
+export const deferralScheduleStatusEnum = pgEnum("deferral_schedule_status", [
+  "ACTIVE",
+  "COMPLETED",
+  "CANCELLED",
+]);
+
+export const deferralRecognitionStatusEnum = pgEnum(
+  "deferral_recognition_status",
+  ["SCHEDULED", "EXECUTED", "FAILED", "CANCELLED"],
+);
+
+export const deferralSchedules = pgTable(
+  "deferral_schedules",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id").notNull(),
+    legalEntityId: uuid("legal_entity_id").notNull(),
+    memo: text("memo").notNull(),
+    /// Resolved server-side from the legal entity's functional currency
+    /// via JournalEntriesService's existing (private) resolveCurrency()
+    /// convention — never client-supplied. CONTRACT.md §1.
+    currencyCode: varchar("currency_code", { length: 3 }).notNull(),
+    totalAmountMinor: integer("total_amount_minor").notNull(),
+    deferralType: deferralTypeEnum("deferral_type").notNull(),
+    /// The account holding the unrecognized balance (prepaid asset /
+    /// unearned-revenue liability).
+    deferredAccountId: uuid("deferred_account_id")
+      .notNull()
+      .references(() => chartOfAccounts.id),
+    /// The account each occurrence recognizes into (expense / revenue).
+    recognitionAccountId: uuid("recognition_account_id")
+      .notNull()
+      .references(() => chartOfAccounts.id),
+    status: deferralScheduleStatusEnum("status").notNull().default("ACTIVE"),
+    cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
+    cancelledBy: uuid("cancelled_by"),
+    cancellationReason: text("cancellation_reason"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    createdBy: uuid("created_by"),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    /// A schedule recognizing into itself is never valid accounting.
+    check(
+      "deferral_schedules_accounts_distinct",
+      sql`${t.deferredAccountId} <> ${t.recognitionAccountId}`,
+    ),
+    check(
+      "deferral_schedules_total_amount_positive",
+      sql`${t.totalAmountMinor} > 0`,
+    ),
+    /// Mirrors scheduled_reversals_terminal_fields_consistent's
+    /// discipline, adapted to this table's three-state shape — ACTIVE
+    /// and system-transitioned COMPLETED never populate the
+    /// cancellation fields; only user-initiated CANCELLED does.
+    check(
+      "deferral_schedules_terminal_fields_consistent",
+      sql`
+        (${t.status} IN ('ACTIVE', 'COMPLETED') AND ${t.cancelledAt} IS NULL
+                                                  AND ${t.cancellationReason} IS NULL)
+        OR (${t.status} = 'CANCELLED' AND ${t.cancelledAt} IS NOT NULL)
+      `,
+    ),
+    index("deferral_schedules_tenant_entity_idx").on(
+      t.tenantId,
+      t.legalEntityId,
+    ),
+  ],
+);
+
+export type DeferralSchedule = typeof deferralSchedules.$inferSelect;
+export type NewDeferralSchedule = typeof deferralSchedules.$inferInsert;
+
+export const deferralRecognitions = pgTable(
+  "deferral_recognitions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    scheduleId: uuid("schedule_id")
+      .notNull()
+      .references(() => deferralSchedules.id),
+    /// Denormalized onto the occurrence, exactly as scheduled_reversals
+    /// denormalizes rather than requiring a join (CONTRACT.md §1) —
+    /// enables direct RLS and the due-lookup index without a join.
+    tenantId: uuid("tenant_id").notNull(),
+    legalEntityId: uuid("legal_entity_id").notNull(),
+    /// 1-based, for deterministic ordering/display ("occurrence 3 of
+    /// 12").
+    sequenceNumber: integer("sequence_number").notNull(),
+    targetDate: date("target_date").notNull(),
+    /// Explicit per occurrence, never computed by even division
+    /// (discovery §7/§9, CONTRACT.md §1/§4).
+    amountMinor: integer("amount_minor").notNull(),
+    status: deferralRecognitionStatusEnum("status")
+      .notNull()
+      .default("SCHEDULED"),
+    resultingJournalEntryId: uuid("resulting_journal_entry_id").references(
+      () => journalEntries.id,
+    ),
+    failureReason: text("failure_reason"),
+    executedAt: timestamp("executed_at", { withTimezone: true }),
+    executedBy: uuid("executed_by"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    check("deferral_recognitions_amount_positive", sql`${t.amountMinor} > 0`),
+    /// Direct copy of scheduled_reversals_terminal_fields_consistent's
+    /// pattern, four-way status branch (CONTRACT.md §1).
+    check(
+      "deferral_recognitions_terminal_fields_consistent",
+      sql`
+        (${t.status} = 'SCHEDULED' AND ${t.resultingJournalEntryId} IS NULL
+                                    AND ${t.failureReason} IS NULL AND ${t.executedAt} IS NULL)
+        OR (${t.status} = 'EXECUTED' AND ${t.resultingJournalEntryId} IS NOT NULL
+                                     AND ${t.failureReason} IS NULL AND ${t.executedAt} IS NOT NULL)
+        OR (${t.status} = 'FAILED' AND ${t.resultingJournalEntryId} IS NULL
+                                   AND ${t.failureReason} IS NOT NULL AND ${t.executedAt} IS NOT NULL)
+        OR (${t.status} = 'CANCELLED' AND ${t.resultingJournalEntryId} IS NULL
+                                      AND ${t.executedAt} IS NULL)
+      `,
+    ),
+    /// Data-sanity constraints only, not the concurrency-safety
+    /// mechanism (CONTRACT.md §1's Phase 2 correction — that mechanism
+    /// is FOR UPDATE SKIP LOCKED + the terminal-immutability trigger).
+    unique("deferral_recognitions_schedule_sequence_unique").on(
+      t.scheduleId,
+      t.sequenceNumber,
+    ),
+    unique("deferral_recognitions_schedule_target_date_unique").on(
+      t.scheduleId,
+      t.targetDate,
+    ),
+    /// process-due's batch-candidate query — direct copy of
+    /// scheduled_reversals_due_lookup's shape (CONTRACT.md §1).
+    index("deferral_recognitions_due_lookup")
+      .on(t.tenantId, t.legalEntityId, t.status, t.targetDate, t.id)
+      .where(sql`${t.status} = 'SCHEDULED'`),
+    index("deferral_recognitions_schedule_idx").on(t.scheduleId),
+    /// Reverse (journal entry -> occurrence) drill-down, CONTRACT.md
+    /// §3's audit/provenance row and DEFER-018/DEFER-027.
+    index("deferral_recognitions_resulting_journal_entry_idx").on(
+      t.resultingJournalEntryId,
+    ),
+  ],
+);
+
+export type DeferralRecognition = typeof deferralRecognitions.$inferSelect;
+export type NewDeferralRecognition = typeof deferralRecognitions.$inferInsert;
