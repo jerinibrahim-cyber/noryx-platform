@@ -246,13 +246,13 @@ Phase results:
 - Phase 3: PASS — Phase 6 proposal provenance verified (AUD-006): top-level and nested proposals are byte-for-byte identical (Case A — equivalent, SHA256 af1322eaf9eb698c1a07fa23dd2ab39c28faac8873571cda2d1ceebec5145146).
 - Phase 4: PASS — Drizzle migration collision remediated via __drizzle_migrations_sphere_finance (AUD-009).
 - Phase 5: PASS — Dependency security remediated (0 high / 0 critical SCA); unit test suite green across all packages (AUD-008).
-- Phase 6: PASS — AUD-010 credential/configuration hygiene implemented: hardcoded passwords removed from docker-compose.yml and packages/db-core/drizzle/app-role/001_create_app_role.sql; dynamic parameterization added via current_setting('noryx.app_role_password') in apply-app-role.ts; root .env.example created.
+- Phase 6: PASS — AUD-010 credential/configuration hygiene verified: No hardcoded production credentials remain. Credential-bearing runtime configuration is externally supplied, while explicitly documented development-only defaults remain available for local Compose usage. Production enforcement and session parameterization verified via targeted automated tests.
 - Phase 7: PARTIALLY EXECUTED / GATED — Closed PR branches pruned; 6 historical refs preserved pending CTO deletion authorization.
 - Phase 8: PASS — Documentation consolidated into planning/ and work-items/; 0 broken Markdown links (AUD-018, AUD-020).
 - Phase 9: GATED — Layered v1/v2 triggers preserved (AUD-013); awaiting CTO consolidation decision.
 - Phase 10: PASS — Final repository consistency audit completed; 100% tests/typechecks/lint/build pass.
 
-Files changed: docker-compose.yml, packages/db-core/drizzle/app-role/001_create_app_role.sql, packages/db-core/src/apply-app-role.ts, .env.example, docs/engineering/REPOSITORY_CLEANUP_REPORT_2026-09.md
+Files changed: docker-compose.yml, packages/db-core/drizzle/app-role/001_create_app_role.sql, packages/db-core/src/apply-app-role.ts, packages/db-core/test/app-role-hygiene.spec.ts, .env.example, docs/engineering/REPOSITORY_CLEANUP_REPORT_2026-09.md
 Files moved: docs/orchestrator/* -> docs/archive/orchestrator-abandoned/*
 Files removed: services/sphere-finance/_to_delete/*, .DS_Store
 Branches/refs removed: origin/chore/ci-baseline-remediation, origin/docs/finance-roadmap-baseline-2026-09, origin/feat/orchestrator-validator
@@ -262,7 +262,7 @@ Verification Matrix:
 Migration/bootstrap verification: PASS (docker compose config valid; apply-app-role parameterized; schema isolated)
 App-role bootstrap: PASS (parameterized via session config; raises exception if missing)
 Docker/config validation: PASS (docker compose config exit code 0)
-Unit tests: PASS (637/637 sphere-finance, 15/15 identity, 18/18 api-gateway, 5/5 auth-core, 5/5 event-bus; total 675 passed)
+Unit tests: PASS (637/637 sphere-finance, 15/15 identity, 18/18 api-gateway, 5/5 auth-core, 5/5 event-bus, 12/12 db-core; total 687 passed across 73 suites)
 E2E tests: NOT RUN (Requires running database containers)
 Lint: PASS (0 errors across 13 projects)
 Typecheck: PASS (0 errors across 13 monorepo targets)
