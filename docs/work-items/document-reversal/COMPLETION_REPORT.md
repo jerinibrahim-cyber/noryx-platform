@@ -2,7 +2,7 @@
 
 **Status:** Implementation complete, verified, committed locally. Not pushed to GitHub (see Git Status below — this is expected and consistent with every prior phase in this repository).
 
-**Proposal:** `docs/finance-work-item-document-reversal-proposal.md` (CTO-approved for implementation).
+**Proposal:** `docs/work-items/document-reversal/PROPOSAL.md` (CTO-approved for implementation).
 
 **Implementation commit:** `fe94b388c9f6777619d4943677dcfa7b7947706b` (branch `main`)
 **Baseline commit:** `83549747c18f1e53e8348cd00de1cf8b90e9b292` ("Finalize Tax/VAT Phase 5 completion report with commit/verification details")

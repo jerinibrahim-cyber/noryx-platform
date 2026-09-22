@@ -16,7 +16,7 @@ Labelling discipline used throughout (per the CTO's implementation authorization
 
 **ID:** TAX-VAT-PHASE-6-MANUAL-JOURNAL-TAX-COVERAGE
 **Product area:** Sphere Finance → Tax/VAT (roadmap status: Tax/VAT Phases 1–5 COMPLETE; this phase is the roadmap's own stated "fast-follow candidate," `docs/roadmap.md`).
-**Discovery source:** `docs/finance-work-item-tax-vat-phase-6-manual-journal-tax-coverage-proposal.md` (§0–§18, CTO-reviewed, concluded READY FOR CTO REVIEW).
+**Discovery source:** `docs/work-items/tax-vat-phase-6-manual-journal-tax-coverage/PROPOSAL.md` (§0–§18, CTO-reviewed, concluded READY FOR CTO REVIEW).
 **Implementation authorization:** "NORYX CTO — FINAL ONE-PASS IMPLEMENTATION AUTHORIZATION — Tax/VAT Phase 6 — Manual Journal Tax Coverage" (this session).
 
 ## 2. Baseline and Commit Provenance

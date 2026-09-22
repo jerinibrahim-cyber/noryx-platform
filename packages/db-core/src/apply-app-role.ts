@@ -22,6 +22,36 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import postgres from "postgres";
 
+// Resolve app-role password from environment variable or APP_ROLE_DATABASE_URL.
+// In production, this must be explicitly supplied.
+export function resolveAppRolePassword(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  let appRolePassword = env.APP_ROLE_PASSWORD;
+  if (!appRolePassword && env.APP_ROLE_DATABASE_URL) {
+    try {
+      const parsed = new URL(env.APP_ROLE_DATABASE_URL);
+      if (parsed.password) {
+        appRolePassword = decodeURIComponent(parsed.password);
+      }
+    } catch {
+      // ignore URL parse error
+    }
+  }
+
+  if (!appRolePassword) {
+    if (env.NODE_ENV === "production") {
+      throw new Error(
+        "APP_ROLE_PASSWORD must be explicitly provided in production environments.",
+      );
+    }
+    // Explicit development/test fixture default
+    appRolePassword = "noryx_app";
+  }
+
+  return appRolePassword;
+}
+
 async function main() {
   const url = process.env.DATABASE_URL;
   if (!url) throw new Error("DATABASE_URL must be set.");
@@ -38,8 +68,13 @@ async function main() {
     return;
   }
 
+  const appRolePassword = resolveAppRolePassword(process.env);
+
   const client = postgres(url, { max: 1 });
   try {
+    // Set session parameter for app-role SQL scripts via safe parameter binding
+    await client`SELECT set_config('noryx.app_role_password', ${appRolePassword}, false)`;
+
     for (const file of files) {
       // eslint-disable-next-line security/detect-non-literal-fs-filename
       const sqlText = readFileSync(join(dir, file), "utf-8");
@@ -52,7 +87,9 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error("Failed to apply app-role SQL:", err);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    console.error("Failed to apply app-role SQL:", err);
+    process.exit(1);
+  });
+}

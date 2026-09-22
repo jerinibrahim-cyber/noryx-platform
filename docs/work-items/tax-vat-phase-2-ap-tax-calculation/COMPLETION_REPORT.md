@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-11
 **Work item:** Tax/VAT MVP Phase 2 — AP Tax Calculation
-**Discovery contract:** `docs/finance-work-item-tax-vat-phase-2-discovery.md`
+**Discovery contract:** `docs/work-items/tax-vat-phase-2-ap-tax-calculation/DISCOVERY.md`
 **Authorization:** Direct CTO/NOAH implementation authorization with the Phase 2 architecture decision confirmed (debit notes resolve tax independently per line; no inheritance from allocated bills), superseding the discovery document's prior BLOCKED status.
 
 ## Status

@@ -29,17 +29,20 @@
 -- (i.e. the migration/owner role connected via DATABASE_URL here).
 
 DO $$
+DECLARE
+  app_pwd text := nullif(current_setting('noryx.app_role_password', true), '');
 BEGIN
+  IF app_pwd IS NULL THEN
+    RAISE EXCEPTION 'noryx.app_role_password configuration setting must be set prior to running 001_create_app_role.sql (e.g. via APP_ROLE_PASSWORD environment variable).';
+  END IF;
+
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'noryx_app') THEN
-    CREATE ROLE noryx_app
-      LOGIN
-      PASSWORD 'noryx_app'
-      NOSUPERUSER
-      NOCREATEDB
-      NOCREATEROLE
-      NOREPLICATION
-      NOBYPASSRLS
-      CONNECTION LIMIT -1;
+    EXECUTE format(
+      'CREATE ROLE noryx_app LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS CONNECTION LIMIT -1',
+      app_pwd
+    );
+  ELSE
+    EXECUTE format('ALTER ROLE noryx_app WITH PASSWORD %L', app_pwd);
   END IF;
 END
 $$;

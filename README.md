@@ -3,10 +3,7 @@
 Monorepo for **Noryx Sphere** (ERP · CRM · HRMS) and **Noryx Orbis** (CAFM ·
 FM Intelligence) — two products on one shared, multi-tenant services layer.
 
-This is the Phase 0 foundation: the pieces every later module (Finance,
-Procurement, HRMS, CRM, Helpdesk & Work Orders, PPM, SLA/Command Centre,
-and everything after) builds on top of, not the modules themselves. See
-[`docs/roadmap.md`](docs/roadmap.md) for what's built vs. what's next.
+Current maturity includes the platform foundation and core **Noryx Sphere Finance** services (General Ledger, Accounts Payable, Accounts Receivable, Banking & Cash Management, Budgeting, and Tax/VAT Phases 1–6). See [`docs/roadmap.md`](docs/roadmap.md) for what's built vs. what's next.
 
 ## Repo layout
 
@@ -16,6 +13,7 @@ apps/            Frontend applications
 services/        Independently deployable backend services
   identity/        Auth: OAuth2/OIDC-shaped login, MFA, tenant-aware JWTs
   api-gateway/     The one internet-facing door — module-manifest-based routing
+  sphere-finance/  Finance & ERP core: GL, AP, AR, Banking, Budgeting, Tax/VAT
 packages/        Shared libraries, depended on via pnpm workspace protocol
   db-core/         Drizzle schema (Tenant, Legal Entity, User, Subscription,
                    Audit Log), Row-Level Security policies, tenant context

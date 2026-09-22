@@ -1,6 +1,6 @@
 # On-Account (Unapplied) Supplier Payments & Customer Receipts — Completion Report
 
-Binding specification: `docs/finance-work-item-on-account-payments-proposal.md` (fully approved; committed to the repo in this work item's implementation commit, having never been committed previously).
+Binding specification: `docs/work-items/on-account-payments/PROPOSAL.md` (fully approved; committed to the repo in this work item's implementation commit, having never been committed previously).
 
 ## 1. Commit lineage
 

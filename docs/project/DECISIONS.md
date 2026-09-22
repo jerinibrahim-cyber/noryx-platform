@@ -35,28 +35,28 @@ Git plus version-controlled Markdown is the durable source of truth for project 
 
 Noryx remains Finance-first. The current repository contains a newer Scheduled Reversal implementation than some roadmap/checklist documents describe, and fresh validation found no authoritative next Finance feature. Therefore agents must not infer or invent the next Finance work item from stale documentation; ambiguity must be surfaced to NOAH.
 
-## DEC-005 — Stage 1A Before RAG / Runtime Orchestration
+## DEC-005 — [SUPERSEDED / HISTORICAL] Stage 1A Before RAG / Runtime Orchestration
 
-**Status:** LOCKED  
+**Status:** SUPERSEDED / HISTORICAL (ORCHESTRATOR ABANDONED — see DEC-009)  
 **Date:** 2026-09-05
 
 Establish repository project memory and operating contracts before implementing RAG, an autonomous orchestrator runtime, or agent loops. Stage 1A must not change application behavior.
 
-## DEC-006 — Stage 1A Completion and Stage 1B Gate
+## DEC-006 — [SUPERSEDED / HISTORICAL] Stage 1A Completion and Stage 1B Gate
 
-**Status:** LOCKED  
+**Status:** SUPERSEDED / HISTORICAL (ORCHESTRATOR ABANDONED — see DEC-009)  
 **Date:** 2026-09-05
 
 Stage 1A is complete after fresh-session validation passed, the documentation-only changes were merged to `main` as `733c30706a2c0c1baf2e4abdd29824739df26dd8`, and local `main` was fast-forwarded and verified clean. Stage 1B begins as a design/discovery task only. Its implementation scope must be established from the actual repository and approved by NOAH/CTO before substantive engineering work begins.
 
-## DEC-007 — Stage 1B Revision 1 and Implementation Plan Approved (Proposal Approval Only — Implementation Not Yet Authorized)
+## DEC-007 — [SUPERSEDED / HISTORICAL] Stage 1B Revision 1 and Implementation Plan Approved (Proposal Approval Only — Implementation Not Yet Authorized)
 
-**Status:** LOCKED  
+**Status:** SUPERSEDED / HISTORICAL (ORCHESTRATOR ABANDONED — see DEC-009)  
 **Date:** 2026-09-05
 
 NOAH/CTO approved Stage 1B Revision 1 (the technical proposal correcting the state machine, approval semantics, and append-only history validation rules) and its subsequent Implementation Preparation V2 (correcting the state count to 14 and the implementation sequence to guarantee approved-artifact SHAs are always an ancestor of the implementation PR that relies on them).
 
-**Approved proposal artifact:** `docs/orchestrator/proposals/1B-implementation-plan.md`, committed at `ef9b95049e5ac2cca8946870eeefc4b84c84b0d9`.
+**Approved proposal artifact:** `docs/orchestrator/proposals/1B-implementation-plan.md`, committed at `ef9b95049e5ac2cca8946870eeefc4b84c84b0d9` (archived to `docs/archive/orchestrator-abandoned/1B-implementation-plan.md`).
 
 **Locked architectural decisions this approval covers (content/design approval only — see the explicit distinction below):**
 
@@ -73,16 +73,16 @@ NOAH/CTO approved Stage 1B Revision 1 (the technical proposal correcting the sta
 
 **Explicit distinction — proposal approval vs. implementation authorization:** this decision records that the design/content above is approved. It does **not** authorize implementation of `packages/orchestrator-validator` or any task record. Per the approved design's own approval-semantics model, `IMPLEMENTATION_AUTHORIZATION` is a separate, later decision, to be recorded only once this proposal-approval commit already exists in `main`'s history — deliberately not recorded here or anywhere yet.
 
-## DEC-008 — Stage 1B Implementation Authorized
+## DEC-008 — [SUPERSEDED / HISTORICAL] Stage 1B Implementation Authorized
 
-**Status:** LOCKED
+**Status:** SUPERSEDED / HISTORICAL (ORCHESTRATOR ABANDONED — see DEC-009)  
 **Date:** 2026-09-05
 
 NOAH/CTO authorizes implementation of the Stage 1B orchestration foundation described in the approved proposal artifact. This decision is the separate, later `IMPLEMENTATION_AUTHORIZATION` referenced in DEC-007's own text, and is recorded only now that the proposal-approval commit already exists in `main`'s history, per the approved artifact's own approval-semantics model (a `PROPOSAL_REVIEW` approval and an `IMPLEMENTATION_AUTHORIZATION` are distinct decision types and are never conflated).
 
-**Decision:** IMPLEMENTATION IS AUTHORIZED.
+**Decision:** IMPLEMENTATION IS AUTHORIZED (HISTORICAL — VOIDED BY DEC-009).
 
-**Approved artifact this authorization covers:** `docs/orchestrator/proposals/1B-implementation-plan.md`, originally committed at `ef9b95049e5ac2cca8946870eeefc4b84c84b0d9` and ratified into `main` via PR #23, merge commit `878da4c2f4c945c1d44cad385f6965c309e41c81` (referenced here as the real, verified Gate A merge SHA — no placeholder).
+**Approved artifact this authorization covers:** `docs/orchestrator/proposals/1B-implementation-plan.md`, originally committed at `ef9b95049e5ac2cca8946870eeefc4b84c84b0d9` and ratified into `main` via PR #23, merge commit `878da4c2f4c945c1d44cad385f6965c309e41c81` (archived to `docs/archive/orchestrator-abandoned/1B-implementation-plan.md`).
 
 **Authorized scope:** implementation of exactly what the approved artifact specifies, and nothing beyond it:
 
@@ -100,3 +100,28 @@ Any material deviation from the approved artifact discovered during implementati
 - No dependency installation beyond what the approved artifact's own scope requires within `packages/orchestrator-validator` itself.
 - n8n, RAG, autonomous agent loops, automatic task selection, automatic merges, and any application/product behavior change remain explicitly out of scope.
 - This authorization does not itself constitute or include a `VERIFICATION_RESULT`, `CODE_REVIEW_RESULT`, or `CTO_FINAL_APPROVAL` decision for the resulting implementation PR — those remain separate, later gates per the approved decision-semantics model.
+
+---
+
+## DEC-009 — Abandonment of Orchestrator / NOAH Project and Adoption of Manual Engineering Governance
+
+**Status:** ACTIVE / RATIFIED  
+**Date:** 2026-09-21  
+**Authority:** CTO
+
+The AI Engineering Orchestrator / NOAH autonomous runtime project (Stages 1A and 1B) is formally and permanently **ABANDONED**.
+
+1. **Abandonment Scope:**
+   - No validator library (`packages/orchestrator-validator`), autonomous task state machine, task execution loop, or autonomous merge system will be built, revived, or merged.
+   - Historical Stage 1A and Stage 1B documents (`1B-implementation-plan.md`, `CURRENT_PHASE.md`, `NEXT_TASK.md`) are archived under `docs/archive/orchestrator-abandoned/` solely for historical audit.
+   - Previous decisions DEC-005 through DEC-008 are superseded and carry zero implementation authority.
+
+2. **Authoritative Engineering Governance:**
+   - The manual workflow is the sole active engineering process:
+     `CTO (Human / Product Authority) → Claude (Senior Engineer / Coder) → CTO Quality Gate → Antigravity (Verification & Delivery Agent)`.
+   - The governing engineering protocols are ratified and active:
+     - `docs/engineering/NORYX_ENGINEERING_GOVERNANCE.md`
+     - `docs/engineering/CLAUDE_ENGINEERING_PROTOCOL.md`
+     - `docs/engineering/NORYX_CTO_COPILOT_PROTOCOL.md`
+     - `docs/engineering/NORYX_ANTIGRAVITY_DELIVERY_PROTOCOL.md`
+   - All substantive engineering items require explicit, serialized CTO gates: Discovery Authorization → Proposal Approval → Implementation Authorization → Quality Gate Review → Delivery Authorization.

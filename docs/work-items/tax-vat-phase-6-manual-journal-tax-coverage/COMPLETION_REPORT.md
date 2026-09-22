@@ -8,7 +8,7 @@
   - Initial Implementation: "NORYX CTO — FINAL ONE-PASS IMPLEMENTATION AUTHORIZATION — Tax/VAT Phase 6 — Manual Journal Tax Coverage"
   - Evidence Correction: "NORYX CTO — POST-IMPLEMENTATION EVIDENCE CORRECTION AUTHORIZATION — Tax/VAT Phase 6 — Manual Journal Tax Coverage"
 - **Approved specification:** `CONTRACT.md` and `ACCEPTANCE.md`, derived directly from the authorization's frozen semantics (§8) and required coverage list (§15), maintained with strict consistency.
-- **Upstream discovery:** `docs/finance-work-item-tax-vat-phase-6-manual-journal-tax-coverage-proposal.md` (standalone untracked file in working tree, out of commit scope).
+- **Upstream discovery:** `docs/work-items/tax-vat-phase-6-manual-journal-tax-coverage/PROPOSAL.md` (preserved in work-item directory).
 - **Authoritative History and Commit Chain:**
   - **Approved baseline SHA:** `ac16fa0e195f175806240924832c8c1567cc9772` (Budgeting Phase 1 Foundation delivery commit on `main`).
   - **Implementation commit SHA:** `908b9306f496ed11059aa8f551b741ba30a6fb4a` (branch `feat/tax-vat-phase-6-manual-journal-tax-coverage`).

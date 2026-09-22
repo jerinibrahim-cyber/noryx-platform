@@ -2,7 +2,7 @@
 
 **Status:** IMPLEMENTED, VERIFIED, COMMITTED (see §7 for push verification)
 **Date:** 2026-09-11
-**Authoritative discovery artifact:** `docs/finance-work-item-tax-vat-phase-4-discovery.md`
+**Authoritative discovery artifact:** `docs/work-items/tax-vat-phase-4-vat-position/DISCOVERY.md`
 **Baseline before this work:** `main` @ `263354b` (Tax/VAT Phase 3 completion report), confirmed `local main == origin/main == live GitHub main` at that SHA before implementation began.
 **Commit produced by this work:** `ba607b86266f4237e80187ecbceb91bc7f193e81`
 

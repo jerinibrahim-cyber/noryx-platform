@@ -413,7 +413,7 @@ next, per §5.
       `001_create_app_role.sql` (`3f94508`); `docker-compose.yml`'s
       `identity` and `sphere-finance` `DATABASE_URL` point at it; live
       `pg_roles` query at closeout confirmed `rolsuper=false,
-    rolbypassrls=false`.
+rolbypassrls=false`.
 - [x] The role-privilege assertion exists and fails loudly on regression.
       Evidence: `assert-role-privileges.ts` — passes against `noryx_app`,
       fails with an explicit error against a superuser connection; wired

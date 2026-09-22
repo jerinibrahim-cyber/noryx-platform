@@ -1,6 +1,6 @@
 # NoryX Engineering Governance
 
-**Status:** Draft — CTO review required  
+**Status:** Active / Ratified  
 **Owner:** NoryX CTO / Product Owner  
 **Last updated:** 2026-09-17
 
