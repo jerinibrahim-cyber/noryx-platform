@@ -3,7 +3,7 @@
 Monorepo for **Noryx Sphere** (ERP · CRM · HRMS) and **Noryx Orbis** (CAFM ·
 FM Intelligence) — two products on one shared, multi-tenant services layer.
 
-Current maturity includes the platform foundation and core **Noryx Sphere Finance** services (General Ledger, Accounts Payable, Accounts Receivable, Banking & Cash Management, Budgeting, and Tax/VAT Phases 1–6). See [`docs/roadmap.md`](docs/roadmap.md) for what's built vs. what's next.
+Current maturity includes the platform foundation and core **Noryx Sphere Finance** services (General Ledger, Accounts Payable, Accounts Receivable, Banking & Cash Management, Budgeting, and Tax/VAT Phases 1–7 delivered). See [`docs/roadmap.md`](docs/roadmap.md) for what's built vs. what's next.
 
 ## Repo layout
 

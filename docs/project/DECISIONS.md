@@ -125,3 +125,42 @@ The AI Engineering Orchestrator / NOAH autonomous runtime project (Stages 1A and
      - `docs/engineering/NORYX_CTO_COPILOT_PROTOCOL.md`
      - `docs/engineering/NORYX_ANTIGRAVITY_DELIVERY_PROTOCOL.md`
    - All substantive engineering items require explicit, serialized CTO gates: Discovery Authorization → Proposal Approval → Implementation Authorization → Quality Gate Review → Delivery Authorization.
+
+---
+
+## DEC-010 — Manual Governance Model — Supersession of Legacy Orchestrator Role Language
+
+**Status:** ACTIVE / RATIFIED
+**Date:** 2026-09-22
+**Authority:** CTO / Human Product Authority
+
+### Core Decision
+
+NoryX permanently operates under the manual serialized governance model:
+
+```text
+CTO (Human / Product Authority)
+  → Claude (Senior Engineer / Coder)
+  → CTO Quality Gate
+  → Antigravity (Verification & Delivery Agent)
+```
+
+### Clarifications & Invariants
+
+1. **Orchestrator Permanent Abandonment:**
+   - NOAH / NoryX Orchestrator is permanently abandoned.
+   - No autonomous orchestration, autonomous agent loops, or state-controller runtime role exists.
+
+2. **Role Boundaries:**
+   - **CTO:** Sole human business, product, scope, and authorization authority.
+   - **Claude:** Senior Engineer / primary coder. Claude does not self-authorize implementation, does not select next work items from the roadmap, and does not push to git remotes.
+   - **Antigravity:** Controlled verification and delivery agent. Antigravity executes explicit instructions and verification suites, and does not independently select or infer work.
+
+3. **Gating Model:**
+   - Proposal approval is distinct from implementation authorization.
+   - CTO quality-gate approval is distinct from delivery authorization.
+   - No roadmap entry constitutes implementation authorization.
+
+4. **Institutional History & Supersession:**
+   - Historical NOAH decisions (DEC-001, DEC-002, DEC-004 through DEC-008) remain preserved in this document solely as historical institutional records for audit integrity.
+   - This decision (alongside DEC-009) formally and explicitly supersedes any still-active role, governance, or orchestration wording in earlier decisions wherever it conflicts with the manual governance model.
