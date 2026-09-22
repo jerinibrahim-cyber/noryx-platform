@@ -3,7 +3,7 @@
 **Snapshot:** 2026-09-22  
 **Repository:** `jerinibrahim-cyber/noryx-platform`  
 **Authoritative product branch:** `main`  
-**Last verified main commit:** `00746b36799d59db54002ab6d58ccc1120c3efe9` (Repository cleanup & governance reconciliation merge; incorporates Tax/VAT Phase 7 delivery `e2c52ac` and cleanup checkpoint `8df301c`).
+**Last verified main commit:** `aee830d635944d77bce9c65ea7a4c59e1258a9db` (Governance documentation synchronization merge; incorporates PR #40 `201dd3c` on top of cleanup reconciliation baseline `00746b3`).
 **Active workstream:** None. Repository cleanup, governance integration, and Tax/VAT Phases 1–7 are delivered to `main`. No subsequent feature or implementation workstream is currently authorized.
 
 ---
