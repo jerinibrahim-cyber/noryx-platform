@@ -5,7 +5,7 @@
 **Applies to:** Claude implementation and verification sessions for
 NoryX repositories\
 **Delivery agent:** Antigravity\
-**Last updated:** 2026-09-17
+**Last updated:** 2026-09-23
 
 ---
 
@@ -36,8 +36,11 @@ The CTO owns:
 - architectural approval
 - scope approval
 - acceptance criteria
-- final quality approval
-- authorization to push
+- proposal approval
+- implementation authorization
+- final quality-gate approval (`CTO_QUALITY_GATE`)
+- explicit delivery authorization (`DELIVERY_AUTHORIZED`)
+- final delivery verification and work-item closure
 
 The CTO does **not** ask Claude to repeatedly rediscover
 already-approved requirements.
@@ -46,28 +49,28 @@ already-approved requirements.
 
 Claude owns:
 
-- repository discovery
-- implementation
+- repository discovery (autonomous within approved scope; maximum 2 passes)
+- discovery package creation (`DISCOVERY.md`, `CONTRACT.md`, `ACCEPTANCE.md`, and discovery report)
+- implementation of approved scope
 - technical verification
-- bounded remediation
-- test execution
-- completion evidence
-- final completion report
-- verified Git bundle
+- bounded remediation of defects (maximum 2 implementation passes)
+- test execution and raw-SQL proofs
+- completion evidence and final completion report
+- verified Git bundle generation and fresh-repository verification
 
-Claude must not push to the remote repository.
+Claude must not push to the remote repository or merge branches.
 
 ## Antigravity
 
 Antigravity owns:
 
-- delivery/push only after CTO approval
+- controlled delivery/push only after explicit CTO delivery authorization (`NORYX CTO DELIVERY AUTHORIZATION: APPROVED`)
+- exact approved-SHA delivery to target (default: `origin/main`)
 - remote verification
-- exact approved-SHA delivery
 - delivery report
 
 Antigravity must not redesign, modify, or silently repair source code
-during delivery.
+before or during delivery.
 
 ---
 
@@ -76,13 +79,13 @@ during delivery.
 Every work item has one authoritative state.
 
 ```text
-DISCOVERY
+DISCOVERY (Pass 1 or 2)
    ↓
 PROPOSED
    ↓
 CTO_APPROVED
    ↓
-IMPLEMENTING
+IMPLEMENTING (Pass 1 or 2)
    ↓
 VERIFIED
    ↓
@@ -92,9 +95,13 @@ REPORT_GENERATED
    ↓
 BUNDLE_VERIFIED
    ↓
-CTO_VERIFIED
+CTO_QUALITY_GATE
    ↓
-PUSHED
+DELIVERY_AUTHORIZED
+   ↓
+DELIVERED / PUSHED (Default: origin/main)
+   ↓
+CTO_VERIFIED
    ↓
 CLOSED
 ```
@@ -107,10 +114,12 @@ CLOSED
     work item.
 4.  A work item is not complete while any mandatory gate is
     `NOT EXECUTED`.
-5.  Discovery and implementation are separate phases.
-6.  CTO approval is mandatory before implementation.
-7.  Push requires explicit CTO approval of the final SHA.
-8.  No implementation is allowed while the work item is only `PROPOSED`.
+5.  Discovery and implementation are separate phases, each bounded by a strict two-pass maximum (maximum 2 discovery passes, maximum 2 implementation passes; after Pass 2, unresolved material issues enter `HOLD / CTO DECISION REQUIRED`).
+6.  CTO proposal approval and implementation authorization are mandatory before implementation.
+7.  CTO Quality-Gate Approval evaluates technical acceptability; it does NOT authorize delivery.
+8.  Delivery requires explicit literal `NORYX CTO DELIVERY AUTHORIZATION: APPROVED`.
+9.  Default delivery target is `origin/main` unless the CTO explicitly designates another target. Normal delivery delivers the approved state directly to the approved target without an implicit extra merge stage.
+10. No implementation is allowed while the work item is only `PROPOSED`.
 
 ---
 
@@ -189,32 +198,73 @@ Never convert a failed test into PASS merely by labeling it a
 
 # 6. Discovery Protocol
 
-Claude's discovery session must:
+### Discovery Autonomy
 
-1.  Read the current repository state.
-2.  Read the approved/current architecture patterns relevant to the work
-    item.
-3.  Inspect existing implementations before proposing new patterns.
-4.  Identify database, accounting, tenant/RLS, RBAC, concurrency,
-    migration, and regression implications.
-5.  Check runtime prerequisites before proposing test-dependent
-    implementation.
-6.  Produce the work-item contract.
-7.  Produce the acceptance matrix.
-8.  Identify blockers or contradictions.
-9.  STOP.
+The protocol strictly distinguishes **technical self-correction** from **scope/authority decisions**.
+
+During an authorized discovery pass, Claude may autonomously:
+
+- inspect dependencies and adjacent modules;
+- inspect existing canonical services and implementation patterns;
+- inspect runtime behavior, environment setups, and test infrastructure;
+- inspect database constraints, schema structures, and migration histories;
+- inspect mutation paths, locking patterns, and concurrency implications;
+- inspect acceptance requirements and refine boundary conditions;
+- identify technical contradictions in existing code or proposed approaches;
+- revise its technical proposal and implementation boundaries;
+- add necessary acceptance scenarios to guarantee rigorous coverage;
+- correct its own technical assumptions in light of repository evidence;
+- identify architecturally necessary changes to existing canonical files within scope.
+
+Claude must **NOT** stop merely because it discovers a technical issue or contradiction that can be resolved within the authorized scope.
+
+Claude **must** escalate to the CTO when an issue requires:
+
+- product or business policy decisions;
+- expansion of approved scope;
+- changing a frozen architectural decision;
+- contradicting an explicit prior CTO decision;
+- changing accounting, financial, or legal requirements;
+- changing authorization or security boundaries;
+- a decision that cannot be derived from the approved objective and repository evidence.
+
+### Two-Pass Maximum
+
+Discovery is strictly bounded:
+
+- **Maximum 2 passes:** Discovery Pass 1 and Discovery Pass 2.
+- **Pass 2 is a consolidated refinement:** Pass 2 must be a consolidated correction/refinement of Pass 1 addressing specific CTO feedback, not an independent restart.
+- **Terminal escalation:** After Pass 2, if material issues remain unresolved, the work item enters `HOLD / CTO DECISION REQUIRED`. There is no Discovery Pass 3.
+
+### Required Discovery Package
+
+Every discovery pass must produce the complete discovery package:
+
+1. `docs/work-items/<WORK_ITEM_ID>/DISCOVERY.md` (detailed technical discovery and architecture analysis)
+2. `docs/work-items/<WORK_ITEM_ID>/CONTRACT.md` (binding implementation contract)
+3. `docs/work-items/<WORK_ITEM_ID>/ACCEPTANCE.md` (scenario matrix with stable IDs)
+4. Discovery report returned in the response containing:
+   - pass number (Pass 1 or Pass 2)
+   - baseline SHA
+   - findings
+   - decisions
+   - scope (in scope vs. out of scope)
+   - unresolved issues (if any)
+   - verification performed
+   - final proposal status (`STATUS: PROPOSED`)
 
 Discovery must not implement production code.
 
-### Discovery output
+### Discovery Output Format
 
 Keep the response concise and evidence-based:
 
 ```text
 WORK ITEM
-BASELINE
+PASS: [Pass 1 | Pass 2 of 2]
+BASELINE SHA
 FILES/PATTERNS INSPECTED
-PROPOSED ARCHITECTURE
+PROPOSED ARCHITECTURE & CANONICAL FILE MODIFICATIONS
 SCOPE
 OUT OF SCOPE
 INVARIANTS
@@ -295,6 +345,21 @@ Claude must:
 - avoid duplicate helpers when existing utilities are suitable
 - keep changes traceable to acceptance criteria
 
+### Modifying Existing Canonical Files
+
+The governance rule is: **Do not make unrelated or unnecessary changes outside approved scope.**
+
+An architecturally necessary change to an existing canonical service, controller, schema, or configuration file is permitted when:
+
+1. it is required by the approved capability;
+2. it is within approved scope;
+3. it is technically justified;
+4. it is covered by acceptance criteria;
+5. it is verified;
+6. it is documented in the completion evidence.
+
+Claude must **not** invent duplicate or parallel abstractions merely to avoid touching an existing canonical component when extending that canonical component (e.g., adding `postSystemGeneratedEntry()` to `JournalEntriesService`) is the correct architectural integration.
+
 ### Forbidden during implementation
 
 Unless explicitly approved:
@@ -303,11 +368,11 @@ Unless explicitly approved:
 - replacement accounting architecture
 - unrelated schema redesign
 - unrelated UI/product changes
-- broad refactoring
+- broad refactoring or code cleanup
 - new document states
 - new GL accounts
 - changing unrelated business rules
-- pushing to origin
+- pushing to remote repositories or merging branches
 
 If a hard architectural contradiction is discovered:
 
@@ -325,15 +390,55 @@ Do not silently change the architecture.
 
 # 10. Bounded Verification and Remediation
 
-Claude owns one bounded implementation/verification cycle.
+### Two-Pass Maximum for Implementation
 
-The cycle is:
+Implementation operates under a strict two-pass limit:
+
+- **Pass 1:** Initial implementation, test execution, bounded defect remediation, final verification, completion report, and verified Git bundle handoff.
+- **Pass 2:** Targeted remediation addressing specific CTO quality-gate findings. Pass 2 fixes only the identified defects, reruns affected gates, reruns required regressions, regenerates the completion report, and regenerates the verified Git bundle.
+- **Terminal Escalation:** After Pass 2, if material issues remain unresolved, the work item enters `HOLD / CTO DECISION REQUIRED`. There is no Implementation Pass 3.
+
+### Permissible Technical Remediation
+
+Claude may autonomously self-correct technical issues when:
+
+- the correction remains within approved scope;
+- no product decision changes;
+- no frozen architectural decision changes;
+- no accounting, financial, or legal invariant changes;
+- no authorization boundary changes.
+
+Permissible remediation examples include:
+
+1.  Production-code defect fixes within scope.
+2.  Test-infrastructure and test-runner defect fixes.
+3.  Fixture and seed data corrections.
+4.  Local database environment and migration corrections.
+5.  Query syntax or ORM mapping adjustments.
+6.  Correcting acceptance evidence and test assertions to match the approved contract.
+
+### Mandatory CTO Escalation
+
+Claude must escalate to the CTO when remediation would change:
+
+- scope;
+- product behavior not already authorized;
+- accounting policy;
+- legal/tax interpretation;
+- tenant isolation model;
+- frozen architecture;
+- security boundary;
+- authorization model.
+
+### Execution Cycle
+
+The bounded cycle is:
 
 ```text
 IMPLEMENT
 → RUN REQUIRED TESTS
 → CLASSIFY FAILURES
-→ FIX GENUINE DEFECTS
+→ FIX GENUINE DEFECTS (within scope)
 → RERUN AFFECTED GATES
 → RUN FINAL REQUIRED REGRESSION
 → STOP
@@ -347,12 +452,7 @@ Failure classification:
 4.  Environment defect
 5.  Genuine expected-behavior mismatch
 
-The classification must be evidence-based.
-
-If a test or fixture is defective, fix it rather than weakening the
-requirement.
-
-Do not start an endless "repair the repair" conversation.
+The classification must be evidence-based. If a test or fixture is defective, fix it rather than weakening the requirement. Do not start an open-ended loop.
 
 ---
 
@@ -480,7 +580,7 @@ Never invent counts.
 
 ---
 
-# 15. Completion Report
+# 15. Completion Report & Delivery Package
 
 The completion report is generated **last**, after final verification.
 
@@ -493,11 +593,11 @@ docs/work-items/<WORK_ITEM_ID>/COMPLETION_REPORT.md
 It must contain:
 
 ```text
-Work item
+Work item ID
 Baseline SHA
 Final SHA
 Scope completed
-Files changed
+Files changed (including canonical files modified)
 Database changes
 Migrations
 Acceptance matrix results
@@ -514,40 +614,64 @@ Any deviations from contract
 Final status
 ```
 
-The report must be evidence-oriented.
+The report must be evidence-oriented. Do not write a completion report before final verification and then repeatedly rewrite it during remediation.
 
-Do not write a completion report before final verification and then
-repeatedly rewrite it during remediation.
+### Mandatory Delivery Package
+
+Every implementation pass must produce a complete, verifiable delivery package:
+
+1.  **Work-item identifier:** Canonical ID matching the contract.
+2.  **Approved baseline SHA:** Commit SHA from which the work branch originated.
+3.  **Approved final SHA:** Exact Git commit SHA containing the verified implementation.
+4.  **Completion report:** `COMPLETION_REPORT.md` fully completed with evidence.
+5.  **Acceptance evidence:** Full matrix showing all scenarios as `PASS`.
+6.  **Regression evidence:** Documented execution and pass counts for all required regression suites.
+7.  **Implementation delivery/handoff report:** Concise summary returned in the prompt.
+8.  **Git bundle:** Bundle created from the final commit containing history from baseline.
+9.  **Bundle verification evidence:** Documented output of `git bundle verify` and `git bundle list-heads`.
+10. **Fresh-fetch verification:** Independent verification confirming the bundle unpacks cleanly into a separate test repository and resolves to the exact final SHA.
+11. **Working-tree status:** Verification that the working tree is clean.
+12. **Delivery target:** Explicit destination (default: `origin/main`).
 
 ---
 
-# 16. Git Commit and Bundle Protocol
+# 16. Git Commit and Bundle Protocol (Hard Gate)
 
-After verification:
+The Git bundle is a **mandatory hard quality gate**, not an optional artifact.
+
+### Creation and Verification Steps
+
+After all verification passes:
 
 1.  Create the final commit.
 2.  Record the exact final SHA.
-3.  Generate a Git bundle containing the work-item history from the
-    approved baseline.
-4.  Verify the bundle.
-5.  Independently fetch the bundle into a fresh repository.
-6.  Confirm the expected commit/history is present.
-7.  Place the bundle in:
+3.  Generate a Git bundle containing the work-item history from the approved baseline:
+    ```bash
+    git bundle create ~/Downloads/<BUNDLE_NAME>.bundle <BASELINE_SHA>..HEAD <BRANCH_NAME>
+    ```
+4.  Verify bundle integrity:
+    ```bash
+    git bundle verify ~/Downloads/<BUNDLE_NAME>.bundle
+    git bundle list-heads ~/Downloads/<BUNDLE_NAME>.bundle
+    ```
+5.  Perform an independent fresh-repository verification:
+    - Clone or initialize an isolated temporary repository.
+    - Fetch the bundle into the temporary repository:
+      ```bash
+      git fetch <BUNDLE_PATH> <BRANCH_NAME>:test-verify
+      ```
+    - Confirm the extracted commit resolves byte-for-byte to the exact intended final SHA.
+6.  Ensure bundle accessibility in `~/Downloads/`.
 
-```text
-~/Downloads/
-```
+### Stale Bundle Prohibition
 
-Required checks:
+If any source, test, configuration, schema, or documentation changes occur after a bundle is generated, the bundle **MUST be regenerated and reverified**. A stale bundle must never be treated as valid evidence for the final state.
 
-```text
-git bundle verify <bundle>
-git bundle list-heads <bundle>
-```
+### Hard Gate Requirement
 
-Then perform an independent fetch into a fresh repository.
+If the required Git bundle is missing, stale, inaccessible, or unverifiable:
 
-The bundle is a **review handoff artifact**, not a deployment artifact.
+**CTO quality-gate review must not be considered complete.**
 
 Terminal Claude state:
 
@@ -558,91 +682,112 @@ IMPLEMENTED
 → REPORT_GENERATED
 → BUNDLE_GENERATED
 → BUNDLE_VERIFIED
-→ CTO_REVIEW
+→ FRESH_FETCH_VERIFIED
+→ CTO_QUALITY_GATE
 ```
 
 Claude does not push.
 
 ---
 
-# 17. CTO Review
+# 17. CTO Quality Gate vs. Delivery Authorization
 
-The CTO reviews:
+These are two strictly separated authorities.
 
-- completion report
-- final SHA
-- bundle
-- acceptance matrix
-- evidence for critical gates
+### 1. CTO Quality-Gate Approval
 
-The CTO may:
+CTO Quality-Gate Approval means:
 
-```text
-APPROVE
-```
+> **The CTO has reviewed the implementation evidence and considers the implementation technically acceptable for delivery.**
 
-or
+Quality-gate approval certifies technical correctness. It does **NOT** authorize pushing to any remote repository or merging branches.
+
+### 2. CTO Delivery Authorization
+
+Delivery requires explicit, literal delivery authorization:
 
 ```text
-HOLD
+NORYX CTO DELIVERY AUTHORIZATION: APPROVED
 ```
 
-A HOLD should identify the affected gate.
+This authorization permits Antigravity to perform the delivery operation defined by the approved delivery target.
 
-Do not ask Claude to "review everything again" unless new evidence
-justifies reopening a specific area.
+### Strict Non-Inference Rule
 
-Preferred remediation instruction:
+Do not allow one authorization to be inferred from the other.
 
-```text
-Gate X is HOLD because [specific evidence].
-Investigate only this gate and its directly affected dependencies.
-Do not reopen PASS gates.
-Fix if required.
-Rerun the affected verification and required regression.
-Regenerate the final report and bundle.
-Stop.
-```
+No delivery authorization may be inferred from:
+
+- CTO quality approval;
+- a completion report;
+- passing tests or regression gates;
+- an approved final SHA;
+- a verified Git bundle;
+- an ambiguous "looks good" or "ready to ship."
 
 ---
 
 # 18. Antigravity Delivery Protocol
 
+### Delivery Target
+
+Unless the CTO explicitly specifies another target:
+
+**The default delivery target is `origin/main`.**
+
+Normal delivery delivers the approved final state directly to the approved target. Do not introduce an implicit additional merge, rebase, or cherry-pick stage after the approved delivery process.
+
+If a separate merge or reconciliation operation is required, it must be explicitly authorized rather than silently assumed.
+
+### Delivery Input
+
 Antigravity receives:
 
 ```text
 Work item
+Approved baseline SHA
 Approved final SHA
-Approved baseline
+Delivery target (default: origin/main)
 ```
+
+### Pre-Push Verification
 
 Antigravity must:
 
-1.  Verify local repository state.
-2.  Verify the approved SHA exists.
-3.  Verify the approved SHA is based on the approved baseline.
-4.  Push exactly the approved SHA.
-5.  Verify remote `main`.
-6.  Confirm no source modifications were made.
-7.  Return a concise delivery report.
+1.  Verify local repository state and branch.
+2.  Verify working tree is clean.
+3.  Verify the approved SHA exists.
+4.  Verify the approved baseline is an ancestor.
+5.  Confirm remote target aligns with expectations.
 
-Antigravity must not:
+### Exact-SHA & Zero Source Modification Rules
 
-- modify source code
-- rebase
-- squash
-- cherry-pick
-- repair tests
-- alter commits
-- redesign
-- push an unapproved SHA
+Antigravity is a controlled delivery agent, not an engineering agent.
 
-If delivery requires source changes:
+Antigravity must:
+
+- Push exactly the approved SHA to the authorized target.
+- Verify remote target equals the approved SHA after push.
+- Confirm no source modifications were made.
+
+Antigravity must **NOT**:
+
+- modify production source code;
+- alter implementation details;
+- silently fix tests or fixtures;
+- rebase;
+- squash;
+- cherry-pick;
+- change the approved final SHA;
+- introduce undocumented changes.
+
+If delivery cannot be performed exactly as authorized without modifying source:
 
 ```text
-STOP
-→ return to CTO/Claude
+STOP → HOLD → report discrepancy to CTO
 ```
+
+Antigravity does not repair the repository to force delivery.
 
 ---
 
@@ -747,8 +892,10 @@ A work item is DONE only when:
 
 ```text
 [ ] Approved contract exists
-[ ] CTO approval recorded
-[ ] Scope respected
+[ ] CTO proposal approval recorded
+[ ] Two-pass discovery maximum respected (Pass 1 or Pass 2)
+[ ] Scope respected (including authorized canonical file modifications)
+[ ] Two-pass implementation maximum respected (Pass 1 or Pass 2)
 [ ] Implementation complete
 [ ] Required migrations verified
 [ ] Accounting invariants verified where applicable
@@ -762,11 +909,13 @@ A work item is DONE only when:
 [ ] Build PASS where required
 [ ] Final commit created
 [ ] Completion report generated LAST
-[ ] Git bundle generated
-[ ] Bundle verified
-[ ] Independent bundle fetch verified
-[ ] CTO review APPROVED
-[ ] Antigravity pushed exact approved SHA
+[ ] Git bundle generated from final commit
+[ ] Bundle verified (verify + list-heads)
+[ ] Independent bundle fetch into fresh repository verified
+[ ] Delivery package complete and accessible
+[ ] CTO Quality-Gate Approval recorded (CTO_QUALITY_GATE)
+[ ] Explicit CTO Delivery Authorization recorded (NORYX CTO DELIVERY AUTHORIZATION: APPROVED)
+[ ] Antigravity delivered exact approved SHA to target (default: origin/main) without source modifications
 [ ] Remote SHA verified
 [ ] Work item CLOSED
 ```
@@ -780,21 +929,24 @@ No `NOT EXECUTED` mandatory gate may remain.
 Use this compact prompt:
 
 ```text
-NORYX DISCOVERY — <WORK_ITEM_ID>
+NORYX DISCOVERY — <WORK_ITEM_ID> (Pass 1 or 2 of 2)
 
 You are in DISCOVERY only. Do not implement.
 
 Read the repository and determine the current architecture relevant to this work item.
+You have autonomy within approved scope to inspect dependencies, adjacent modules, canonical services, database constraints, mutation paths, and runtime behavior to resolve technical questions.
 
 Create:
-1. docs/work-items/<WORK_ITEM_ID>/CONTRACT.md
-2. docs/work-items/<WORK_ITEM_ID>/ACCEPTANCE.md
+1. docs/work-items/<WORK_ITEM_ID>/DISCOVERY.md
+2. docs/work-items/<WORK_ITEM_ID>/CONTRACT.md
+3. docs/work-items/<WORK_ITEM_ID>/ACCEPTANCE.md
 
 Inspect existing patterns before proposing new ones.
+If modifying existing canonical files is architecturally necessary, specify and justify those changes.
 
 The contract must define:
 - baseline SHA
-- scope
+- scope (including justified canonical file changes)
 - out of scope
 - architecture
 - required behavior
@@ -815,9 +967,11 @@ Do not implement.
 Do not push.
 
 Return only:
-BASELINE
+WORK ITEM
+PASS: [Pass 1 | Pass 2 of 2]
+BASELINE SHA
 FILES/PATTERNS INSPECTED
-PROPOSED CONTRACT
+PROPOSED CONTRACT & CANONICAL FILE MODIFICATIONS
 ACCEPTANCE MATRIX
 RUNTIME READINESS
 BLOCKERS
@@ -831,7 +985,7 @@ STATUS: PROPOSED
 Use this after CTO approval:
 
 ```text
-NORYX IMPLEMENTATION — <WORK_ITEM_ID>
+NORYX IMPLEMENTATION — <WORK_ITEM_ID> (Pass 1 or 2 of 2)
 
 CTO has approved the work-item contract.
 
@@ -849,13 +1003,13 @@ Do not redesign the approved architecture.
    - migrations
    - required test/runtime tooling
 
-2. Implement only the approved scope.
+2. Implement only the approved scope (including authorized canonical file changes).
 
 3. Run the acceptance matrix and required regression gates.
 
 4. Classify failures by production defect, test defect, fixture defect, environment defect, or requirement mismatch.
 
-5. Perform bounded remediation for genuine defects and rerun affected gates plus required final regression.
+5. Perform bounded remediation for genuine defects within scope (maximum 2 implementation passes) and rerun affected gates plus required final regression.
 
 6. Do not reopen PASS gates without contradictory evidence.
 
@@ -865,22 +1019,24 @@ Do not redesign the approved architecture.
    - generate a Git bundle in ~/Downloads/
    - run git bundle verify
    - run git bundle list-heads
-   - independently fetch the bundle into a fresh repository and verify it
+   - independently fetch the bundle into a fresh repository and verify it resolves to final SHA
 
 8. Do not push.
 
 Stop at:
-IMPLEMENTED → VERIFIED → COMMITTED → REPORT → BUNDLE VERIFIED.
+IMPLEMENTED → VERIFIED → COMMITTED → REPORT → BUNDLE VERIFIED → FRESH FETCH VERIFIED → CTO_QUALITY_GATE.
 
-Return a concise evidence summary with:
+Return a concise delivery package summary with:
+WORK ITEM
+PASS: [Pass 1 | Pass 2 of 2]
 FINAL SHA
 ACCEPTANCE RESULT
 REGRESSION RESULT
 TYPECHECK/LINT/BUILD
-BUNDLE PATH
-BUNDLE VERIFICATION
+BUNDLE PATH & ACCESSIBILITY
+BUNDLE VERIFICATION & FRESH FETCH PROOF
 WORKING TREE
-STATUS
+STATUS: READY FOR CTO QUALITY-GATE REVIEW
 ```
 
 ---
@@ -890,9 +1046,9 @@ STATUS
 Use only when CTO identifies a specific failure:
 
 ```text
-NORYX TARGETED REMEDIATION — <WORK_ITEM_ID>
+NORYX TARGETED REMEDIATION — <WORK_ITEM_ID> (Pass 2 of 2)
 
-CTO HOLD:
+CTO HOLD / QUALITY-GATE FINDING:
 
 Gate:
 <E.G. CONC-004>
@@ -906,9 +1062,10 @@ Do not reopen unrelated PASS gates.
 Do not expand scope.
 Do not redesign the architecture unless the approved contract is demonstrably contradictory; if so, STOP and report the contradiction.
 
-Fix the genuine defect if one exists.
+Fix the genuine defect within approved scope.
 Rerun the affected gate and required regression.
-Regenerate the final completion report and verified Git bundle.
+Regenerate the final completion report and regenerate/reverify the Git bundle.
+Verify bundle in an independent fresh repository.
 
 Do not push.
 
@@ -918,16 +1075,16 @@ FILES CHANGED
 TESTS RUN
 RESULT
 FINAL SHA
-BUNDLE VERIFICATION
-STATUS
+BUNDLE VERIFICATION & FRESH FETCH PROOF
+STATUS: READY FOR CTO QUALITY-GATE REVIEW
 ```
 
 ---
 
-# 26. Standard CTO Approval Prompt to Antigravity
+# 26. Standard CTO Delivery Authorization Prompt to Antigravity
 
 ```text
-NORYX DELIVERY APPROVAL
+NORYX CTO DELIVERY AUTHORIZATION: APPROVED
 
 Work item: <WORK_ITEM_ID>
 
@@ -939,21 +1096,25 @@ Approved SHA:
 Baseline:
 <BASELINE_SHA>
 
-Push exactly the approved SHA.
+Delivery target:
+<TARGET> (default: origin/main)
+
+Push exactly the approved SHA to the delivery target.
 
 Before push:
 - verify SHA exists
 - verify baseline ancestry
+- verify working tree is clean
 - verify no unintended source changes
 
 After push:
-- verify remote main equals approved SHA
+- verify remote target equals approved SHA
 - verify no source changes occurred during delivery
 - report working-tree state
 
 Do not modify, rebase, squash, cherry-pick, repair, or redesign anything.
 
-If source modification is required, STOP and report it.
+If source modification is required, STOP and report HOLD.
 
 Return the concise NORYX CTO DELIVERY report.
 ```
@@ -965,15 +1126,17 @@ Return the concise NORYX CTO DELIVERY report.
 NoryX engineering should optimize for:
 
 ```text
-ONE DISCOVERY
+ONE DISCOVERY (Max 2 passes)
         ↓
 ONE CTO APPROVAL
         ↓
-ONE IMPLEMENTATION + BOUNDED VERIFICATION
+ONE IMPLEMENTATION + BOUNDED VERIFICATION (Max 2 passes)
         ↓
-ONE CTO REVIEW
+ONE CTO QUALITY GATE
         ↓
-ONE DELIVERY
+ONE CTO DELIVERY AUTHORIZATION
+        ↓
+ONE ANTIGRAVITY DELIVERY (Default: origin/main)
 ```
 
 The protocol deliberately moves knowledge from the conversation into
@@ -982,6 +1145,6 @@ durable repository artifacts.
 **The repository contract is the memory.\
 The acceptance matrix is the quality gate.\
 The completion report is the evidence.\
-The bundle is the review handoff.\
-The CTO is the approval authority.\
-Antigravity is the delivery mechanism.**
+The verified bundle is the review handoff.\
+The CTO is the approval and delivery authority.\
+Antigravity is the zero-modification delivery mechanism.**
