@@ -11,22 +11,28 @@ No agent is the final authority over its own work.
 
 ---
 
-## 2. Controlled Operating Workflow & State Machine
+## 2. Controlled Operating Workflow & Unified State Machine
+
+The authoritative engineering lifecycle consists of exactly 14 states:
 
 ```text
-CTO DISCOVERY AUTHORIZATION (Pass 1 or 2)
-  → Claude discovers HOW autonomously within scope & produces discovery package
-  → CTO reviews proposal (CTO Proposal Approval)
-  → CTO authorizes implementation (NORYX CTO IMPLEMENTATION AUTHORIZATION: APPROVED)
-  → Claude implements, executes bounded remediation & verifies (Pass 1 or 2)
-  → Claude produces delivery package (completion report & verified Git bundle)
-  → CTO evaluates quality gate (CTO Quality-Gate Approval)
-  → CTO authorizes delivery (NORYX CTO DELIVERY AUTHORIZATION: APPROVED)
-  → Antigravity delivers exact approved SHA to target (default: origin/main) without source changes
-  → CTO verifies remote state & closes work item (CLOSED)
+DISCOVERY (Pass 1 or 2)
+  → PROPOSED
+  → CTO_APPROVED (Proposal Approval)
+  → IMPLEMENTATION_AUTHORIZED (NORYX CTO IMPLEMENTATION AUTHORIZATION: APPROVED)
+  → IMPLEMENTING (Pass 1 or 2)
+  → VERIFIED
+  → COMMITTED
+  → REPORT_GENERATED
+  → BUNDLE_VERIFIED
+  → CTO_QUALITY_GATE (Quality-Gate Approval)
+  → DELIVERY_AUTHORIZED (NORYX CTO DELIVERY AUTHORIZATION: APPROVED)
+  → DELIVERED / PUSHED (Default: origin/main)
+  → CTO_DELIVERY_VERIFIED
+  → CLOSED
 ```
 
-Proposal approval, implementation authorization, verification, quality-gate review, and delivery authorization must remain strictly separated. No state automatically implies another.
+Proposal approval (`CTO_APPROVED`), implementation authorization (`IMPLEMENTATION_AUTHORIZED`), quality-gate review (`CTO_QUALITY_GATE`), delivery authorization (`DELIVERY_AUTHORIZED`), and closure (`CLOSED`) must remain strictly separated. No state automatically implies another.
 
 ---
 

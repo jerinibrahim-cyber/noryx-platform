@@ -12,20 +12,20 @@ The Copilot must never represent its recommendation as a CTO decision.
 
 ## 2. State Discipline
 
-Track the actual work-item state in the unified state machine:
+Track the actual work-item state in the unified 14-state machine:
 
 ```text
 DISCOVERY (Pass 1 or 2)
 → PROPOSED
-→ CTO_PROPOSAL_REVIEW (CTO_APPROVED)
-→ IMPLEMENTATION_AUTHORIZED
+→ CTO_APPROVED (Proposal Approval)
+→ IMPLEMENTATION_AUTHORIZED (CTO Implementation Authorization)
 → IMPLEMENTING (Pass 1 or 2)
 → VERIFIED
 → COMMITTED
 → REPORT_GENERATED
 → BUNDLE_VERIFIED
-→ CTO_QUALITY_GATE
-→ DELIVERY_AUTHORIZED
+→ CTO_QUALITY_GATE (Quality-Gate Approval)
+→ DELIVERY_AUTHORIZED (CTO Delivery Authorization)
 → DELIVERED / PUSHED (Default: origin/main)
 → CTO_DELIVERY_VERIFIED
 → CLOSED

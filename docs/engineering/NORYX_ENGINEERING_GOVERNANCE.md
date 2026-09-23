@@ -34,24 +34,28 @@ Performs controlled delivery/push to the authorized target (default: `origin/mai
 
 ---
 
-## Controlled Lifecycle & Unified State Machine
+## Controlled Lifecycle & Unified 14-State Machine
+
+Every work item progresses through an authoritative, finite 14-state machine:
 
 ```text
-CTO DISCOVERY AUTHORIZATION (Pass 1 or 2)
-→ CLAUDE DISCOVERY (autonomous within scope)
-→ DISCOVERY PACKAGE (DISCOVERY.md, CONTRACT.md, ACCEPTANCE.md, Report)
-→ CTO PROPOSAL REVIEW (CTO_APPROVED)
-→ CTO IMPLEMENTATION AUTHORIZATION
-→ CLAUDE IMPLEMENTATION + VERIFICATION (Pass 1 or 2; bounded remediation)
-→ DELIVERY PACKAGE (Completion Report, Acceptance/Regression, Verified Bundle, Fresh Fetch Proof)
-→ CTO QUALITY GATE (Technical acceptability)
-→ CTO DELIVERY AUTHORIZATION (Explicit: NORYX CTO DELIVERY AUTHORIZATION: APPROVED)
-→ ANTIGRAVITY DELIVERY (Exact approved SHA to target, default: origin/main; zero source changes)
-→ CTO DELIVERY VERIFICATION
+DISCOVERY (Pass 1 or 2)
+→ PROPOSED
+→ CTO_APPROVED (Proposal Approval)
+→ IMPLEMENTATION_AUTHORIZED (CTO Implementation Authorization)
+→ IMPLEMENTING (Pass 1 or 2)
+→ VERIFIED
+→ COMMITTED
+→ REPORT_GENERATED
+→ BUNDLE_VERIFIED
+→ CTO_QUALITY_GATE (Quality-Gate Approval)
+→ DELIVERY_AUTHORIZED (CTO Delivery Authorization)
+→ DELIVERED / PUSHED (Default: origin/main)
+→ CTO_DELIVERY_VERIFIED
 → CLOSED
 ```
 
-Every transition requires the explicit authorization appropriate to that transition. No state may automatically imply another.
+Every transition requires the explicit authorization or verification appropriate to that transition. No state may automatically imply another.
 
 ---
 

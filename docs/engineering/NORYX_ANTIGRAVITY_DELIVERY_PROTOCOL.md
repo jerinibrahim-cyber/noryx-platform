@@ -149,10 +149,10 @@ Do not repair the repository to make delivery succeed.
 
 ## 11. Completion
 
-Antigravity's lifecycle ends at:
+Antigravity operates within the final stages of the unified 14-state machine:
 
 ```text
-DELIVERY_AUTHORIZED → PUSHED → REMOTE VERIFIED → DELIVERY REPORT
+DELIVERY_AUTHORIZED → DELIVERED / PUSHED (Default: origin/main) → CTO_DELIVERY_VERIFIED → CLOSED
 ```
 
-The CTO performs final delivery verification and formally marks the work item `CLOSED`. Antigravity never automatically begins the next work item.
+Antigravity executes delivery upon `DELIVERY_AUTHORIZED`, transitioning the state to `DELIVERED / PUSHED`. The CTO performs post-delivery verification (`CTO_DELIVERY_VERIFIED`) and formally marks the work item `CLOSED`. Antigravity never automatically begins the next work item.

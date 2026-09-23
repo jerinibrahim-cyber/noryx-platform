@@ -76,7 +76,7 @@ before or during delivery.
 
 # 3. Mandatory Work-Item State Machine
 
-Every work item has one authoritative state.
+Every work item progresses through an authoritative, finite 14-state machine:
 
 ```text
 DISCOVERY (Pass 1 or 2)
@@ -84,6 +84,8 @@ DISCOVERY (Pass 1 or 2)
 PROPOSED
    ↓
 CTO_APPROVED
+   ↓
+IMPLEMENTATION_AUTHORIZED
    ↓
 IMPLEMENTING (Pass 1 or 2)
    ↓
@@ -101,7 +103,7 @@ DELIVERY_AUTHORIZED
    ↓
 DELIVERED / PUSHED (Default: origin/main)
    ↓
-CTO_VERIFIED
+CTO_DELIVERY_VERIFIED
    ↓
 CLOSED
 ```
@@ -115,7 +117,7 @@ CLOSED
 4.  A work item is not complete while any mandatory gate is
     `NOT EXECUTED`.
 5.  Discovery and implementation are separate phases, each bounded by a strict two-pass maximum (maximum 2 discovery passes, maximum 2 implementation passes; after Pass 2, unresolved material issues enter `HOLD / CTO DECISION REQUIRED`).
-6.  CTO proposal approval and implementation authorization are mandatory before implementation.
+6.  CTO proposal approval (`CTO_APPROVED`) and explicit implementation authorization (`IMPLEMENTATION_AUTHORIZED`) are mandatory separate milestones before implementation.
 7.  CTO Quality-Gate Approval evaluates technical acceptability; it does NOT authorize delivery.
 8.  Delivery requires explicit literal `NORYX CTO DELIVERY AUTHORIZATION: APPROVED`.
 9.  Default delivery target is `origin/main` unless the CTO explicitly designates another target. Normal delivery delivers the approved state directly to the approved target without an implicit extra merge stage.
@@ -280,21 +282,29 @@ migrations, tests, and commit SHAs.
 
 ---
 
-# 7. CTO Approval Gate
+# 7. CTO Proposal Approval & Implementation Authorization Gate
 
-The CTO reviews the contract and acceptance matrix.
+The CTO reviews the contract and acceptance matrix while the work item is in `PROPOSED`.
 
-Approval means:
+Proposal approval transitions the work item to:
 
 ```text
 CTO_APPROVED
 ```
 
-The implementation prompt must reference the approved contract rather
-than replaying the entire discussion.
+Proposal approval certifies the proposed architecture and scope. It does NOT itself authorize writing code.
 
-If changes are required, update the contract first, then obtain approval
-again.
+Implementation authorization requires the explicit instruction:
+
+```text
+NORYX CTO IMPLEMENTATION AUTHORIZATION: APPROVED
+```
+
+Upon receipt of this instruction, the work item transitions to `IMPLEMENTATION_AUTHORIZED`, permitting Claude to begin `IMPLEMENTING`.
+
+The implementation prompt must reference the approved contract rather than replaying the entire discussion.
+
+If changes are required, update the contract first, then obtain approval again.
 
 ---
 
@@ -892,31 +902,32 @@ A work item is DONE only when:
 
 ```text
 [ ] Approved contract exists
-[ ] CTO proposal approval recorded
+[ ] CTO proposal approval recorded (CTO_APPROVED)
+[ ] Explicit CTO implementation authorization recorded (IMPLEMENTATION_AUTHORIZED)
 [ ] Two-pass discovery maximum respected (Pass 1 or Pass 2)
 [ ] Scope respected (including authorized canonical file modifications)
 [ ] Two-pass implementation maximum respected (Pass 1 or Pass 2)
-[ ] Implementation complete
+[ ] Implementation complete (IMPLEMENTING)
 [ ] Required migrations verified
 [ ] Accounting invariants verified where applicable
 [ ] Tenant/RLS verified where applicable
 [ ] RBAC verified where applicable
 [ ] Concurrency verified where applicable
-[ ] Required scenario matrix PASS
+[ ] Required scenario matrix PASS (VERIFIED)
 [ ] Required regression PASS
 [ ] Typecheck PASS where required
 [ ] Lint PASS where required
 [ ] Build PASS where required
-[ ] Final commit created
-[ ] Completion report generated LAST
+[ ] Final commit created (COMMITTED)
+[ ] Completion report generated LAST (REPORT_GENERATED)
 [ ] Git bundle generated from final commit
-[ ] Bundle verified (verify + list-heads)
+[ ] Bundle verified (verify + list-heads) (BUNDLE_VERIFIED)
 [ ] Independent bundle fetch into fresh repository verified
 [ ] Delivery package complete and accessible
 [ ] CTO Quality-Gate Approval recorded (CTO_QUALITY_GATE)
-[ ] Explicit CTO Delivery Authorization recorded (NORYX CTO DELIVERY AUTHORIZATION: APPROVED)
-[ ] Antigravity delivered exact approved SHA to target (default: origin/main) without source modifications
-[ ] Remote SHA verified
+[ ] Explicit CTO Delivery Authorization recorded (DELIVERY_AUTHORIZED)
+[ ] Antigravity delivered exact approved SHA to target (default: origin/main) without source modifications (DELIVERED / PUSHED)
+[ ] Remote SHA verified (CTO_DELIVERY_VERIFIED)
 [ ] Work item CLOSED
 ```
 
