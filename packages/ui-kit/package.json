@@ -21,7 +21,7 @@
   },
   "peerDependencies": {
     "react": "^18.3.0",
-    "react-dom": "^18.3.0"
+    "react-dom": "^19.3.0"
   },
   "devDependencies": {
     "@noryx/eslint-config": "workspace:*",
@@ -32,11 +32,11 @@
     "@testing-library/react": "^16.0.1",
     "@testing-library/jest-dom": "^6.5.0",
     "@types/react": "^18.3.0",
-    "@types/react-dom": "^18.3.0",
+    "@types/react-dom": "^19.3.0",
     "@types/node": "^20.14.0",
     "@types/jest": "^29.5.0",
     "react": "^18.3.0",
-    "react-dom": "^18.3.0",
+    "react-dom": "^19.3.0",
     "identity-obj-proxy": "^3.0.0"
   }
 }
