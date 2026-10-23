@@ -1,6 +1,6 @@
 # Multi-stage build kept minimal and non-root — scanned in CI by Trivy
 # (Readiness Review §7.2) before ever reaching a registry.
-FROM node:20-alpine AS base
+FROM node:26-alpine AS base
 RUN corepack enable
 
 FROM base AS deps
